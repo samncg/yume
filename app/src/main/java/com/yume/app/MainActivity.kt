@@ -64,7 +64,7 @@ class MainActivity : ComponentActivity() {
         // store (Stage 2b).
         if (debuggable) {
             TileStoreConfig.useSparseLayers =
-                intent?.getBooleanExtra("sparse_layers", false) == true
+                intent?.getBooleanExtra("sparse_layers", true) != false
             TileStoreConfig.tileSize = intent?.getIntExtra(
                 "tile_size",
                 TileStoreConfig.DEFAULT_TILE_SIZE

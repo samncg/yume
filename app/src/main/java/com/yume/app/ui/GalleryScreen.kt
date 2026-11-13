@@ -79,6 +79,8 @@ private val CANVAS_SIZES = listOf(
     CanvasSize("A3 300dpi · 3508 × 4961", 3508, 4961),
     CanvasSize("HD 16:9 · 1920 × 1080", 1920, 1080),
     CanvasSize("4K 16:9 · 3840 × 2160", 3840, 2160),
+    CanvasSize("Square 6K · 6144 × 6144", 6144, 6144),
+    CanvasSize("Square 8K · 8192 × 8192", 8192, 8192),
     CanvasSize("Tall 9:16 · 2160 × 3840", 2160, 3840)
 )
 

@@ -238,10 +238,14 @@ interface TileStore : PixelSource {
     fun residentBytes(): Long
 }
 
-/** Debug-only storage configuration. The live default stays SingleTileStore. */
+/** Storage configuration. Since Stage 3c the live default is the sparse store. */
 object TileStoreConfig {
-    /** Select the sparse store for newly created layers (debug experiments). */
-    @Volatile var useSparseLayers: Boolean = false
+    /**
+     * Sparse tiled layers with the disk-backed tile cache (Stage 3c): what
+     * makes 6144² and 8192² documents possible. Debug builds can still pick
+     * the dense SingleTileStore for comparison.
+     */
+    @Volatile var useSparseLayers: Boolean = true
 
     /** Tile size used when [useSparseLayers] is on. */
     @Volatile var tileSize: Int = TileStore.TILE_SIZE

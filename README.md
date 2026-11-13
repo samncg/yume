@@ -796,15 +796,19 @@ so documents written by either store open in the other and in the old build.
 - **Deleting a mid-history step replays the steps after it.** Because pixel
   patches are rectangle based, a later undo of a replayed step can restore
   pixels of the deleted step where the rectangles overlap.
-- **Sparse layers are still opt-in.** With `useSparseLayers` on, layer pixels,
-  the composite, the per-tile history and the group/clipping/pre-stroke scratch
-  are all sparse or tile-sized. The switch nevertheless defaults to
-  `SingleTileStore` until eviction exists, because without a disk-backed LRU a
-  fully painted 8192² document still exceeds memory. That is why 6144² and 8192²
-  canvases stay refused by the memory guard. Debuggable builds get a **Sparse
-  tile layers** switch at the bottom of the Actions panel; it applies to
-  documents created or opened from then on (the open document keeps the storage
-  it loaded with, because the engine binds the mode when it creates a store).
+- **Sparse layers are the default (Stage 3c).** Layer pixels, the composite,
+  per-tile history and the group/clipping/pre-stroke scratch are sparse tiles,
+  and the tile cache evicts to disk, so 6144² and 8192² canvases are accepted
+  (the guard checks free storage instead of memory). Debuggable builds keep a
+  **Sparse tile layers** switch at the bottom of the Actions panel to compare
+  against the dense `SingleTileStore`; it applies to documents created or
+  opened from then on.
+- **Very large documents are slow to save and to paint under memory
+  pressure.** The 8K acceptance case (8192², 30 layers of noise, the worst
+  case) saves in about 3.5 minutes and paints at a p99 of 19 ms, panning a
+  cold 4096² × 30 document reaches 18.8 ms p99; normal documents stay far
+  inside the 120 Hz budget. Saves run in the background and never block the
+  canvas.
 - **There is no below/above composite cache.** A stroke composites every visible
   layer that actually has paint in each dirty tile. For a sparse stack that is
   already proportional to content (an empty layer costs a hash lookup, not a

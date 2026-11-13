@@ -900,3 +900,25 @@ feature=76-sharpen L0=c37ad379 L1=d29e2f3e/e068eda2 L2=a10526b2 L3=23eae7e1 C=0a
 feature=77-motion-blur-h L0=c37ad379 L1=d29e2f3e/e068eda2 L2=520ff77c L3=23eae7e1 C=2f3b15e4
 feature=78-motion-blur-33deg L0=c37ad379 L1=0a7e7801/e068eda2 L2=520ff77c L3=23eae7e1 C=32b08edb
 feature=79-motion-blur-undo L0=c37ad379 L1=d29e2f3e/e068eda2 L2=520ff77c L3=23eae7e1 C=2f3b15e4
+
+# --- Stage 3c gate (full harness, Nov 2026) ----------------------------------
+# Device: Xiaomi Pad 25091RP04C, debug build, full run 1875 s.
+# dense vs this file: 59/59 phases identical on 2048x2048 and 2000x1333;
+#   feature phases 59-79: 42/42 lines identical; sparse256/64 vs dense MATCH.
+# sparse256/sparse64 vs dense: phases 00-42 exact on both canvases. Phases
+#   43-58 differ only by the documented rotate/scale residue (phase 43:
+#   5 px, maxch 5, all tile-interior; later phases carry it: <= 51 px,
+#   maxch <= 5, < 0.0013% of the canvas). Within the README policy.
+# golden-evict (tiles 64/256, budgets 1 MB / 4 MB / evict-all): MATCH 59/59.
+# wand-legacy-delta: 19 of 72 cases changed, all on 2000x1333 (documented
+#   odd-height behaviour of the streaming wand); wand-stores PASS.
+# journal recover / torn-tail / corrupt / full-save: PASS
+# history-spill 2048x2048 steps=40 cap=4MB: PASS
+# cache-big 4096x4096 x30 (965 MB of layer pixels, 256 MB budget): reopen PASS
+#   painting p99 9.88 ms, panning p99 18.8 ms (above the 8.33 ms budget;
+#   tracked in README Known limitations).
+# accept-8k 8192x8192 x30: create, paint, transform, blur, merge, undo/redo,
+#   save, reopen PASS (hash aace48fd before = after); save 208 s,
+#   javaHeapPeak 151 MB, nativeHeapPeak 1043 MB, painting p99 19.1 ms.
+# Result: sparse tiled layers become the live default; 6144^2 and 8192^2
+#   canvases are accepted.
