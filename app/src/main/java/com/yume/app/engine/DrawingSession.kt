@@ -162,6 +162,12 @@ class DrawingSession(
     /** Colour tolerance for the automatic (magic wand) selection, 1..100. */
     @Volatile var wandTolerance: Int = 30
 
+    // Paint bucket / ColorDrop (Stage 4.1).
+    @Volatile var fillTolerance: Int = 30
+    @Volatile var fillLayerOnly: Boolean = false
+    @Volatile var fillSelection: Boolean = true
+    @Volatile var fillExpand: Int = 1
+
     /** Notified whenever the brush library changes so it can be persisted. */
     var onPresetsChanged: ((List<BrushPreset>) -> Unit)? = null
     /** Surfaces a message (such as a memory guard) to the editor UI. */
@@ -444,6 +450,7 @@ class DrawingSession(
                     tryGuideDrag(doc[0], doc[1]) -> Unit
                     tool == Tool.Selection -> beginSelectionOrMove(doc[0], doc[1])
                     tool == Tool.Transform -> beginTransformDrag(doc[0], doc[1])
+                    tool == Tool.Fill -> fillAtInternal(doc[0], doc[1], color, false)
                     else -> beginStroke(doc[0], doc[1], event.pressure, event.tilt, event.eraserButton)
                 }
                 true
@@ -610,7 +617,7 @@ class DrawingSession(
     private fun tryGuideDrag(x: Float, y: Float): Boolean {
         if (engine.symmetryLocked) return false
         if (!engine.symmetryX && !engine.symmetryY) return false
-        if (tool == Tool.Selection || tool == Tool.Transform) return false
+        if (tool == Tool.Selection || tool == Tool.Transform || tool == Tool.Fill) return false
         val threshold = 30f / max(view.scale, 0.0001f)
         if (engine.symmetryX && abs(x - engine.symmetryXPos) <= threshold) {
             draggingGuide = 1
@@ -916,7 +923,7 @@ class DrawingSession(
             Tool.Brush -> category = BrushCategory.Brush
             Tool.Eraser -> category = BrushCategory.Eraser
             Tool.Smudge -> category = BrushCategory.Smudge
-            Tool.Selection, Tool.Transform -> Unit
+            Tool.Selection, Tool.Transform, Tool.Fill -> Unit
         }
         if (newTool == Tool.Brush || newTool == Tool.Eraser || newTool == Tool.Smudge) {
             val list = presetsOf(category)
@@ -1042,6 +1049,125 @@ class DrawingSession(
 
     fun chooseEyedropperSource(layerOnly: Boolean) {
         eyedropperLayerOnly = layerOnly
+        requestState()
+    }
+
+    fun chooseFillTolerance(value: Int) {
+        fillTolerance = value.coerceIn(1, 100)
+        requestState()
+    }
+
+    fun chooseFillLayerOnly(value: Boolean) {
+        fillLayerOnly = value
+        requestState()
+    }
+
+    fun chooseFillSelection(value: Boolean) {
+        fillSelection = value
+        requestState()
+    }
+
+    fun chooseFillExpand(value: Int) {
+        fillExpand = value.coerceIn(0, 4)
+        requestState()
+    }
+
+    /** Paint bucket at a document point (harness / programmatic use). */
+    fun fillAt(x: Float, y: Float, color: Int = this.color) = post { fillAtInternal(x, y, color, false) }
+
+    /**
+     * ColorDrop: the colour chip was dragged onto the canvas and released at
+     * view coordinates ([vx], [vy]). Fills the region under it with the current
+     * colour, sampled from every visible layer as Procreate does.
+     */
+    fun colorDropAt(vx: Float, vy: Float) = post {
+        val doc = FloatArray(2)
+        view.toDocument(vx, vy, doc)
+        fillAtInternal(doc[0], doc[1], color, true)
+    }
+
+    /**
+     * Flood-fills the region around (x, y) on the active layer (or its mask).
+     *
+     * The region comes from the streaming wand grid at full resolution, over
+     * the composite or the current layer only, so a fill never materialises a
+     * canvas-sized bitmap. It is grown by [fillExpand] px so anti-aliased line
+     * edges do not leave a halo, clipped to the selection, and painted per tile
+     * through the store's write canvas with an integer-rect clip path, which is
+     * exact and identical on the dense and the sparse store.
+     */
+    private fun fillAtInternal(fx: Float, fy: Float, fillColor: Int, compositeOnly: Boolean) {
+        val layer = engine.activeLayer ?: return
+        if (!editable(layer)) return
+        if (adjusting) commitAdjustmentInternal()
+        val x = fx.toInt()
+        val y = fy.toInt()
+        if (x !in 0 until engine.width || y !in 0 until engine.height) return
+        val store = layer.paintStore
+        val mask = layer.editMask && layer.hasMask
+        val sel = engine.selection
+        val region: android.graphics.Region
+        if (fillSelection && sel != null && sel.contains(x, y)) {
+            region = android.graphics.Region(sel)
+        } else {
+            val grid = if (fillLayerOnly && !compositeOnly) {
+                WandGrid(
+                    engine.width, engine.height, 1,
+                    store as? SparseTileStore,
+                    if (store.isSparse) null else store.sharedBitmap(),
+                    if (store.isSparse) store.defaultPixel else 0
+                )
+            } else {
+                engine.compositeGrid(1)
+            }
+            region = try {
+                SelectionUtil.magicWandGrid(grid, x, y, fillTolerance)
+            } finally {
+                grid.release()
+            }
+            if (fillExpand > 0 && !region.isEmpty) {
+                val grown = android.graphics.Region(region)
+                val shifted = android.graphics.Region()
+                for (d in 1..fillExpand) {
+                    for ((dx, dy) in listOf(d to 0, -d to 0, 0 to d, 0 to -d)) {
+                        shifted.set(region)
+                        shifted.translate(dx, dy)
+                        grown.op(shifted, android.graphics.Region.Op.UNION)
+                    }
+                }
+                region.set(grown)
+            }
+            region.op(0, 0, engine.width, engine.height, android.graphics.Region.Op.INTERSECT)
+            if (sel != null) region.op(sel, android.graphics.Region.Op.INTERSECT)
+        }
+        if (region.isEmpty) return
+        val bounds = Rect(region.bounds)
+        if (!bounds.intersect(0, 0, engine.width, engine.height)) return
+        val capture = TileOps.capture(store, bounds)
+        val path = SelectionUtil.regionFillPath(region)
+        val paint = android.graphics.Paint().apply {
+            // Masks are alpha coverage (composited with DST_IN): a mask fill
+            // hides, exactly like painting a mask (DST_OUT) does.
+            color = if (mask) 0xFF000000.toInt() else fillColor
+            isAntiAlias = false
+            blendMode = when {
+                mask -> android.graphics.BlendMode.DST_OUT
+                layer.alphaLock -> android.graphics.BlendMode.SRC_ATOP
+                else -> android.graphics.BlendMode.SRC_OVER
+            }
+        }
+        store.withWriteCanvas(bounds) { c ->
+            val save = c.save()
+            c.clipPath(path)
+            c.drawPaint(paint)
+            c.restoreToCount(save)
+        }
+        engine.makeTilePatch(
+            layer, capture, bounds, "Fill", EditKind.LayerFill, "Tolerance $fillTolerance%", fillColor
+        )?.let { history.push(it) }
+        layer.touch()
+        engine.markDirty(bounds)
+        if (!mask) addRecent(fillColor)
         requestState()
     }
 
@@ -2177,6 +2303,10 @@ class DrawingSession(
             colorMode = colorMode,
             eyedropperLayerOnly = eyedropperLayerOnly,
             wandTolerance = wandTolerance,
+            fillTolerance = fillTolerance,
+            fillLayerOnly = fillLayerOnly,
+            fillSelection = fillSelection,
+            fillExpand = fillExpand,
             sparseLayers = TileStoreConfig.useSparseLayers,
             documentVersion = history.version + propertyVersion,
             backgroundColor = engine.backgroundColor,

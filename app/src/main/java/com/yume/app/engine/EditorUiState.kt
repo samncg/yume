@@ -68,6 +68,14 @@ data class EditorUiState(
     val eyedropperLayerOnly: Boolean = false,
     /** Colour tolerance used by the automatic (magic wand) selection. */
     val wandTolerance: Int = 30,
+    /** Paint bucket: colour tolerance (1-100). */
+    val fillTolerance: Int = 30,
+    /** Paint bucket: find the region on the current layer instead of the composite. */
+    val fillLayerOnly: Boolean = false,
+    /** Paint bucket: a tap inside the selection fills the whole selection. */
+    val fillSelection: Boolean = true,
+    /** Paint bucket: grow the region by this many px under anti-aliased edges. */
+    val fillExpand: Int = 1,
     /**
      * Debug: whether documents opened from now on use sparse tile layers.
      * Only surfaced in debuggable builds (Actions panel).

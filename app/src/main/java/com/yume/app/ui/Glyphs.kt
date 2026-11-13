@@ -29,7 +29,7 @@ enum class Glyph {
     Sliders, Share, Picture, Palette, FlipH, FlipV,
     Droplet, Info, ZoomIn, ZoomOut, Fit, Rotate, Sparkle,
     Grid, Home, Clear, Save, More, History,
-    Folder, Mask, Clip, Grip
+    Folder, Mask, Clip, Grip, Bucket
 }
 
 @Composable
@@ -118,6 +118,19 @@ private fun DrawScope.drawGlyph(glyph: Glyph, tint: Color, strokeScale: Float) {
         Glyph.Wrench -> {
             drawCircle(tint, 4.2f, Offset(15.5f, 8.5f), style = Stroke(thickWidth(strokeScale, 2.6f)))
             line(12.4f, 11.6f, 4.5f, 19.5f, 2.6f)
+        }
+
+        Glyph.Bucket -> {
+            // A tipped paint can with a falling drop.
+            path {
+                moveTo(5f, 11f); lineTo(11f, 5f); lineTo(18f, 12f); lineTo(12f, 18f); close()
+            }
+            line(8f, 8f, 4.5f, 4.5f, 1.5f)
+            path {
+                moveTo(19.5f, 14.5f)
+                quadraticBezierTo(21.5f, 17.5f, 19.5f, 19.5f)
+                quadraticBezierTo(17.5f, 17.5f, 19.5f, 14.5f)
+            }
         }
 
         Glyph.Wand -> {

@@ -148,6 +148,8 @@ object YumeHarness {
                     out.append(scoreCacheFailures(app))
                     out.append(scoreGoldenEvict(app))
                     out.append(scoreCacheBig(app))
+                } else if (only == "features") {
+                    out.append(scoreFeatures())
                 } else if (only == "accept8k") {
                     out.append(scoreAcceptance8k(app))
                 } else if (only == "journal") {
@@ -219,6 +221,7 @@ object YumeHarness {
                 out.append(scorePngParity(app))
                 out.append(scoreJournal(app))
                 out.append(line(scoreHistorySpill(app)))
+                out.append(scoreFeatures())
                 out.append(scoreFuzzEvict())
                 out.append(scoreCacheFailures(app))
                 out.append(scoreGoldenEvict(app))
@@ -3290,6 +3293,161 @@ object YumeHarness {
             TileStoreConfig.useSparseLayers = oldS
             TileStoreConfig.tileSize = oldT
             Runtime.getRuntime().gc()
+        }
+        return out.toString()
+    }
+
+
+    // ============================================================ Stage 4
+
+    /**
+     * Feature phases (Stage 4.1+), run on the dense oracle and on sparse
+     * stores at tile 64 and 256 on both golden canvases. Every phase must hash
+     * identically on all three stores; the dense lines are new oracle entries
+     * (the 00..58 golden phases are not touched).
+     */
+    private fun runFeatures(width: Int, height: Int): List<String> {
+        val sx = width / 2048f
+        val sy = height / 2048f
+        fun pts(vararg p: P) = p.map { P(it.x * sx, it.y * sy, it.pressure) }
+        val engine = DrawingEngine(width, height)
+        engine.backgroundColor = BG
+        val session = DrawingSession("features", "F", engine, History())
+        identityView(session, width, height)
+        session.presets = presets
+        session.activePresetId = hard.id
+        session.assist = 0f
+        session.quickShapeEnabled = false
+        session.category = BrushCategory.Brush
+        val phases = ArrayList<String>()
+        fun phase(name: String) {
+            session.runCommands()
+            engine.flush()
+            val sb = StringBuilder("feature=").append(name)
+            engine.layers.forEachIndexed { i, l -> sb.append(" L").append(i).append('=').append(hashLayer(l)) }
+            sb.append(" C=").append(compositeHash(engine))
+            phases.add(sb.toString())
+        }
+        // Base: closed outline shapes on two layers so fills have regions.
+        val base = engine.newLayer("Base")
+        engine.selectLayer(base.id)
+        session.color = 0xFF202020.toInt()
+        session.stroke(pts(P(300f, 300f), P(1700f, 300f), P(1700f, 1700f), P(300f, 1700f), P(300f, 300f)))
+        session.stroke(pts(P(300f, 1000f), P(1700f, 1000f)))
+        session.stroke(pts(P(1000f, 300f), P(1000f, 1700f)))
+        val top = engine.newLayer("Top")
+        engine.selectLayer(top.id)
+        session.color = 0xFFCC3344.toInt()
+        session.activePresetId = soft.id
+        session.stroke(pts(P(400f, 1300f), P(900f, 1600f)))
+        session.activePresetId = hard.id
+        phase("59-fill-base")
+
+        session.chooseTool(Tool.Fill)
+        session.fillLayerOnly = false
+        session.fillExpand = 1
+        session.fillTolerance = 30
+        session.color = 0xFF3366CC.toInt()
+        session.fillAt(600f * sx, 600f * sy)
+        phase("60-fill-composite")
+
+        engine.selectLayer(base.id)
+        session.fillLayerOnly = true
+        session.color = 0xFF55AA33.toInt()
+        session.fillAt(1400f * sx, 1400f * sy)
+        phase("61-fill-layer-only")
+
+        session.fillLayerOnly = false
+        session.fillExpand = 0
+        session.fillTolerance = 80
+        session.color = 0x8022AAEE.toInt()
+        session.fillAt(50f * sx, 50f * sy)
+        phase("62-fill-translucent-outside")
+
+        engine.applySelection(
+            android.graphics.Region(
+                (1100 * sx).toInt(), (350 * sy).toInt(), (1650 * sx).toInt(), (950 * sy).toInt()
+            ),
+            SelectionOp.Replace
+        )
+        session.fillSelection = true
+        session.color = 0xFFEEBB22.toInt()
+        session.fillAt(1300f * sx, 600f * sy)
+        phase("63-fill-selection")
+        session.fillSelection = false
+        session.color = 0xFF8844CC.toInt()
+        session.fillAt(1300f * sx, 600f * sy)
+        phase("64-fill-clipped-to-selection")
+        engine.setSelection(null)
+
+        session.toggleAlphaLock(top.id)
+        engine.selectLayer(top.id)
+        session.fillLayerOnly = true
+        session.fillTolerance = 30
+        session.color = 0xFF11CC88.toInt()
+        session.fillAt(600f * sx, 1400f * sy)
+        phase("65-fill-alpha-lock")
+        session.toggleAlphaLock(top.id)
+        session.runCommands()
+
+        engine.addMask(base)
+        engine.selectLayer(base.id)
+        base.editMask = true
+        session.fillLayerOnly = false
+        session.fillAt(1400f * sx, 600f * sy)
+        phase("66-fill-mask")
+        base.editMask = false
+
+        engine.selectLayer(top.id)
+        session.color = 0xFFFF7700.toInt()
+        session.colorDropAt(1400f * sx, 1400f * sy)
+        phase("67-colordrop")
+
+        session.undo()
+        session.undo()
+        phase("68-fill-undo2")
+        session.redo()
+        phase("69-fill-redo1")
+        session.chooseTool(Tool.Brush)
+        return phases
+    }
+
+    private fun scoreFeatures(): String {
+        val out = StringBuilder()
+        for ((w, h) in listOf(2048 to 2048, 2000 to 1333)) {
+            fun run(sparse: Boolean, tile: Int): List<String> {
+                val oldS = TileStoreConfig.useSparseLayers
+                val oldT = TileStoreConfig.tileSize
+                TileStoreConfig.useSparseLayers = sparse
+                TileStoreConfig.tileSize = tile
+                return try {
+                    runFeatures(w, h)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "features failed", t)
+                    listOf("FAILED ${t.javaClass.simpleName}: ${t.message}")
+                } finally {
+                    TileStoreConfig.useSparseLayers = oldS
+                    TileStoreConfig.tileSize = oldT
+                    Runtime.getRuntime().gc()
+                }
+            }
+            val dense = run(false, 256)
+            out.append("# features dense ${w}x$h\n")
+            dense.forEach { out.append(it).append('\n') }
+            for (tile in listOf(256, 64)) {
+                val sp = run(true, tile)
+                var bad = 0
+                var first = ""
+                for (i in 0 until max(dense.size, sp.size)) {
+                    if (dense.getOrNull(i) != sp.getOrNull(i)) {
+                        bad++
+                        if (first.isEmpty()) first = "\n  dense:  ${dense.getOrNull(i)}\n  sparse: ${sp.getOrNull(i)}"
+                    }
+                }
+                out.append("features sparse$tile-vs-dense ${w}x$h: ")
+                    .append(if (bad == 0) "MATCH" else "MISMATCH")
+                    .append(" (${dense.size} phases, $bad bad)").append(first).append('\n')
+            }
         }
         return out.toString()
     }

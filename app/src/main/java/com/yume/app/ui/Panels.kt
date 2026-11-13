@@ -81,7 +81,7 @@ import com.yume.app.engine.Tool
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-enum class PanelId { Layers, Brush, Color, Adjust, Selection, Actions, History }
+enum class PanelId { Layers, Brush, Color, Adjust, Selection, Actions, History, Fill }
 
 private const val PANEL_WIDTH = 348
 
@@ -1399,6 +1399,51 @@ private fun SmallButton(
             text = text,
             style = MaterialTheme.typography.bodySmall,
             color = if (enabled) YumeColors.text else YumeColors.textDim.copy(alpha = 0.5f)
+        )
+    }
+}
+
+// ======================================================================= fill
+
+@Composable
+fun FillPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {
+    PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
+        PanelHeader("Paint bucket", onClose)
+        YumeSlider(
+            value = state.fillTolerance / 100f,
+            onChange = { session.chooseFillTolerance((it * 100f).roundToInt()) },
+            label = "Tolerance",
+            valueLabel = "${state.fillTolerance}%",
+            min = 0.01f,
+            max = 1f
+        )
+        Spacer(Modifier.height(4.dp))
+        YumeSlider(
+            value = state.fillExpand / 4f,
+            onChange = { session.chooseFillExpand((it * 4f).roundToInt()) },
+            label = "Close edges",
+            valueLabel = "${state.fillExpand} px",
+            min = 0f,
+            max = 1f
+        )
+        Spacer(Modifier.height(8.dp))
+        SectionLabel("Sample")
+        Spacer(Modifier.height(6.dp))
+        SegmentedRow(
+            options = listOf("All layers", "Current layer"),
+            selectedIndex = if (state.fillLayerOnly) 1 else 0,
+            onSelect = { session.chooseFillLayerOnly(it == 1) }
+        )
+        Spacer(Modifier.height(4.dp))
+        ToggleRow(Glyph.Select, "Tap inside a selection fills it", state.fillSelection) {
+            session.chooseFillSelection(it)
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "Tap to fill a region with the current colour. You can also drag the " +
+                "colour chip onto the canvas from any tool.",
+            style = MaterialTheme.typography.bodySmall,
+            color = YumeColors.textDim
         )
     }
 }

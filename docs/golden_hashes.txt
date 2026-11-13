@@ -826,3 +826,37 @@ phase=58-edge-marker L0=75828c5b L1=a340a261/607ae157 L2=acb3259e/61a741de L3=05
 # of a tile (whole-tile pass; same pixels as a sub-rect pass), so later frames
 # do not read, or need resident, the layers below. Painted-stack p99 stays
 # inside the gates (4096^2 x10 4.86 ms, x30 5.16 ms; 2048^2 x30 5.03 ms < 6).
+
+# ============================================================================
+# Stage 4.1 feature oracle: paint bucket / ColorDrop (NEW entries, 59..69)
+# ============================================================================
+# Recorded on the dense store; sparse at tile 256 and 64 match on both
+# canvases (features sparse256/64-vs-dense: MATCH, 11 phases, 0 bad).
+# The fill region comes from the streaming wand grid at full resolution,
+# grown by "close edges" px, clipped to the selection, and painted per tile
+# through an integer-rect clip path, so it is exact on every store. A mask
+# fill hides (DST_OUT), like painting a mask.
+# features dense 2048x2048
+feature=59-fill-base L0=a47ca14a L1=8d452bf0 L2=bb4f823a C=14e888d9
+feature=60-fill-composite L0=a47ca14a L1=8d452bf0 L2=2a78e8d4 C=92682fd4
+feature=61-fill-layer-only L0=a47ca14a L1=3918d3cb L2=2a78e8d4 C=386fb0fe
+feature=62-fill-translucent-outside L0=a47ca14a L1=79cb260e L2=2a78e8d4 C=843658ae
+feature=63-fill-selection L0=a47ca14a L1=858db4b3 L2=2a78e8d4 C=d8cc409f
+feature=64-fill-clipped-to-selection L0=a47ca14a L1=2b65f507 L2=2a78e8d4 C=7624012b
+feature=65-fill-alpha-lock L0=a47ca14a L1=2b65f507 L2=dbf9a627 C=cf1bdd39
+feature=66-fill-mask L0=a47ca14a L1=2b65f507/26abd433 L2=dbf9a627 C=3d0984bc
+feature=67-colordrop L0=a47ca14a L1=2b65f507/26abd433 L2=e5164a59 C=36600b7e
+feature=68-fill-undo2 L0=a47ca14a L1=2b65f507/86175ebf L2=dbf9a627 C=cf1bdd39
+feature=69-fill-redo1 L0=a47ca14a L1=2b65f507/26abd433 L2=dbf9a627 C=3d0984bc
+# features dense 2000x1333
+feature=59-fill-base L0=c37ad379 L1=fe5ddbd8 L2=1f0b279d C=77ca3f48
+feature=60-fill-composite L0=c37ad379 L1=fe5ddbd8 L2=38177652 C=0c1f6e3f
+feature=61-fill-layer-only L0=c37ad379 L1=8eeb915d L2=38177652 C=39b54b6e
+feature=62-fill-translucent-outside L0=c37ad379 L1=2599c7e8 L2=38177652 C=94b3619b
+feature=63-fill-selection L0=c37ad379 L1=c6f1e60c L2=38177652 C=9a16233b
+feature=64-fill-clipped-to-selection L0=c37ad379 L1=d29e2f3e L2=38177652 C=8e79ea09
+feature=65-fill-alpha-lock L0=c37ad379 L1=d29e2f3e L2=f5a33c80 C=8a7394d3
+feature=66-fill-mask L0=c37ad379 L1=d29e2f3e/e068eda2 L2=f5a33c80 C=33c97fe3
+feature=67-colordrop L0=c37ad379 L1=d29e2f3e/e068eda2 L2=629f18ac C=ab11f3eb
+feature=68-fill-undo2 L0=c37ad379 L1=d29e2f3e/3ea610b8 L2=f5a33c80 C=8a7394d3
+feature=69-fill-redo1 L0=c37ad379 L1=d29e2f3e/e068eda2 L2=f5a33c80 C=33c97fe3

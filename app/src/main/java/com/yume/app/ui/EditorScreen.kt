@@ -41,6 +41,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -114,9 +119,14 @@ fun EditorScreen(controller: EditorController, onExit: () -> Unit) {
     BackHandler { onExit() }
 
     Box(Modifier.fillMaxSize().background(YumeColors.bg)) {
+        // Where the canvas sits in the window, so a ColorDrop released over it
+        // can be turned into canvas view coordinates.
+        var canvasOrigin by remember { mutableStateOf(Offset.Zero) }
         AndroidView(
             factory = { context -> CanvasView(context, session) },
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .onGloballyPositioned { canvasOrigin = it.positionInWindow() }
         )
 
         Column(Modifier.fillMaxSize()) {
@@ -136,7 +146,10 @@ fun EditorScreen(controller: EditorController, onExit: () -> Unit) {
                             else -> panelId
                         }
                     },
-                    onPanel = { id -> panel = if (panel == id) null else id }
+                    onPanel = { id -> panel = if (panel == id) null else id },
+                    onColorDrop = { window ->
+                        session.colorDropAt(window.x - canvasOrigin.x, window.y - canvasOrigin.y)
+                    }
                 )
             }
             // weight(1f), not fillMaxSize(): a non-weighted child of a Column is
@@ -287,6 +300,7 @@ private fun PanelHost(
             }
         )
         PanelId.Selection -> SelectionPanel(state, session, onClose)
+        PanelId.Fill -> FillPanel(state, session, onClose)
         PanelId.Actions -> ActionsPanel(
             state = state,
             session = session,
@@ -308,7 +322,8 @@ private fun EditorTopBar(
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onTool: (Tool, PanelId?) -> Unit,
-    onPanel: (PanelId) -> Unit
+    onPanel: (PanelId) -> Unit,
+    onColorDrop: (Offset) -> Unit = {}
 ) {
     Column(
         Modifier
@@ -392,6 +407,12 @@ private fun EditorTopBar(
                     size = 40.dp
                 )
                 YumeIconButton(
+                    Glyph.Bucket,
+                    { onTool(Tool.Fill, PanelId.Fill) },
+                    selected = state.tool == Tool.Fill,
+                    size = 40.dp
+                )
+                YumeIconButton(
                     Glyph.Layers,
                     { onPanel(PanelId.Layers) },
                     selected = activePanel == PanelId.Layers,
@@ -400,7 +421,8 @@ private fun EditorTopBar(
                 ColorChip(
                     color = state.color,
                     selected = activePanel == PanelId.Color,
-                    onClick = { onPanel(PanelId.Color) }
+                    onClick = { onPanel(PanelId.Color) },
+                    onDrop = onColorDrop
                 )
             }
         }
@@ -409,11 +431,35 @@ private fun EditorTopBar(
 }
 
 @Composable
-private fun ColorChip(color: Int, selected: Boolean, onClick: () -> Unit) {
+private fun ColorChip(
+    color: Int,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onDrop: (Offset) -> Unit = {}
+) {
+    // ColorDrop: drag the chip onto the canvas and release to fill the region
+    // under the finger. A tap still opens the colour panel.
+    var origin by remember { mutableStateOf(Offset.Zero) }
+    var dragAt by remember { mutableStateOf<Offset?>(null) }
     Box(
         Modifier
             .size(40.dp)
             .clip(RoundedCornerShape(13.dp))
+            .onGloballyPositioned { origin = it.positionInWindow() }
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = { dragAt = origin + it },
+                    onDrag = { change, amount ->
+                        change.consume()
+                        dragAt = (dragAt ?: origin) + amount
+                    },
+                    onDragEnd = {
+                        dragAt?.let(onDrop)
+                        dragAt = null
+                    },
+                    onDragCancel = { dragAt = null }
+                )
+            }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
