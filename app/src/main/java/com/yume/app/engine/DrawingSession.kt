@@ -272,6 +272,17 @@ class DrawingSession(
     private var qsCenterY = 0f
     private var qsPressure = 1f
 
+    /** Liquify tool settings and engine. */
+    @Volatile var liquifyMode: LiquifyMode = LiquifyMode.Push
+        private set
+    @Volatile var liquifySize: Float = 160f
+        private set
+    @Volatile var liquifyStrength: Float = 0.5f
+        private set
+    private val liquify by lazy { Liquify(engine) }
+    private var liquifyLastX = 0f
+    private var liquifyLastY = 0f
+
     /** Shape tool settings. */
     @Volatile var shapeKind: ShapeKind = ShapeKind.Ellipse
         private set
@@ -549,6 +560,7 @@ class DrawingSession(
                     tool == Tool.Fill -> fillAtInternal(doc[0], doc[1], color, false)
                     tool == Tool.Gradient -> gradientGuide = floatArrayOf(doc[0], doc[1], doc[0], doc[1])
                     tool == Tool.Shape -> beginShape(doc[0], doc[1], event.pressure)
+                    tool == Tool.Liquify -> beginLiquify(doc[0], doc[1])
                     else -> beginStroke(doc[0], doc[1], event.pressure, event.tilt, event.eraserButton)
                 }
                 true
@@ -561,6 +573,10 @@ class DrawingSession(
                     when {
                         draggingHandle != NO_HANDLE -> {
                             moveHandle(doc[0], doc[1])
+                            changed = true
+                        }
+                        liquify.active -> {
+                            moveLiquify(doc[0], doc[1], event.pressures[i])
                             changed = true
                         }
                         draggingGuide != 0 -> {
@@ -639,6 +655,7 @@ class DrawingSession(
                         touchProperties()
                     }
                     draggingGuide != 0 -> draggingGuide = 0
+                    liquify.active -> liquify.end()?.let { history.push(it) }
                     painter.isActive -> endStroke()
                     movingSelection -> {
                         movingSelection = false
@@ -1019,6 +1036,56 @@ class DrawingSession(
         for (k in 1 until shape.size) painter.move(shape.xs[k], shape.ys[k], pressure, 0f)
     }
 
+    // ------------------------------------------------------------- liquify
+
+    private fun beginLiquify(x: Float, y: Float) {
+        val layer = engine.activeLayer ?: return
+        if (!layer.visible || !editable(layer)) return
+        if (adjusting) commitAdjustmentInternal()
+        liquify.begin(layer)
+        liquifyLastX = x
+        liquifyLastY = y
+        // Twirl, pinch, expand and restore act on a press that does not move.
+        if (liquifyMode != LiquifyMode.Push) liquify.dab(liquifyMode, x, y, liquifySize / 2f, 0f, 0f, liquifyStrength)
+    }
+
+    /** Dabs along the pen's path, a quarter of the radius apart. */
+    private fun moveLiquify(x: Float, y: Float, pressure: Float) {
+        val r = liquifySize / 2f
+        val dist = hypot(x - liquifyLastX, y - liquifyLastY)
+        val step = max(2f, r * 0.25f)
+        if (dist < step) return
+        val n = (dist / step).toInt().coerceIn(1, 64)
+        val strength = liquifyStrength * (0.35f + 0.65f * pressure.coerceIn(0f, 1f))
+        val dx = (x - liquifyLastX) / n
+        val dy = (y - liquifyLastY) / n
+        for (k in 1..n) {
+            val t = k / n.toFloat()
+            liquify.dab(
+                liquifyMode,
+                liquifyLastX + (x - liquifyLastX) * t, liquifyLastY + (y - liquifyLastY) * t,
+                r, dx, dy, strength
+            )
+        }
+        liquifyLastX = x
+        liquifyLastY = y
+    }
+
+    fun setLiquifyMode(mode: LiquifyMode) {
+        liquifyMode = mode
+        requestState()
+    }
+
+    fun setLiquifySize(value: Float) {
+        liquifySize = value.coerceIn(8f, 1200f)
+        requestState()
+    }
+
+    fun setLiquifyStrength(value: Float) {
+        liquifyStrength = value.coerceIn(0.02f, 1f)
+        requestState()
+    }
+
     // ------------------------------------------------------------ shape tool
 
     private var shapeStartX = 0f
@@ -1301,6 +1368,7 @@ class DrawingSession(
         if (adjusting) {
             post { commitAdjustmentInternal() }
         }
+        if (tool == Tool.Liquify && newTool != Tool.Liquify) post { liquify.releaseBase() }
         tool = newTool
         when (newTool) {
             Tool.Brush -> category = BrushCategory.Brush
@@ -2912,6 +2980,9 @@ class DrawingSession(
             assist = assist,
             quickShape = quickShapeEnabled,
             shapeKind = shapeKind,
+            liquifyMode = liquifyMode,
+            liquifySize = liquifySize,
+            liquifyStrength = liquifyStrength,
             shapePerfect = shapePerfect,
             shapeSides = shapeSides,
             history = historyCache,

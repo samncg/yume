@@ -1928,6 +1928,62 @@ fun GradientPanel(state: EditorUiState, session: DrawingSession, onClose: () -> 
     }
 }
 
+// ================================================================== liquify
+
+@Composable
+fun LiquifyPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {
+    PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
+        PanelHeader("Liquify", onClose)
+        val modes = com.yume.app.engine.LiquifyMode.entries
+        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            modes.chunked(3).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    row.forEach { m ->
+                        val selected = m == state.liquifyMode
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (selected) YumeColors.accentSoft else YumeColors.panelAlt)
+                                .clickable { session.setLiquifyMode(m) }
+                                .padding(vertical = 9.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                m.label,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (selected) YumeColors.accent else YumeColors.text
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        YumeSlider(
+            value = state.liquifySize,
+            onChange = { session.setLiquifySize(it) },
+            label = "Size",
+            valueLabel = "${state.liquifySize.roundToInt()} px",
+            min = 16f,
+            max = 800f
+        )
+        YumeSlider(
+            value = state.liquifyStrength,
+            onChange = { session.setLiquifyStrength(it) },
+            label = "Strength",
+            valueLabel = formatPercent(state.liquifyStrength)
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "Drag on the canvas to push pixels; twirl, pinch and expand also work held in place. " +
+                "Restore brings back the layer as it was when you started liquifying it.",
+            style = MaterialTheme.typography.bodySmall,
+            color = YumeColors.textDim
+        )
+    }
+}
+
 // ================================================================== guides
 
 @Composable

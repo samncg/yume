@@ -404,7 +404,7 @@ private fun PanelHost(
         PanelId.Gradient -> GradientPanel(state, session, onClose)
         PanelId.Shape -> ShapePanel(state, session, onClose)
         PanelId.Guides -> GuidesPanel(state, session, onClose)
-        PanelId.Liquify -> Unit
+        PanelId.Liquify -> LiquifyPanel(state, session, onClose)
         PanelId.Actions -> ActionsPanel(
             state = state,
             session = session,
@@ -502,6 +502,9 @@ private fun EditorTopBar(
                 },
                 CapsuleItem(Glyph.Shape, "Shape", selected = state.tool == Tool.Shape) {
                     onTool(Tool.Shape, PanelId.Shape)
+                },
+                CapsuleItem(Glyph.Liquify, "Liquify", selected = state.tool == Tool.Liquify) {
+                    onTool(Tool.Liquify, PanelId.Liquify)
                 }
             ),
             onAnchor = onAnchor
