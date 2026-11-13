@@ -29,7 +29,8 @@ enum class Glyph {
     Sliders, Share, Picture, Palette, FlipH, FlipV,
     Droplet, Info, ZoomIn, ZoomOut, Fit, Rotate, Sparkle,
     Grid, Home, Clear, Save, More, History,
-    Folder, Mask, Clip, Grip, Bucket, Gradient, Pin
+    Folder, Mask, Clip, Grip, Bucket, Gradient, Pin,
+    Shape, Liquify, Text, Guides
 }
 
 @Composable
@@ -120,6 +121,39 @@ private fun DrawScope.drawGlyph(glyph: Glyph, tint: Color, strokeScale: Float) {
             line(12.4f, 11.6f, 4.5f, 19.5f, 2.6f)
         }
 
+        Glyph.Shape -> {
+            // A circle overlapping a square.
+            drawCircle(tint, 5.2f, Offset(9f, 9.5f), style = stroke)
+            drawRoundRect(
+                tint, Offset(10.5f, 11f), Size(9f, 9f),
+                androidx.compose.ui.geometry.CornerRadius(1.6f, 1.6f), style = stroke
+            )
+        }
+        Glyph.Liquify -> {
+            // A swirl pulled out of a point.
+            path {
+                moveTo(12f, 12f)
+                cubicTo(13.8f, 10.6f, 15.4f, 12.6f, 14f, 14.4f)
+                cubicTo(12f, 17f, 7.6f, 15.6f, 7.6f, 12f)
+                cubicTo(7.6f, 7.6f, 13f, 5.6f, 16.4f, 8f)
+                cubicTo(19.4f, 10.2f, 19.6f, 15.6f, 16.4f, 18.4f)
+            }
+        }
+        Glyph.Text -> {
+            line(6f, 5.5f, 18f, 5.5f)
+            line(12f, 5.5f, 12f, 19f)
+            line(9.5f, 19f, 14.5f, 19f)
+        }
+        Glyph.Guides -> {
+            // Two lines converging on a vanishing point, plus a ruler tick row.
+            line(3.5f, 18.5f, 12f, 6f)
+            line(20.5f, 18.5f, 12f, 6f)
+            line(3.5f, 18.5f, 20.5f, 18.5f)
+            line(8f, 18.5f, 8f, 16.6f, 1.4f)
+            line(12f, 18.5f, 12f, 16.6f, 1.4f)
+            line(16f, 18.5f, 16f, 16.6f, 1.4f)
+            dot(12f, 6f, 1.6f)
+        }
         Glyph.Pin -> {
             // A push pin: cap, tapered body flaring to a collar, then the needle.
             line(8f, 4f, 16f, 4f)

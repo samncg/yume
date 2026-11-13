@@ -99,7 +99,7 @@ import com.yume.app.engine.Tool
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-enum class PanelId { Layers, Brush, Color, Adjust, Selection, Actions, History, Fill, Gradient }
+enum class PanelId { Layers, Brush, Color, Adjust, Selection, Actions, History, Fill, Gradient, Shape, Liquify, Guides }
 
 private const val PANEL_WIDTH = 348
 
@@ -1907,6 +1907,46 @@ fun GradientPanel(state: EditorUiState, session: DrawingSession, onClose: () -> 
         Text(
             text = "Drag across the canvas: from the current colour to the end colour. " +
                 "The gradient covers the layer, clipped to the selection.",
+            style = MaterialTheme.typography.bodySmall,
+            color = YumeColors.textDim
+        )
+    }
+}
+
+// ================================================================== shapes
+
+@Composable
+fun ShapePanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {
+    PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
+        PanelHeader("Shape", onClose)
+        SegmentedRow(
+            options = com.yume.app.engine.ShapeKind.entries.map { it.label },
+            selectedIndex = state.shapeKind.ordinal,
+            onSelect = { session.setShapeKind(com.yume.app.engine.ShapeKind.entries[it]) }
+        )
+        val kind = state.shapeKind
+        if (kind == com.yume.app.engine.ShapeKind.Polygon || kind == com.yume.app.engine.ShapeKind.Star) {
+            Spacer(Modifier.height(10.dp))
+            YumeSlider(
+                value = state.shapeSides.toFloat(),
+                onChange = { session.setShapeSides(it.roundToInt()) },
+                label = if (kind == com.yume.app.engine.ShapeKind.Star) "Points" else "Sides",
+                valueLabel = state.shapeSides.toString(),
+                min = 3f,
+                max = 12f
+            )
+        }
+        if (kind == com.yume.app.engine.ShapeKind.Rectangle || kind == com.yume.app.engine.ShapeKind.Ellipse) {
+            Spacer(Modifier.height(6.dp))
+            ToggleRow(Glyph.Shape, "Perfect square / circle", state.shapePerfect) { session.setShapePerfect(it) }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = when (kind) {
+                com.yume.app.engine.ShapeKind.Polygon, com.yume.app.engine.ShapeKind.Star ->
+                    "Press at the centre and drag out: the distance sets the size, the direction turns it."
+                else -> "Drag across the canvas. The shape is drawn with the current brush and colour."
+            },
             style = MaterialTheme.typography.bodySmall,
             color = YumeColors.textDim
         )

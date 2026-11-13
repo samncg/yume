@@ -69,7 +69,9 @@ import kotlin.math.sin
 private const val TOP_BAR_HEIGHT = 54
 
 /** Panels that belong to a tool: they open on a second tap of that tool. */
-private val TOOL_PANELS = setOf(PanelId.Brush, PanelId.Fill, PanelId.Gradient, PanelId.Selection)
+private val TOOL_PANELS = setOf(
+    PanelId.Brush, PanelId.Fill, PanelId.Gradient, PanelId.Selection, PanelId.Shape, PanelId.Liquify
+)
 
 @Composable
 fun EditorScreen(
@@ -398,6 +400,8 @@ private fun PanelHost(
         PanelId.Selection -> SelectionPanel(state, session, onClose)
         PanelId.Fill -> FillPanel(state, session, onClose)
         PanelId.Gradient -> GradientPanel(state, session, onClose)
+        PanelId.Shape -> ShapePanel(state, session, onClose)
+        PanelId.Liquify, PanelId.Guides -> Unit
         PanelId.Actions -> ActionsPanel(
             state = state,
             session = session,
@@ -489,6 +493,9 @@ private fun EditorTopBar(
                 },
                 CapsuleItem(Glyph.Gradient, "Gradient", selected = state.tool == Tool.Gradient) {
                     onTool(Tool.Gradient, PanelId.Gradient)
+                },
+                CapsuleItem(Glyph.Shape, "Shape", selected = state.tool == Tool.Shape) {
+                    onTool(Tool.Shape, PanelId.Shape)
                 }
             ),
             onAnchor = onAnchor

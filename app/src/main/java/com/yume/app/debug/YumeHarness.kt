@@ -173,6 +173,8 @@ object YumeHarness {
                 } else if (only == "solids") {
                     out.append(scoreSparseStore())
                     out.append(scoreSolidMemory())
+                } else if (only == "shapes") {
+                    out.append(scoreShapes())
                 } else if (only == "dab") {
                     out.append(line(scoreDabScratch()))
                 } else if (only == "paint") {
@@ -5676,4 +5678,84 @@ object YumeHarness {
     }
 
     private fun line(text: String): String = "$text\n"
+
+    /**
+     * QuickShape recognition on synthetic hand-drawn strokes: each case is a
+     * known shape with wobble, uneven speed and an imperfect closure, and must
+     * come back as the expected kind (or as nothing, for a scribble).
+     */
+    private fun scoreShapes(): String {
+        val sb = StringBuilder()
+        val rnd = java.util.Random(7)
+        fun noisy(xs: List<Float>, ys: List<Float>, amp: Float): Pair<FloatArray, FloatArray> {
+            val nx = FloatArray(xs.size) { xs[it] + (rnd.nextGaussian() * amp).toFloat() }
+            val ny = FloatArray(ys.size) { ys[it] + (rnd.nextGaussian() * amp).toFloat() }
+            return nx to ny
+        }
+        fun polyline(px: FloatArray, py: FloatArray, per: Int): Pair<List<Float>, List<Float>> {
+            val xs = ArrayList<Float>(); val ys = ArrayList<Float>()
+            for (k in 0 until px.size - 1) for (t in 0 until per) {
+                val f = t / per.toFloat()
+                xs.add(px[k] + (px[k + 1] - px[k]) * f); ys.add(py[k] + (py[k + 1] - py[k]) * f)
+            }
+            xs.add(px.last()); ys.add(py.last())
+            return xs to ys
+        }
+        fun ellipsePts(cx: Float, cy: Float, a: Float, b: Float, rot: Float, sweep: Double, n: Int): Pair<List<Float>, List<Float>> {
+            val xs = ArrayList<Float>(); val ys = ArrayList<Float>()
+            for (k in 0..n) {
+                // Uneven speed: fast through the middle of each quarter.
+                val u = k / n.toDouble()
+                val t = sweep * (u + 0.04 * kotlin.math.sin(8 * Math.PI * u))
+                val ex = a * kotlin.math.cos(t).toFloat(); val ey = b * kotlin.math.sin(t).toFloat()
+                xs.add(cx + ex * kotlin.math.cos(rot) - ey * kotlin.math.sin(rot))
+                ys.add(cy + ex * kotlin.math.sin(rot) + ey * kotlin.math.cos(rot))
+            }
+            return xs to ys
+        }
+        data class Case(val name: String, val want: String?, val pts: Pair<FloatArray, FloatArray>)
+        val cases = ArrayList<Case>()
+        run {
+            val (x, y) = polyline(floatArrayOf(100f, 900f), floatArrayOf(200f, 520f), 80)
+            cases.add(Case("line", "line", noisy(x, y, 2.5f)))
+        }
+        run {
+            val (x, y) = ellipsePts(500f, 500f, 300f, 300f, 0f, 2 * Math.PI * 1.03, 160)
+            cases.add(Case("circle", "circle", noisy(x, y, 4f)))
+        }
+        run {
+            val (x, y) = ellipsePts(500f, 500f, 380f, 190f, 0.4f, 2 * Math.PI * 0.97, 160)
+            cases.add(Case("ellipse", "ellipse", noisy(x, y, 4f)))
+        }
+        run {
+            val (x, y) = polyline(floatArrayOf(200f, 800f, 800f, 200f, 205f), floatArrayOf(200f, 210f, 600f, 590f, 215f), 40)
+            cases.add(Case("rectangle", "rectangle", noisy(x, y, 3f)))
+        }
+        run {
+            val (x, y) = polyline(floatArrayOf(500f, 820f, 180f, 495f), floatArrayOf(150f, 700f, 690f, 160f), 50)
+            cases.add(Case("triangle", "triangle", noisy(x, y, 3f)))
+        }
+        run {
+            val (x, y) = polyline(floatArrayOf(100f, 400f, 700f), floatArrayOf(600f, 150f, 600f), 50)
+            cases.add(Case("polyline", "polyline", noisy(x, y, 2.5f)))
+        }
+        run {
+            val xs = ArrayList<Float>(); val ys = ArrayList<Float>()
+            var px = 500f; var py = 500f
+            for (k in 0 until 200) {
+                px += (rnd.nextFloat() - 0.5f) * 60f; py += (rnd.nextFloat() - 0.5f) * 60f
+                xs.add(px); ys.add(py)
+            }
+            cases.add(Case("scribble", null, xs.toFloatArray() to ys.toFloatArray()))
+        }
+        var bad = 0
+        for (c in cases) {
+            val got = com.yume.app.engine.ShapeGeometry.recognize(c.pts.first, c.pts.second, c.pts.first.size)?.kind
+            val ok = got == c.want
+            if (!ok) bad++
+            sb.append("shape ${c.name}: want=${c.want} got=$got ${if (ok) "ok" else "BAD"}\n")
+        }
+        sb.append("shapes: ${if (bad == 0) "PASS" else "FAIL"} (${cases.size} cases, $bad bad)\n")
+        return sb.toString()
+    }
 }
