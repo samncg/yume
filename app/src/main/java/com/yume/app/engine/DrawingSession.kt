@@ -168,6 +168,13 @@ class DrawingSession(
     @Volatile var fillSelection: Boolean = true
     @Volatile var fillExpand: Int = 1
 
+    // Gradient tool (Stage 4.1).
+    @Volatile var gradientKind: Gradients.Kind = Gradients.Kind.Linear
+    /** End colour. Defaults to transparent, i.e. "fade out the current colour". */
+    @Volatile var gradientSecond: Int = 0x00FFFFFF
+    /** Drag guide shown while placing a gradient: x0, y0, x1, y1 in document px. */
+    @Volatile var gradientGuide: FloatArray? = null
+
     /** Notified whenever the brush library changes so it can be persisted. */
     var onPresetsChanged: ((List<BrushPreset>) -> Unit)? = null
     /** Surfaces a message (such as a memory guard) to the editor UI. */
@@ -451,6 +458,7 @@ class DrawingSession(
                     tool == Tool.Selection -> beginSelectionOrMove(doc[0], doc[1])
                     tool == Tool.Transform -> beginTransformDrag(doc[0], doc[1])
                     tool == Tool.Fill -> fillAtInternal(doc[0], doc[1], color, false)
+                    tool == Tool.Gradient -> gradientGuide = floatArrayOf(doc[0], doc[1], doc[0], doc[1])
                     else -> beginStroke(doc[0], doc[1], event.pressure, event.tilt, event.eraserButton)
                 }
                 true
@@ -488,6 +496,11 @@ class DrawingSession(
                             updateSelection(doc[0], doc[1])
                             changed = true
                         }
+                        tool == Tool.Gradient && gradientGuide != null -> {
+                            val g = gradientGuide!!
+                            gradientGuide = floatArrayOf(g[0], g[1], doc[0], doc[1])
+                            changed = true
+                        }
                         draggingTransform -> {
                             transform?.translate(doc[0] - dragLastDocX, doc[1] - dragLastDocY)
                             dragLastDocX = doc[0]
@@ -510,6 +523,14 @@ class DrawingSession(
             }
 
             is InputEvent.Up -> {
+                val guide = gradientGuide
+                if (tool == Tool.Gradient && guide != null) {
+                    gradientGuide = null
+                    // A tap (no drag) does nothing: a gradient needs a direction.
+                    if (hypot(guide[2] - guide[0], guide[3] - guide[1]) * view.scale > 6f) {
+                        applyGradientInternal(guide[0], guide[1], guide[2], guide[3])
+                    }
+                }
                 when {
                     draggingGuide != 0 -> draggingGuide = 0
                     painter.isActive -> endStroke()
@@ -617,7 +638,11 @@ class DrawingSession(
     private fun tryGuideDrag(x: Float, y: Float): Boolean {
         if (engine.symmetryLocked) return false
         if (!engine.symmetryX && !engine.symmetryY) return false
-        if (tool == Tool.Selection || tool == Tool.Transform || tool == Tool.Fill) return false
+        if (tool == Tool.Selection || tool == Tool.Transform || tool == Tool.Fill ||
+            tool == Tool.Gradient
+        ) {
+            return false
+        }
         val threshold = 30f / max(view.scale, 0.0001f)
         if (engine.symmetryX && abs(x - engine.symmetryXPos) <= threshold) {
             draggingGuide = 1
@@ -923,7 +948,7 @@ class DrawingSession(
             Tool.Brush -> category = BrushCategory.Brush
             Tool.Eraser -> category = BrushCategory.Eraser
             Tool.Smudge -> category = BrushCategory.Smudge
-            Tool.Selection, Tool.Transform, Tool.Fill -> Unit
+            Tool.Selection, Tool.Transform, Tool.Fill, Tool.Gradient -> Unit
         }
         if (newTool == Tool.Brush || newTool == Tool.Eraser || newTool == Tool.Smudge) {
             val list = presetsOf(category)
@@ -1168,6 +1193,89 @@ class DrawingSession(
         layer.touch()
         engine.markDirty(bounds)
         if (!mask) addRecent(fillColor)
+        requestState()
+    }
+
+    fun chooseGradientKind(kind: Gradients.Kind) {
+        gradientKind = kind
+        requestState()
+    }
+
+    fun chooseGradientSecond(value: Int) {
+        gradientSecond = value
+        requestState()
+    }
+
+    /** Swaps the current colour and the gradient's end colour. */
+    fun swapGradientColors() {
+        val second = gradientSecond
+        // A transparent end colour swaps to an opaque start: keep its RGB.
+        gradientSecond = color
+        color = if ((second ushr 24) == 0) second or 0xFF000000.toInt() else second
+        requestState()
+    }
+
+    /** Applies a gradient from (x0, y0) to (x1, y1) in document px (harness / API). */
+    fun applyGradient(x0: Float, y0: Float, x1: Float, y1: Float) = post {
+        applyGradientInternal(x0, y0, x1, y1)
+    }
+
+    /**
+     * Paints the gradient over the whole active layer (or mask), clipped to the
+     * selection. The pixels are generated 256 px at a time and blitted 1:1, so
+     * neither store needs a canvas-sized bitmap and both produce the same bytes.
+     */
+    private fun applyGradientInternal(x0: Float, y0: Float, x1: Float, y1: Float) {
+        val layer = engine.activeLayer ?: return
+        if (!editable(layer)) return
+        if (adjusting) commitAdjustmentInternal()
+        val store = layer.paintStore
+        val mask = layer.editMask && layer.hasMask
+        val sel = engine.selection
+        val bounds = Rect(0, 0, engine.width, engine.height)
+        if (sel != null && !bounds.intersect(sel.bounds)) return
+        val capture = TileOps.capture(store, bounds)
+        val selPath = sel?.let { SelectionUtil.regionFillPath(it) }
+        val c1 = color
+        val c2 = gradientSecond
+        val kind = gradientKind
+        val paint = android.graphics.Paint().apply {
+            isFilterBitmap = false
+            blendMode = when {
+                mask -> android.graphics.BlendMode.DST_OUT
+                layer.alphaLock -> android.graphics.BlendMode.SRC_ATOP
+                else -> android.graphics.BlendMode.SRC_OVER
+            }
+        }
+        val clip = Rect()
+        val chunk = 256
+        val px = IntArray(chunk * chunk)
+        store.withWriteCanvas(bounds) { c ->
+            if (!c.getClipBounds(clip)) return@withWriteCanvas
+            val save = c.save()
+            if (selPath != null) c.clipPath(selPath)
+            var cy = clip.top
+            while (cy < clip.bottom) {
+                val ch = minOf(chunk, clip.bottom - cy)
+                var cx = clip.left
+                while (cx < clip.right) {
+                    val cw = minOf(chunk, clip.right - cx)
+                    Gradients.render(kind, x0, y0, x1, y1, c1, c2, cx, cy, cw, ch, px)
+                    val bmp = TileOps.scratch(cw, ch)
+                    bmp.setPixels(px, 0, cw, 0, 0, cw, ch)
+                    c.drawBitmap(bmp, cx.toFloat(), cy.toFloat(), paint)
+                    cx += cw
+                }
+                cy += ch
+            }
+            c.restoreToCount(save)
+        }
+        engine.makeTilePatch(
+            layer, capture, bounds, "Gradient", EditKind.LayerFill, kind.label, c1
+        )?.let { history.push(it) }
+        layer.touch()
+        engine.markDirty(bounds)
+        if (!mask) addRecent(c1)
         requestState()
     }
 
@@ -2307,6 +2415,8 @@ class DrawingSession(
             fillLayerOnly = fillLayerOnly,
             fillSelection = fillSelection,
             fillExpand = fillExpand,
+            gradientKind = gradientKind,
+            gradientSecond = gradientSecond,
             sparseLayers = TileStoreConfig.useSparseLayers,
             documentVersion = history.version + propertyVersion,
             backgroundColor = engine.backgroundColor,

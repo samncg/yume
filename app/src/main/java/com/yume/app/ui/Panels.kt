@@ -81,7 +81,7 @@ import com.yume.app.engine.Tool
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-enum class PanelId { Layers, Brush, Color, Adjust, Selection, Actions, History, Fill }
+enum class PanelId { Layers, Brush, Color, Adjust, Selection, Actions, History, Fill, Gradient }
 
 private const val PANEL_WIDTH = 348
 
@@ -1442,6 +1442,41 @@ fun FillPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit
         Text(
             text = "Tap to fill a region with the current colour. You can also drag the " +
                 "colour chip onto the canvas from any tool.",
+            style = MaterialTheme.typography.bodySmall,
+            color = YumeColors.textDim
+        )
+    }
+}
+
+// =================================================================== gradient
+
+@Composable
+fun GradientPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {
+    PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
+        PanelHeader("Gradient", onClose)
+        SegmentedRow(
+            options = com.yume.app.engine.Gradients.Kind.entries.map { it.label },
+            selectedIndex = state.gradientKind.ordinal,
+            onSelect = { session.chooseGradientKind(com.yume.app.engine.Gradients.Kind.entries[it]) }
+        )
+        Spacer(Modifier.height(10.dp))
+        SectionLabel("End colour")
+        Spacer(Modifier.height(6.dp))
+        val transparent = (state.gradientSecond ushr 24) == 0
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmallButton(if (transparent) "• Transparent" else "Transparent") {
+                session.chooseGradientSecond(state.color and 0x00FFFFFF)
+            }
+            SmallButton("Swap") { session.swapGradientColors() }
+        }
+        if (state.recentColors.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            SwatchGrid(state.recentColors) { picked -> session.chooseGradientSecond(picked) }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "Drag across the canvas: from the current colour to the end colour. " +
+                "The gradient covers the layer, clipped to the selection.",
             style = MaterialTheme.typography.bodySmall,
             color = YumeColors.textDim
         )

@@ -3408,6 +3408,50 @@ object YumeHarness {
         phase("68-fill-undo2")
         session.redo()
         phase("69-fill-redo1")
+
+        // Gradients (Stage 4.1): linear opaque-to-opaque, radial fade to
+        // transparent, inside a selection, under alpha lock, on a mask, undo.
+        session.chooseTool(Tool.Gradient)
+        val g = engine.newLayer("Gradient")
+        // Semi-transparent so later edits to the layers below still show in C.
+        g.opacity = 0.6f
+        engine.selectLayer(g.id)
+        session.color = 0xFF2040C0.toInt()
+        session.gradientKind = com.yume.app.engine.Gradients.Kind.Linear
+        session.gradientSecond = 0xFFF0C030.toInt()
+        session.applyGradient(100f * sx, 200f * sy, 1900f * sx, 1700f * sy)
+        phase("70-gradient-linear")
+        session.color = 0xFFCC2266.toInt()
+        session.gradientKind = com.yume.app.engine.Gradients.Kind.Radial
+        session.gradientSecond = 0x00CC2266
+        session.applyGradient(1024f * sx, 1024f * sy, 1600f * sx, 1300f * sy)
+        phase("71-gradient-radial-fade")
+        engine.applySelection(
+            android.graphics.Region((200 * sx).toInt(), (1200 * sy).toInt(), (900 * sx).toInt(), (1900 * sy).toInt()),
+            SelectionOp.Replace
+        )
+        session.color = 0xFF10A050.toInt()
+        session.gradientKind = com.yume.app.engine.Gradients.Kind.Linear
+        session.gradientSecond = 0x8010A0F0.toInt()
+        session.applyGradient(200f * sx, 1200f * sy, 900f * sx, 1900f * sy)
+        phase("72-gradient-selection")
+        engine.setSelection(null)
+        session.toggleAlphaLock(top.id)
+        engine.selectLayer(top.id)
+        session.color = 0xFF000000.toInt()
+        session.gradientSecond = 0xFFFFFFFF.toInt()
+        session.applyGradient(0f, 0f, width.toFloat(), 0f)
+        phase("73-gradient-alpha-lock")
+        session.toggleAlphaLock(top.id)
+        engine.selectLayer(base.id)
+        base.editMask = true
+        session.color = 0xFF000000.toInt()
+        session.gradientSecond = 0x00000000
+        session.applyGradient(0f, height * 0.5f, 0f, height.toFloat())
+        phase("74-gradient-mask")
+        base.editMask = false
+        session.undo()
+        phase("75-gradient-undo")
         session.chooseTool(Tool.Brush)
         return phases
     }

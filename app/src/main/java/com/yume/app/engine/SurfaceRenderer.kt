@@ -304,6 +304,7 @@ class SurfaceRenderer(
             drawCanvasBorder(canvas, matrix, engine.width, engine.height)
             drawSymmetry(canvas, matrix, engine.width, engine.height)
             drawSelection(canvas, matrix)
+            drawGradientGuide(canvas, matrix)
             drawHover(canvas, matrix)
             recordFrame()
         } catch (t: Throwable) {
@@ -402,6 +403,24 @@ class SurfaceRenderer(
             canvas.drawPath(antPath, overlay)
             overlay.pathEffect = null
         }
+    }
+
+    /** The line being dragged out with the gradient tool, with end handles. */
+    private fun drawGradientGuide(canvas: Canvas, matrix: Matrix) {
+        val g = session.gradientGuide ?: return
+        val pts = floatArrayOf(g[0], g[1], g[2], g[3])
+        matrix.mapPoints(pts)
+        overlay.style = Paint.Style.STROKE
+        overlay.pathEffect = null
+        overlay.strokeWidth = 3f * density
+        overlay.color = 0x99000000.toInt()
+        canvas.drawLine(pts[0], pts[1], pts[2], pts[3], overlay)
+        overlay.strokeWidth = 1.5f * density
+        overlay.color = 0xFFFFFFFF.toInt()
+        canvas.drawLine(pts[0], pts[1], pts[2], pts[3], overlay)
+        overlay.style = Paint.Style.FILL
+        canvas.drawCircle(pts[0], pts[1], 5f * density, overlay)
+        canvas.drawCircle(pts[2], pts[3], 5f * density, overlay)
     }
 
     private fun drawHover(canvas: Canvas, matrix: Matrix) {

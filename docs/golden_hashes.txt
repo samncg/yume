@@ -860,3 +860,25 @@ feature=66-fill-mask L0=c37ad379 L1=d29e2f3e/e068eda2 L2=f5a33c80 C=33c97fe3
 feature=67-colordrop L0=c37ad379 L1=d29e2f3e/e068eda2 L2=629f18ac C=ab11f3eb
 feature=68-fill-undo2 L0=c37ad379 L1=d29e2f3e/3ea610b8 L2=f5a33c80 C=8a7394d3
 feature=69-fill-redo1 L0=c37ad379 L1=d29e2f3e/e068eda2 L2=f5a33c80 C=33c97fe3
+
+# ============================================================================
+# Stage 4.1 feature oracle: gradient tool (NEW entries, 70..75)
+# ============================================================================
+# Computed per document pixel (premultiplied interpolation, 4x4 ordered dither
+# keyed on document position) and blitted 1:1 in 256 px chunks, so no Skia
+# shader matrix is involved: sparse 256/64 match dense on both canvases
+# (17 feature phases, 0 bad). Lines 59..69 above reproduced unchanged.
+# features dense 2048x2048
+feature=70-gradient-linear L0=a47ca14a L1=2b65f507/26abd433 L2=dbf9a627 L3=909f0ab6 C=d331bc9c
+feature=71-gradient-radial-fade L0=a47ca14a L1=2b65f507/26abd433 L2=dbf9a627 L3=2c3a5cb6 C=dec20890
+feature=72-gradient-selection L0=a47ca14a L1=2b65f507/26abd433 L2=dbf9a627 L3=4b4721c8 C=a9afc386
+feature=73-gradient-alpha-lock L0=a47ca14a L1=2b65f507/26abd433 L2=1f1a6feb L3=4b4721c8 C=b1e552fe
+feature=74-gradient-mask L0=a47ca14a L1=2b65f507/a3a1791c L2=1f1a6feb L3=4b4721c8 C=a76b3816
+feature=75-gradient-undo L0=a47ca14a L1=2b65f507/26abd433 L2=1f1a6feb L3=4b4721c8 C=b1e552fe
+# features dense 2000x1333
+feature=70-gradient-linear L0=c37ad379 L1=d29e2f3e/e068eda2 L2=f5a33c80 L3=e830c02c C=9081c114
+feature=71-gradient-radial-fade L0=c37ad379 L1=d29e2f3e/e068eda2 L2=f5a33c80 L3=18337732 C=0ebab36b
+feature=72-gradient-selection L0=c37ad379 L1=d29e2f3e/e068eda2 L2=f5a33c80 L3=23eae7e1 C=e8fa7e4f
+feature=73-gradient-alpha-lock L0=c37ad379 L1=d29e2f3e/e068eda2 L2=cd613969 L3=23eae7e1 C=340c2091
+feature=74-gradient-mask L0=c37ad379 L1=d29e2f3e/af2bf5d0 L2=cd613969 L3=23eae7e1 C=94f12025
+feature=75-gradient-undo L0=c37ad379 L1=d29e2f3e/e068eda2 L2=cd613969 L3=23eae7e1 C=340c2091

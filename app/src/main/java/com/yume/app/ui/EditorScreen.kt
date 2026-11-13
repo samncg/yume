@@ -301,6 +301,7 @@ private fun PanelHost(
         )
         PanelId.Selection -> SelectionPanel(state, session, onClose)
         PanelId.Fill -> FillPanel(state, session, onClose)
+        PanelId.Gradient -> GradientPanel(state, session, onClose)
         PanelId.Actions -> ActionsPanel(
             state = state,
             session = session,
@@ -410,6 +411,12 @@ private fun EditorTopBar(
                     Glyph.Bucket,
                     { onTool(Tool.Fill, PanelId.Fill) },
                     selected = state.tool == Tool.Fill,
+                    size = 40.dp
+                )
+                YumeIconButton(
+                    Glyph.Gradient,
+                    { onTool(Tool.Gradient, PanelId.Gradient) },
+                    selected = state.tool == Tool.Gradient,
                     size = 40.dp
                 )
                 YumeIconButton(

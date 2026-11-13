@@ -29,7 +29,7 @@ enum class Glyph {
     Sliders, Share, Picture, Palette, FlipH, FlipV,
     Droplet, Info, ZoomIn, ZoomOut, Fit, Rotate, Sparkle,
     Grid, Home, Clear, Save, More, History,
-    Folder, Mask, Clip, Grip, Bucket
+    Folder, Mask, Clip, Grip, Bucket, Gradient
 }
 
 @Composable
@@ -118,6 +118,18 @@ private fun DrawScope.drawGlyph(glyph: Glyph, tint: Color, strokeScale: Float) {
         Glyph.Wrench -> {
             drawCircle(tint, 4.2f, Offset(15.5f, 8.5f), style = Stroke(thickWidth(strokeScale, 2.6f)))
             line(12.4f, 11.6f, 4.5f, 19.5f, 2.6f)
+        }
+
+        Glyph.Gradient -> {
+            // A rounded square half filled, with a diagonal fade line.
+            path {
+                moveTo(5f, 4f); lineTo(19f, 4f)
+                quadraticBezierTo(20f, 4f, 20f, 5f); lineTo(20f, 19f)
+                quadraticBezierTo(20f, 20f, 19f, 20f); lineTo(5f, 20f)
+                quadraticBezierTo(4f, 20f, 4f, 19f); lineTo(4f, 5f)
+                quadraticBezierTo(4f, 4f, 5f, 4f)
+            }
+            fill { moveTo(4.5f, 19.5f); lineTo(19.5f, 4.5f); lineTo(19.5f, 19.5f); close() }
         }
 
         Glyph.Bucket -> {
