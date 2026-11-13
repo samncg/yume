@@ -158,6 +158,7 @@ class EditorController(
             // Allocate the dab scratch before the first gesture so the first
             // stroke does not pay for the allocation inside its first frame.
             _session.value?.warmup()
+            runCatching { loadReference() }
         }
     }
 
@@ -358,6 +359,45 @@ class EditorController(
                 "Export failed"
             }
         }
+    }
+
+    private val _reference = kotlinx.coroutines.flow.MutableStateFlow<android.graphics.Bitmap?>(null)
+    /** The project's reference picture (floating window), or null. */
+    val reference: kotlinx.coroutines.flow.StateFlow<android.graphics.Bitmap?> = _reference
+
+    private fun referenceFile() = java.io.File(store.projectDir(projectId), "reference.png")
+
+    private fun loadReference() {
+        val f = referenceFile()
+        if (f.exists()) _reference.value = store.decodeScaled(f.absolutePath, 2048)
+    }
+
+    /** Sets the reference picture from an image the user picked (kept with the project). */
+    fun setReference(uri: Uri) {
+        scope.launch {
+            val full = store.decodeUri(uri)
+            if (full == null) {
+                _message.value = "Could not read that image"
+                return@launch
+            }
+            val scale = minOf(1f, 2048f / maxOf(full.width, full.height))
+            val bmp = if (scale < 1f) {
+                android.graphics.Bitmap.createScaledBitmap(
+                    full, (full.width * scale).toInt().coerceAtLeast(1), (full.height * scale).toInt().coerceAtLeast(1), true
+                ).also { if (it !== full) full.recycle() }
+            } else full
+            runCatching {
+                val tmp = java.io.File(referenceFile().path + ".tmp")
+                tmp.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                tmp.renameTo(referenceFile())
+            }
+            _reference.value = bmp
+        }
+    }
+
+    fun clearReference() {
+        _reference.value = null
+        scope.launch { runCatching { referenceFile().delete() } }
     }
 
     fun importImage(uri: Uri) {

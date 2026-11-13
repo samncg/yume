@@ -118,6 +118,10 @@ fun EditorScreen(
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri -> if (uri != null) controller.importImage(uri) }
+    val referenceLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri -> if (uri != null) controller.setReference(uri) }
+    val reference by controller.reference.collectAsStateWithLifecycle()
 
     // Periodic autosave keeps work safe without ever blocking the render thread.
     LaunchedEffect(session) {
@@ -169,6 +173,14 @@ fun EditorScreen(
         // Under the toolbar and panels, so a panel (History) opens over it.
         if (state.chromeVisible) {
             SideRail(state, session)
+        }
+        val ref = reference
+        if (ref != null && state.chromeVisible) {
+            ReferenceWindow(
+                bitmap = ref,
+                onPickColor = { session.chooseColor(it) },
+                onClose = { controller.clearReference() }
+            )
         }
 
         Column(Modifier.fillMaxSize()) {
@@ -272,7 +284,9 @@ fun EditorScreen(
                                     controller = controller,
                                     onClose = { panel = null },
                                     onOpenProject = onOpenProject,
-                                    onImport = { importLauncher.launch("image/*") }
+                                    onImport = { importLauncher.launch("image/*") },
+                                    onReference = { referenceLauncher.launch("image/*") },
+                                    hasReference = reference != null
                                 )
                             }
                         }
@@ -384,7 +398,9 @@ private fun PanelHost(
     controller: EditorController,
     onClose: () -> Unit,
     onImport: () -> Unit,
-    onOpenProject: (String) -> Unit = {}
+    onOpenProject: (String) -> Unit = {},
+    onReference: () -> Unit = {},
+    hasReference: Boolean = false
 ) {
     when (panel) {
         PanelId.Layers -> LayersPanel(state, session, onClose)
@@ -410,6 +426,8 @@ private fun PanelHost(
             session = session,
             onClose = onClose,
             onImport = onImport,
+            onReference = onReference,
+            onRemoveReference = if (hasReference) ({ controller.clearReference() }) else null,
             onExport = { controller.export() },
             onSave = { controller.save() },
             onCanvasCopy = { w, h, scale, center ->

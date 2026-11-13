@@ -2165,6 +2165,8 @@ fun ActionsPanel(
     onClose: () -> Unit,
     onImport: () -> Unit,
     onExport: () -> Unit,
+    onReference: () -> Unit = {},
+    onRemoveReference: (() -> Unit)? = null,
     onSave: () -> Unit,
     onCanvasCopy: (width: Int, height: Int, scale: Boolean, center: Boolean) -> Unit = { _, _, _, _ -> }
 ) {
@@ -2240,6 +2242,8 @@ fun ActionsPanel(
         ) { session.toggleSoloLayer() }
         DividerLine()
         MenuRow(Glyph.Picture, "Import image as layer") { onImport() }
+        MenuRow(Glyph.Picture, if (onRemoveReference != null) "Replace reference image…" else "Reference image…") { onReference() }
+        if (onRemoveReference != null) MenuRow(Glyph.Close, "Remove reference image") { onRemoveReference() }
         MenuRow(Glyph.Select, "Crop or resize canvas…") { sizeDialog = true }
         MenuRow(Glyph.Droplet, "Fill layer with colour") { session.fillLayer(state.color) }
         MenuRow(Glyph.Share, "Export PNG to gallery") { onExport() }
