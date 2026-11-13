@@ -25,21 +25,40 @@ object BrushDab {
     private val previewCache = HashMap<String, Bitmap>()
 
     /** Cached thumbnail for the brush browser (one per dab variant/size). */
+    @Synchronized
     fun cachedPreview(preset: BrushPreset, px: Int): Bitmap =
         previewCache.getOrPut("${preset.dabKey}-${preset.size.toInt()}-$px") {
             preview(preset, px)
         }
 
+    @Synchronized
     fun dab(preset: BrushPreset): Bitmap = cache.getOrPut(preset.dabKey) {
-        generate(preset.hardness.coerceIn(0f, 1f), preset.grain.coerceIn(0f, 1f), preset.glow)
+        generate(
+            preset.hardness.coerceIn(0f, 1f), preset.grain.coerceIn(0f, 1f), preset.glow,
+            BrushAssets.shape(preset.shapeId), BrushAssets.grain(preset.grainId)
+        )
     }
 
-    private fun generate(hardness: Float, grain: Float, glow: Boolean): Bitmap {
+    private fun generate(
+        hardness: Float, grain: Float, glow: Boolean,
+        shape: Bitmap? = null, grainTexture: Bitmap? = null
+    ): Bitmap {
         val bmp = Bitmap.createBitmap(RES, RES, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         val r = RES / 2f
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
+        if (shape != null) {
+            // An imported stamp: its coverage is the dab.
+            paint.isFilterBitmap = true
+            canvas.drawBitmap(shape, null, android.graphics.RectF(0f, 0f, RES.toFloat(), RES.toFloat()), paint)
+            if (grainTexture != null) {
+                applyGrain(bmp, if (grain > 0.01f) grain else 0.6f, grainTexture)
+            } else if (grain > 0.01f) {
+                applyGrain(bmp, grain)
+            }
+            return bmp
+        }
         if (hardness >= 0.995f) {
             paint.color = Color.WHITE
             canvas.drawCircle(r, r, r - 0.5f, paint)
@@ -71,10 +90,29 @@ object BrushDab {
             canvas.drawCircle(r, r, r, bloom)
         }
 
-        if (grain > 0.01f) {
+        if (grainTexture != null) {
+            applyGrain(bmp, if (grain > 0.01f) grain else 0.6f, grainTexture)
+        } else if (grain > 0.01f) {
             applyGrain(bmp, grain)
         }
         return bmp
+    }
+
+    /** An imported grain texture, tiled across the dab and mixed by [amount]. */
+    private fun applyGrain(target: Bitmap, amount: Float, texture: Bitmap) {
+        val tiled = Bitmap.createBitmap(target.width, target.height, Bitmap.Config.ARGB_8888)
+        val tc = Canvas(tiled)
+        // Coverage 1 where the texture is clear, (1 - amount) where it is full.
+        tc.drawColor(Color.WHITE)
+        val sp = Paint(Paint.FILTER_BITMAP_FLAG)
+        sp.shader = BitmapShader(texture, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
+        sp.alpha = (amount.coerceIn(0f, 1f) * 255f).toInt()
+        sp.blendMode = BlendMode.DST_OUT
+        tc.drawRect(0f, 0f, target.width.toFloat(), target.height.toFloat(), sp)
+        val paint = Paint()
+        paint.blendMode = BlendMode.DST_IN
+        Canvas(target).drawBitmap(tiled, 0f, 0f, paint)
+        tiled.recycle()
     }
 
     /**

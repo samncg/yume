@@ -14,7 +14,9 @@ sealed interface InputEvent {
         val pressure: Float,
         val tilt: Float,
         val stylus: Boolean,
-        val eraserButton: Boolean
+        val eraserButton: Boolean,
+        /** Pen azimuth in radians (AXIS_ORIENTATION), for tilt-following stamps. */
+        val orientation: Float = 0f
     ) : InputEvent
 
     data class Move(
@@ -22,7 +24,8 @@ sealed interface InputEvent {
         val xs: FloatArray,
         val ys: FloatArray,
         val pressures: FloatArray,
-        val tilt: Float
+        val tilt: Float,
+        val orientation: Float = 0f
     ) : InputEvent
 
     data class Up(val pointerId: Int) : InputEvent

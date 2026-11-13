@@ -164,6 +164,10 @@ class StrokePainter(private val engine: DrawingEngine) {
         }
 
         baseAlpha = (brush.opacity * brush.flow).coerceIn(0.02f, 1f)
+        brushColor = color
+        mixColor = color
+        mixFilter = null
+        travelAngle = 0f
 
         val useSparse = target.paintStore.isSparse
         if (useSparse) {
@@ -272,6 +276,7 @@ class StrokePainter(private val engine: DrawingEngine) {
 
         val ux = dx / dist
         val uy = dy / dist
+        travelAngle = Math.toDegrees(kotlin.math.atan2(uy, ux).toDouble()).toFloat()
         var remaining = dist
         var px = lastX
         var py = lastY
@@ -344,6 +349,16 @@ class StrokePainter(private val engine: DrawingEngine) {
         return size * f.coerceIn(0.42f, 1f)
     }
 
+    /** Pen azimuth in radians, set by the session before each move. */
+    @Volatile var orientation = 0f
+    /** Direction of travel in degrees (for direction-following stamps). */
+    private var travelAngle = 0f
+    /** Wet mix: the colour the brush is carrying right now. */
+    private var mixColor = 0
+    private var mixFilterColor = 0
+    private var mixFilter: android.graphics.ColorFilter? = null
+    private var brushColor = 0
+
     /** Where the pen is painting and how big the dab is right now (cursor). */
     @Volatile var liveX = 0f
         private set
@@ -357,19 +372,21 @@ class StrokePainter(private val engine: DrawingEngine) {
         liveX = x
         liveY = y
         liveSize = sized
-        stampInternal(x, y, sized, alpha)
+        val ang = stampAngle()
+        stampInternal(x, y, sized, alpha, ang)
         if (engine.symmetryX) {
-            stampInternal(engine.symmetryXPos * 2f - x, y, sized, alpha)
+            stampInternal(engine.symmetryXPos * 2f - x, y, sized, alpha, if (ang == 0f) 0f else 180f - ang)
         }
         if (engine.symmetryY) {
-            stampInternal(x, engine.symmetryYPos * 2f - y, sized, alpha)
+            stampInternal(x, engine.symmetryYPos * 2f - y, sized, alpha, -ang)
         }
         if (engine.symmetryX && engine.symmetryY) {
             stampInternal(
                 engine.symmetryXPos * 2f - x,
                 engine.symmetryYPos * 2f - y,
                 sized,
-                alpha
+                alpha,
+                if (ang == 0f) 0f else ang + 180f
             )
         }
         val radial = engine.symmetryRadial
@@ -385,10 +402,11 @@ class StrokePainter(private val engine: DrawingEngine) {
                 val a = step * k
                 val c = kotlin.math.cos(a).toFloat()
                 val s = kotlin.math.sin(a).toFloat()
-                if (k > 0) stampInternal(cx + dx * c - dy * s, cy + dx * s + dy * c, sized, alpha)
+                val turn = (360f / radial) * k
+                if (k > 0) stampInternal(cx + dx * c - dy * s, cy + dx * s + dy * c, sized, alpha, if (ang == 0f) 0f else ang + turn)
                 if (engine.symmetryMirror) {
                     // Reflect across the horizontal axis, then rotate.
-                    stampInternal(cx + dx * c + dy * s, cy + dx * s - dy * c, sized, alpha)
+                    stampInternal(cx + dx * c + dy * s, cy + dx * s - dy * c, sized, alpha, if (ang == 0f) 0f else turn - ang)
                 }
             }
         }
@@ -415,7 +433,49 @@ class StrokePainter(private val engine: DrawingEngine) {
         }
     }
 
-    private fun stampInternal(x: Float, y: Float, size: Float, alpha: Float) {
+    /** The stamp angle in degrees for the preset's rotation mode (0 = upright). */
+    private fun stampAngle(): Float {
+        val brush = preset ?: return 0f
+        val base = when (brush.rotationMode) {
+            1 -> travelAngle
+            2 -> Math.toDegrees(orientation.toDouble()).toFloat()
+            3 -> random.nextFloat() * 360f
+            else -> 0f
+        }
+        return base + brush.rotation
+    }
+
+    /**
+     * Wet mix: before a dab, the carried colour takes in some of the layer's
+     * colour under the dab and drifts back toward the brush colour, so paint
+     * smears into what is already there (oil, watercolour). Reads the layer
+     * store, so dense and sparse layers mix identically.
+     */
+    private fun wetMixAt(x: Float, y: Float, brush: BrushPreset) {
+        val target = layer ?: return
+        val ix = x.toInt()
+        val iy = y.toInt()
+        if (ix < 0 || iy < 0 || ix >= engine.width || iy >= engine.height) return
+        val under = target.paintStore.getPixel(ix, iy)
+        val ua = under ushr 24
+        val pick = brush.wetMix.coerceIn(0f, 1f) * 0.35f * (ua / 255f)
+        val back = (1f - brush.wetMix.coerceIn(0f, 1f)) * 0.08f + 0.02f
+        fun ch(c: Int, sh: Int) = (c shr sh) and 0xFF
+        fun mix(sh: Int): Int {
+            var v = ch(mixColor, sh).toFloat()
+            v += (ch(under, sh) - v) * pick
+            v += (ch(brushColor, sh) - v) * back
+            return v.toInt().coerceIn(0, 255)
+        }
+        mixColor = (0xFF shl 24) or (mix(16) shl 16) or (mix(8) shl 8) or mix(0)
+        if (mixFilter == null || mixColor != mixFilterColor) {
+            mixFilterColor = mixColor
+            mixFilter = PorterDuffColorFilter(mixColor, PorterDuff.Mode.SRC_IN)
+        }
+        paint.colorFilter = mixFilter
+    }
+
+    private fun stampInternal(x: Float, y: Float, size: Float, alpha: Float, angle: Float = 0f) {
         val d = dab ?: return
         val brush = preset ?: return
 
@@ -434,19 +494,26 @@ class StrokePainter(private val engine: DrawingEngine) {
         if (smudge) {
             stampSmudge(d, brush, sx, sy, half)
         } else {
+            if (brush.wetMix > 0.001f && brush.category == BrushCategory.Brush && !(layer?.editMask == true)) {
+                wetMixAt(sx, sy, brush)
+            }
             paint.alpha = (alpha * 255f).toInt().coerceIn(1, 255)
+            dabAngle = angle
             drawDab(d, sx - half, sy - half, sx + half, sy + half, paint)
+            dabAngle = 0f
         }
         if (profile) {
             CompositeProfile.paintNanos += System.nanoTime() - t0
             CompositeProfile.paintDabs++
         }
 
+        // A rotated stamp reaches past its square: up to the half-diagonal.
+        val reach = if (angle != 0f) half * 1.4143f else half
         stampRect.set(
-            (sx - half).toInt() - 2,
-            (sy - half).toInt() - 2,
-            (sx + half).toInt() + 2,
-            (sy + half).toInt() + 2
+            (sx - reach).toInt() - 2,
+            (sy - reach).toInt() - 2,
+            (sx + reach).toInt() + 2,
+            (sy + reach).toInt() + 2
         )
         engine.markDirty(stampRect)
         if (dirty.isEmpty) dirty.set(stampRect) else dirty.union(stampRect)
@@ -486,6 +553,9 @@ class StrokePainter(private val engine: DrawingEngine) {
      * layer canvas), which keeps the "leave the pixel alone" semantics of a
      * canvas clip.
      */
+    /** Angle of the dab being stamped (degrees), read by [stampDab]. */
+    private var dabAngle = 0f
+
     private fun stampDab(
         source: Bitmap,
         left: Float,
@@ -497,10 +567,19 @@ class StrokePainter(private val engine: DrawingEngine) {
         // Integer bounding box of the dab plus one pixel of margin: a filtered,
         // antialiased edge can reach past its own rect.
         val px = dabBounds
-        px.set(
-            floor(left).toInt(), floor(top).toInt(),
-            ceil(right).toInt(), ceil(bottom).toInt()
-        )
+        val rot = dabAngle
+        if (rot != 0f) {
+            // Rotated: the scratch must hold the turned square.
+            val cx = (left + right) * 0.5f
+            val cy = (top + bottom) * 0.5f
+            val r = (right - left) * 0.5f * 1.4143f
+            px.set(floor(cx - r).toInt(), floor(cy - r).toInt(), ceil(cx + r).toInt(), ceil(cy + r).toInt())
+        } else {
+            px.set(
+                floor(left).toInt(), floor(top).toInt(),
+                ceil(right).toInt(), ceil(bottom).toInt()
+            )
+        }
         px.inset(-1, -1)
         px.intersect(0, 0, engine.width, engine.height)
         if (px.isEmpty) return
@@ -535,6 +614,9 @@ class StrokePainter(private val engine: DrawingEngine) {
         // accumulate a visible bias on a soft stroke.
         val s1 = sc.save()
         sc.translate(-px.left.toFloat(), -px.top.toFloat())
+        // Rotation happens only here, in the resample: the blend pass below is
+        // the same 1:1 blit for every store.
+        if (rot != 0f) sc.rotate(rot, dart.centerX(), dart.centerY())
         sc.drawBitmap(source, null, dart, dabScratchPaint)
         sc.restoreToCount(s1)
 

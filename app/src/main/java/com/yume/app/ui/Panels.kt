@@ -818,6 +818,8 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
         }
         DividerLine()
         if (preset != null) {
+            BrushStrokePreview(preset, state.color)
+            Spacer(Modifier.height(8.dp))
             YumeSlider(
                 value = state.assist,
                 onChange = { session.updateAssist(it) },
@@ -903,6 +905,10 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                         valueLabel = formatPercent(preset.smudgeAmount)
                     )
                 }
+            }
+            if (advanced) {
+                DividerLine()
+                BrushExtras(preset, session)
             }
             Text(
                 text = if (advanced) "Fewer settings" else "More settings",

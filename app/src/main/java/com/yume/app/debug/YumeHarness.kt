@@ -3511,6 +3511,46 @@ object YumeHarness {
         phase("83-gradient-map")
         session.undo()
         phase("84-tone-undo")
+
+        // Brush engine (stamps, grain textures, rotation, wet mix): all in the
+        // dab-scratch resample pass, so every store must stamp identically.
+        session.chooseTool(Tool.Brush)
+        val oldRoot = com.yume.app.engine.BrushAssets.root
+        com.yume.app.engine.BrushAssets.root = java.io.File(cacheRoot, "harness-brush").apply { mkdirs() }
+        try {
+            val tri = android.graphics.Bitmap.createBitmap(64, 48, android.graphics.Bitmap.Config.ARGB_8888)
+            android.graphics.Canvas(tri).drawPath(android.graphics.Path().apply {
+                moveTo(0f, 48f); lineTo(32f, 0f); lineTo(64f, 48f); close()
+            }, android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF000000.toInt() })
+            val noise = android.graphics.Bitmap.createBitmap(32, 32, android.graphics.Bitmap.Config.ARGB_8888)
+            val npx = IntArray(32 * 32) { i -> if ((i * 7919) % 5 < 2) 0xFF000000.toInt() else 0xFFFFFFFF.toInt() }
+            noise.setPixels(npx, 0, 32, 0, 0, 32, 32)
+            val shapeId = com.yume.app.engine.BrushAssets.importShape(tri) ?: ""
+            val grainId = com.yume.app.engine.BrushAssets.importGrain(noise) ?: ""
+            val rotated = hard.copy(id = "h-rot", size = 44f, spacing = 0.18f, shapeId = shapeId, rotationMode = 1, rotation = 15f)
+            val grained = soft.copy(id = "h-grainy", size = 60f, grain = 0.7f, grainId = grainId)
+            val wet = hard.copy(id = "h-wet", size = 40f, wetMix = 0.6f)
+            session.presets = presets + listOf(rotated, grained, wet)
+            engine.selectLayer(top.id)
+            session.color = 0xFF3355AA.toInt()
+            session.activePresetId = rotated.id
+            session.stroke(pts(P(250f, 400f), P(800f, 600f), P(1300f, 450f), P(1800f, 900f)))
+            phase("85-shape-rotated")
+            session.activePresetId = grained.id
+            session.stroke(pts(P(300f, 1500f), P(1700f, 1300f)))
+            phase("86-grain-texture")
+            engine.selectLayer(base.id)
+            session.color = 0xFFEEDD22.toInt()
+            session.activePresetId = wet.id
+            session.stroke(pts(P(200f, 1000f), P(1850f, 1000f)))
+            phase("87-wet-mix")
+            session.undo()
+            phase("88-brush-undo")
+            session.activePresetId = hard.id
+        } finally {
+            com.yume.app.engine.BrushAssets.root?.deleteRecursively()
+            com.yume.app.engine.BrushAssets.root = oldRoot
+        }
         return phases
     }
 
@@ -5790,6 +5830,26 @@ object YumeHarness {
             sb.append("shape ${c.name}: want=${c.want} got=$got ${if (ok) "ok" else "BAD"}\n")
         }
         sb.append("shapes: ${if (bad == 0) "PASS" else "FAIL"} (${cases.size} cases, $bad bad)\n")
+
+        // .yumebrush round trip: settings and embedded assets survive.
+        val oldRoot = com.yume.app.engine.BrushAssets.root
+        com.yume.app.engine.BrushAssets.root = java.io.File(cacheRoot, "harness-brushfile").apply { mkdirs() }
+        try {
+            val img = android.graphics.Bitmap.createBitmap(40, 40, android.graphics.Bitmap.Config.ARGB_8888)
+            android.graphics.Canvas(img).drawCircle(20f, 20f, 14f, android.graphics.Paint().apply { color = 0xFF000000.toInt() })
+            val sid = com.yume.app.engine.BrushAssets.importShape(img) ?: ""
+            val src = hard.copy(id = "rt", name = "Round trip", shapeId = sid, rotationMode = 2, rotation = 30f, wetMix = 0.4f, builtIn = false)
+            val text = com.yume.app.engine.BrushPresetFile.export(listOf(src))
+            java.io.File(com.yume.app.engine.BrushAssets.root, "brush_shapes").deleteRecursively()
+            val back = com.yume.app.engine.BrushPresetFile.import(text)
+            val got = back.firstOrNull()
+            val same = got != null && got.copy(id = src.id, builtIn = src.builtIn) == src
+            val asset = got != null && com.yume.app.engine.BrushAssets.shape(got.shapeId) != null
+            sb.append("brush-file: ${if (same && asset) "PASS" else "FAIL"} settings=$same asset=$asset\n")
+        } finally {
+            com.yume.app.engine.BrushAssets.root?.deleteRecursively()
+            com.yume.app.engine.BrushAssets.root = oldRoot
+        }
         return sb.toString()
     }
 }

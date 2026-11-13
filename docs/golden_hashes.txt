@@ -937,3 +937,16 @@ feature=81-levels L0=c37ad379 L1=d29e2f3e/e068eda2 L2=da25e9b1 L3=23eae7e1 C=590
 feature=82-color-balance L0=c37ad379 L1=58d77751/e068eda2 L2=da25e9b1 L3=23eae7e1 C=50d425d0
 feature=83-gradient-map L0=c37ad379 L1=d15b5225/e068eda2 L2=da25e9b1 L3=23eae7e1 C=6370e154
 feature=84-tone-undo L0=c37ad379 L1=58d77751/e068eda2 L2=da25e9b1 L3=23eae7e1 C=50d425d0
+
+# --- Brush engine: imported stamp + stroke rotation, grain texture, wet mix ---
+# New feature phases 85-88, recorded dense; sparse 256 and 64 MATCH on both canvases.
+# features dense 2048x2048
+feature=85-shape-rotated L0=a47ca14a L1=50355559/26abd433 L2=9683d0a6 L3=4b4721c8 C=b86fd576
+feature=86-grain-texture L0=a47ca14a L1=50355559/26abd433 L2=c3f5b1c7 L3=4b4721c8 C=3445bb83
+feature=87-wet-mix L0=a47ca14a L1=bca4be6e/26abd433 L2=c3f5b1c7 L3=4b4721c8 C=90b139cd
+feature=88-brush-undo L0=a47ca14a L1=50355559/26abd433 L2=c3f5b1c7 L3=4b4721c8 C=3445bb83
+# features dense 2000x1333
+feature=85-shape-rotated L0=c37ad379 L1=58d77751/e068eda2 L2=c637ddf0 L3=23eae7e1 C=1462d82c
+feature=86-grain-texture L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C=aa163222
+feature=87-wet-mix L0=c37ad379 L1=73dc2670/e068eda2 L2=d5802b36 L3=23eae7e1 C=262a22a7
+feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C=aa163222

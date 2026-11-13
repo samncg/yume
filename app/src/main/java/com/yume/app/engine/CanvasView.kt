@@ -254,7 +254,7 @@ class CanvasView(
                 ys[count - 1] = event.y
                 ps[count - 1] = pressureAt(event, index)
                 session.pushInput(
-                    InputEvent.Move(activePointerId, xs, ys, ps, tiltAt(event, index))
+                    InputEvent.Move(activePointerId, xs, ys, ps, tiltAt(event, index), orientationAt(event, index))
                 )
             }
             Mode.Pick -> session.pushInput(InputEvent.PickMove(event.x, event.y))
@@ -550,6 +550,9 @@ class CanvasView(
             raw.coerceIn(0.05f, 1f)
         }
     }
+
+    private fun orientationAt(event: MotionEvent, index: Int): Float =
+        runCatching { event.getAxisValue(MotionEvent.AXIS_ORIENTATION, index) }.getOrDefault(0f)
 
     private fun tiltAt(event: MotionEvent, index: Int): Float {
         return try {

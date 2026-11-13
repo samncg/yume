@@ -610,6 +610,7 @@ class DrawingSession(
                                 redrawQuickStroke()
                             } else {
                                 recordStrokePoint(doc[0], doc[1], event.pressures[i])
+                                painter.orientation = event.orientation
                                 if (assistActive()) {
                                     assistedMove(doc[0], doc[1], event.pressures[i], event.tilt)
                                 } else {
@@ -1369,6 +1370,25 @@ class DrawingSession(
         list.add(if (index >= 0) index + 1 else list.size, created)
         presets = list
         activePresetId = id
+        onPresetsChanged?.invoke(presets)
+        requestState()
+    }
+
+    /** Adds imported presets after the active one and selects the first. */
+    fun importPresets(list: List<BrushPreset>) {
+        if (list.isEmpty()) return
+        val index = presets.indexOfFirst { it.id == activePresetId }
+        val all = presets.toMutableList()
+        all.addAll(if (index >= 0) index + 1 else all.size, list)
+        presets = all
+        val first = list.first()
+        tool = when (first.category) {
+            BrushCategory.Eraser -> Tool.Eraser
+            BrushCategory.Smudge -> Tool.Smudge
+            BrushCategory.Brush -> Tool.Brush
+        }
+        category = first.category
+        activePresetId = first.id
         onPresetsChanged?.invoke(presets)
         requestState()
     }

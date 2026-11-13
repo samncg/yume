@@ -20,6 +20,7 @@ class YumeApp : Application() {
     override fun onCreate() {
         super.onCreate()
         MemoryBudget.configure(getSystemService(ActivityManager::class.java))
+        com.yume.app.engine.BrushAssets.root = filesDir
         // Tile caches are scratch: anything left over is from a crash.
         com.yume.app.engine.TileCache.removeStale(cacheDir)
         MemoryBudget.diskRoot = cacheDir

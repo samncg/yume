@@ -36,12 +36,22 @@ data class BrushPreset(
     val smudgeAmount: Float = 0.4f,
     /** Extra soft bloom around the dab (used by glow-style brushes). */
     val glow: Boolean = false,
+    /** Imported stamp shape ([BrushAssets]); empty = the round dab. */
+    val shapeId: String = "",
+    /** Imported grain texture ([BrushAssets]); empty = procedural noise. */
+    val grainId: String = "",
+    /** Stamp rotation: 0 fixed, 1 follows the stroke, 2 follows pen tilt, 3 random. */
+    val rotationMode: Int = 0,
+    /** Base stamp angle in degrees (added to the mode's angle). */
+    val rotation: Float = 0f,
+    /** Wet mix: how much colour each dab picks up from the layer (0..1). */
+    val wetMix: Float = 0f,
     /** Built-in presets can't be deleted. */
     val builtIn: Boolean = true
 ) {
     /** Cache key for the procedurally generated dab bitmap. */
     val dabKey: String
-        get() = "$hardness|$grain|$glow"
+        get() = "$hardness|$grain|$glow|$shapeId|$grainId"
 
     fun copyForStroke(): BrushPreset = this
 
@@ -62,6 +72,11 @@ data class BrushPreset(
         put("tiltSize", tiltSize.toDouble())
         put("smudgeAmount", smudgeAmount.toDouble())
         put("glow", glow)
+        put("shapeId", shapeId)
+        put("grainId", grainId)
+        put("rotationMode", rotationMode)
+        put("rotation", rotation.toDouble())
+        put("wetMix", wetMix.toDouble())
         put("builtIn", builtIn)
     }
 
@@ -85,7 +100,12 @@ data class BrushPreset(
             pressureOpacity = o.optDouble("pressureOpacity", base.pressureOpacity.toDouble()).toFloat(),
             tiltSize = o.optDouble("tiltSize", base.tiltSize.toDouble()).toFloat(),
             smudgeAmount = o.optDouble("smudgeAmount", base.smudgeAmount.toDouble()).toFloat(),
-            glow = o.optBoolean("glow", base.glow)
+            glow = o.optBoolean("glow", base.glow),
+            shapeId = o.optString("shapeId", base.shapeId),
+            grainId = o.optString("grainId", base.grainId),
+            rotationMode = o.optInt("rotationMode", base.rotationMode).coerceIn(0, 3),
+            rotation = o.optDouble("rotation", base.rotation.toDouble()).toFloat(),
+            wetMix = o.optDouble("wetMix", base.wetMix.toDouble()).toFloat().coerceIn(0f, 1f)
         )
     }
 }
@@ -130,12 +150,14 @@ object BrushLibrary {
         ),
         BrushPreset(
             id = "watercolor", name = "Watercolor Wash", size = 70f, hardness = 0.2f, flow = 0.16f,
-            spacing = 0.03f, smoothing = 0.4f, grain = 0.35f, pressureSize = 0.6f, pressureOpacity = 0.8f
+            spacing = 0.03f, smoothing = 0.4f, grain = 0.35f, pressureSize = 0.6f, pressureOpacity = 0.8f,
+            wetMix = 0.6f
         ),
         BrushPreset(
             id = "oil-paint", name = "Oil Paint", size = 40f, hardness = 0.6f, flow = 0.9f,
             spacing = 0.06f, smoothing = 0.2f, grain = 0.2f, jitter = 0.05f,
-            pressureSize = 0.6f, pressureOpacity = 0.3f, tiltSize = 0.25f
+            pressureSize = 0.6f, pressureOpacity = 0.3f, tiltSize = 0.25f,
+            wetMix = 0.45f, rotationMode = 1
         ),
         BrushPreset(
             id = "marker", name = "Marker", size = 26f, hardness = 0.8f, flow = 0.7f,
