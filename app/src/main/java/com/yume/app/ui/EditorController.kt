@@ -175,6 +175,29 @@ class EditorController(
     }
 
     /**
+     * Writes a cropped / resized copy of the document as a new project and
+     * hands its id to [onDone] (null on failure). The original is not changed.
+     */
+    fun canvasCopy(newW: Int, newH: Int, scale: Boolean, anchorCenter: Boolean, onDone: (String?) -> Unit) {
+        val session = _session.value ?: return
+        scope.launch {
+            var snap: com.yume.app.engine.DocumentSnapshot? = null
+            if (!session.runOnOwner { snap = session.snapshotNow() }) {
+                withContext(Dispatchers.Main) { onDone(null) }
+                return@launch
+            }
+            val s = snap!!
+            val ox = if (scale || !anchorCenter) 0 else (s.width - newW) / 2
+            val oy = if (scale || !anchorCenter) 0 else (s.height - newH) / 2
+            val label = if (scale) "resized" else "cropped"
+            val id = runCatching {
+                store.createCanvasCopy(s, "${s.title} ($label)", newW, newH, scale, ox, oy)
+            }.getOrNull()
+            withContext(Dispatchers.Main) { onDone(id) }
+        }
+    }
+
+    /**
      * Periodic / idle autosave. Sparse documents append only the changed tiles
      * to the crash-recovery journal (Stage 3c); dense documents, or a journal
      * that failed, get a full PNG save as before.

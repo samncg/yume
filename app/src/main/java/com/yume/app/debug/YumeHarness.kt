@@ -150,6 +150,7 @@ object YumeHarness {
                     out.append(scoreCacheBig(app))
                 } else if (only == "features") {
                     out.append(scoreFeatures())
+                    out.append(scoreCanvasCopy(app))
                 } else if (only == "accept8k") {
                     out.append(scoreAcceptance8k(app))
                 } else if (only == "journal") {
@@ -222,6 +223,7 @@ object YumeHarness {
                 out.append(scoreJournal(app))
                 out.append(line(scoreHistorySpill(app)))
                 out.append(scoreFeatures())
+                out.append(scoreCanvasCopy(app))
                 out.append(scoreFuzzEvict())
                 out.append(scoreCacheFailures(app))
                 out.append(scoreGoldenEvict(app))
@@ -3513,6 +3515,93 @@ object YumeHarness {
                     .append(" (${dense.size} phases, $bad bad)").append(first).append('\n')
             }
         }
+        return out.toString()
+    }
+
+
+    /**
+     * Canvas crop / resize as a new document (Stage 4.1): dense vs sparse
+     * (tile 64 / 256) must write identical layers; a crop must equal the source
+     * region exactly; scaled copies must be deterministic across stores.
+     */
+    private fun scoreCanvasCopy(app: YumeApp): String {
+        val out = StringBuilder()
+        val ps = app.projectStore
+        val w = 2000
+        val h = 1333
+        data class Spec(val label: String, val nw: Int, val nh: Int, val scale: Boolean, val ox: Int, val oy: Int)
+        val specs = listOf(
+            Spec("crop-center", 1100, 700, false, (w - 1100) / 2, (h - 700) / 2),
+            Spec("extend", 2400, 1500, false, -200, -83),
+            Spec("scale-down", 1000, 667, true, 0, 0),
+            Spec("scale-up", 2600, 1733, true, 0, 0)
+        )
+        val results = HashMap<String, MutableList<String>>()
+        var cropExact = true
+        for ((sparse, tile) in listOf(false to 256, true to 256, true to 64)) {
+            val oldS = TileStoreConfig.useSparseLayers
+            val oldT = TileStoreConfig.tileSize
+            TileStoreConfig.useSparseLayers = sparse
+            TileStoreConfig.tileSize = tile
+            try {
+                val engine = DrawingEngine(w, h)
+                engine.backgroundColor = BG
+                val session = DrawingSession("copy", "Copy", engine, History())
+                identityView(session, w, h)
+                session.presets = presets
+                session.activePresetId = soft.id
+                session.assist = 0f
+                session.quickShapeEnabled = false
+                session.category = BrushCategory.Brush
+                val a = engine.newLayer("A")
+                engine.selectLayer(a.id)
+                session.color = 0xFF2255CC.toInt()
+                session.stroke(listOf(P(100f, 100f), P(1900f, 1200f), P(300f, 1250f)))
+                val b = engine.newLayer("B")
+                engine.selectLayer(b.id)
+                session.color = 0x99DD4411.toInt()
+                session.stroke(listOf(P(1800f, 150f), P(200f, 1100f)))
+                engine.addMask(b)
+                b.maskTiles!!.fillRect(Rect(600, 300, 1300, 900), 0xFF000000.toInt())
+                val snap = session.snapshotNow()
+                for (sp in specs) {
+                    val id = ps.createCanvasCopy(snap, "copy-${sp.label}", sp.nw, sp.nh, sp.scale, sp.ox, sp.oy)
+                    if (id == null) {
+                        results.getOrPut(sp.label) { ArrayList() }.add("FAILED")
+                        continue
+                    }
+                    val loaded = ps.loadProject(id)
+                    val e2 = DrawingEngine(sp.nw, sp.nh)
+                    loaded?.layers?.forEach { d ->
+                        val l = e2.newLayer(name = d.name, bitmap = d.bitmap, backingFile = d.file)
+                        l.adoptMask(d.mask, d.maskFile)
+                    }
+                    val line = e2.layers.joinToString(" ") { it.name + "=" + hashLayer(it) }
+                    results.getOrPut(sp.label) { ArrayList() }.add(line)
+                    if (sp.label == "crop-center" && !sparse) {
+                        // Exactness: the copy's layer A equals the source region.
+                        val want = a.tiles.readRect(Rect(sp.ox, sp.oy, sp.ox + sp.nw, sp.oy + sp.nh))
+                        val got = e2.layers.first { it.name == "A" }.tiles.copyAll()
+                        if (!want.sameAs(got)) cropExact = false
+                        want.recycle()
+                        got.recycle()
+                    }
+                    runCatching { ps.deleteProject(id) }
+                }
+            } finally {
+                TileStoreConfig.useSparseLayers = oldS
+                TileStoreConfig.tileSize = oldT
+                Runtime.getRuntime().gc()
+            }
+        }
+        var bad = 0
+        for (sp in specs) {
+            val r = results[sp.label] ?: continue
+            val same = r.size == 3 && r.all { it == r[0] } && !r[0].startsWith("FAILED")
+            if (!same) bad++
+            out.append("canvas-copy ${sp.label} ${sp.nw}x${sp.nh}: ${if (same) "MATCH" else "MISMATCH"} ${r.firstOrNull()}\n")
+        }
+        out.append("canvas-copy crop exact=$cropExact verdict=${if (bad == 0 && cropExact) "PASS" else "FAIL"}\n")
         return out.toString()
     }
 

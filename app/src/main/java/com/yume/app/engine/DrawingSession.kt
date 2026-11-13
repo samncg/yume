@@ -54,7 +54,10 @@ data class LayerSnapshotData(
     /** Resident sparse store that still needs assembling for a PNG write. */
     val sparse: TileStore? = null,
     /** Resident sparse mask that still needs assembling for a PNG write. */
-    val maskSparse: TileStore? = null
+    val maskSparse: TileStore? = null,
+    /** The layer's live store (dense or sparse), for whole-document copies. */
+    val store: TileStore? = null,
+    val maskStore: TileStore? = null
 )
 
 data class GroupSnapshotData(
@@ -2218,7 +2221,9 @@ class DrawingSession(
                 groupId = it.groupId,
                 file = it.tiles.backingFile(),
                 sparse = if (it.tiles.isSparse) it.tiles else null,
-                maskSparse = it.maskTiles?.takeIf { m -> m.isSparse }
+                maskSparse = it.maskTiles?.takeIf { m -> m.isSparse },
+                store = it.tiles,
+                maskStore = it.maskTiles
             )
         },
         groups = engine.groups.map {

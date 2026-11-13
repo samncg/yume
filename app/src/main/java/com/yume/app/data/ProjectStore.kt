@@ -226,6 +226,139 @@ class ProjectStore(private val context: Context) {
         com.yume.app.engine.TileJournal.writeAtomically(stateFile, state.toString())
     }
 
+    /**
+     * Canvas crop / resize (Stage 4.1), as a NEW document: the source document
+     * and its undo history are left untouched. Every layer and mask is written
+     * band by band from its store (read on the engine's owner thread), so even
+     * an 8192^2 document never builds a canvas-sized bitmap.
+     *
+     * [scale] false = crop / extend: the new canvas shows the source shifted by
+     * ([offsetX], [offsetY]); uncovered area is transparent (white for masks).
+     * [scale] true = resize: the whole source is resampled (bilinear) to the
+     * new size. Returns the new project id, or null on failure.
+     */
+    fun createCanvasCopy(
+        snapshot: DocumentSnapshot,
+        name: String,
+        newW: Int,
+        newH: Int,
+        scale: Boolean,
+        offsetX: Int,
+        offsetY: Int
+    ): String? {
+        val id = UUID.randomUUID().toString()
+        val dir = projectDir(id).apply { mkdirs() }
+        val srcW = snapshot.width
+        val srcH = snapshot.height
+        fun store(layer: LayerSnapshotData, mask: Boolean): TileStore? =
+            if (mask) layer.maskStore else layer.store
+        fun writeStore(file: File, st: TileStore, mask: Boolean): Boolean = runCatching {
+            // Uncovered area: transparent for a layer, white (visible) for a
+            // mask. Not st.defaultPixel: a dense mask store reports 0.
+            val def = if (mask) 0xFFFFFFFF.toInt() else 0
+            // Scaled bands read a source band (plus a 1 px halo) per few rows.
+            val sy = srcH.toFloat() / newH
+            val sx = srcW.toFloat() / newW
+            val bandRows = if (scale) maxOf(1, (256 / maxOf(1f, sy)).toInt()) else 256
+            val band = Bitmap.createBitmap(newW, minOf(bandRows, newH), Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(band)
+            val filter = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG).apply {
+                blendMode = android.graphics.BlendMode.SRC
+            }
+            val copy = android.graphics.Paint().apply { blendMode = android.graphics.BlendMode.SRC }
+            try {
+                java.io.BufferedOutputStream(FileOutputStream(file), 1 shl 16).use { out ->
+                    com.yume.app.engine.BandedPng.encode(out, newW, newH, bandRows) { y0, rows, px ->
+                        band.eraseColor(def)
+                        if (!scale) {
+                            val src = Rect(offsetX, offsetY + y0, offsetX + newW, offsetY + y0 + rows)
+                            val clip = Rect(src)
+                            if (clip.intersect(0, 0, srcW, srcH)) {
+                                var patch: Bitmap? = null
+                                if (!snapshot.onOwner { patch = st.readRect(clip) }) {
+                                    throw java.io.IOException("timed out")
+                                }
+                                patch?.let {
+                                    canvas.drawBitmap(
+                                        it, (clip.left - src.left).toFloat(),
+                                        (clip.top - src.top).toFloat(), copy
+                                    )
+                                    it.recycle()
+                                }
+                            }
+                        } else {
+                            val top = maxOf(0, (y0 * sy).toInt() - 1)
+                            val bottom = minOf(srcH, ((y0 + rows) * sy).toInt() + 2)
+                            val src = Rect(0, top, srcW, bottom)
+                            var patch: Bitmap? = null
+                            if (!snapshot.onOwner { patch = st.readRect(src) }) {
+                                throw java.io.IOException("timed out")
+                            }
+                            patch?.let {
+                                val m = android.graphics.Matrix()
+                                m.setTranslate(0f, top.toFloat())
+                                m.postScale(1f / sx, 1f / sy)
+                                m.postTranslate(0f, -y0.toFloat())
+                                val save = canvas.save()
+                                canvas.clipRect(0, 0, newW, rows)
+                                canvas.drawBitmap(it, m, filter)
+                                canvas.restoreToCount(save)
+                                it.recycle()
+                            }
+                        }
+                        band.getPixels(px, 0, newW, 0, 0, newW, rows)
+                    }
+                }
+            } finally {
+                band.recycle()
+            }
+            true
+        }.getOrDefault(false)
+
+        val layersJson = JSONArray()
+        for ((i, layer) in snapshot.layers.withIndex()) {
+            val st = store(layer, false) ?: return null.also { dir.deleteRecursively() }
+            if (!writeStore(File(dir, "layer_$i.png"), st, false)) {
+                dir.deleteRecursively()
+                return null
+            }
+            val m = store(layer, true)
+            if (m != null && !writeStore(File(dir, "mask_$i.png"), m, true)) {
+                dir.deleteRecursively()
+                return null
+            }
+            layersJson.put(layerJson(layer, i))
+        }
+        val scaleT = 512f / maxOf(newW, newH)
+        val thumb = Bitmap.createBitmap(
+            (newW * scaleT).toInt().coerceAtLeast(1), (newH * scaleT).toInt().coerceAtLeast(1),
+            Bitmap.Config.ARGB_8888
+        )
+        android.graphics.Canvas(thumb).drawColor(snapshot.background)
+        writeThumb(dir, thumb)
+        thumb.recycle()
+        val manifest = JSONObject().apply {
+            put("name", name)
+            put("width", newW)
+            put("height", newH)
+            put("background", snapshot.background)
+            put("active", snapshot.activeIndex)
+            put("updatedAt", System.currentTimeMillis())
+            put("layers", layersJson)
+            put("groups", JSONArray().apply {
+                snapshot.groups.forEach { g ->
+                    put(JSONObject().apply {
+                        put("id", g.id); put("name", g.name); put("opacity", g.opacity.toDouble())
+                        put("blend", g.blend.name); put("visible", g.visible); put("locked", g.locked)
+                        put("expanded", g.expanded)
+                    })
+                }
+            })
+        }
+        File(dir, "manifest.json").writeText(manifest.toString())
+        return id
+    }
+
     /** Root for per-document tile caches (scratch, deleted on close). */
     fun cacheRoot(): File = context.cacheDir
 

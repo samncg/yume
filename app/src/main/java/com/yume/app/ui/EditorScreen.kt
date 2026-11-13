@@ -64,7 +64,11 @@ import kotlin.math.sin
 private const val TOP_BAR_HEIGHT = 54
 
 @Composable
-fun EditorScreen(controller: EditorController, onExit: () -> Unit) {
+fun EditorScreen(
+    controller: EditorController,
+    onExit: () -> Unit,
+    onOpenProject: (String) -> Unit = {}
+) {
     val sessionState by controller.session.collectAsStateWithLifecycle()
     val session = sessionState
     val message by controller.message.collectAsStateWithLifecycle()
@@ -174,6 +178,7 @@ fun EditorScreen(controller: EditorController, onExit: () -> Unit) {
                             session = session,
                             controller = controller,
                             onClose = { panel = null },
+                            onOpenProject = onOpenProject,
                             onImport = { importLauncher.launch("image/*") }
                         )
                     }
@@ -284,7 +289,8 @@ private fun PanelHost(
     session: DrawingSession,
     controller: EditorController,
     onClose: () -> Unit,
-    onImport: () -> Unit
+    onImport: () -> Unit,
+    onOpenProject: (String) -> Unit = {}
 ) {
     when (panel) {
         PanelId.Layers -> LayersPanel(state, session, onClose)
@@ -308,7 +314,12 @@ private fun PanelHost(
             onClose = onClose,
             onImport = onImport,
             onExport = { controller.export() },
-            onSave = { controller.save() }
+            onSave = { controller.save() },
+            onCanvasCopy = { w, h, scale, center ->
+                controller.canvasCopy(w, h, scale, center) { id ->
+                    if (id != null) onOpenProject(id)
+                }
+            }
         )
         PanelId.History -> HistoryPanel(state, session, onClose)
         null -> Unit

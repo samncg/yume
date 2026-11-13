@@ -1290,6 +1290,96 @@ private fun adjustValueLabel(kind: AdjustmentKind, amount: Float): String = when
     AdjustmentKind.MotionBlur -> "${(amount * 96).roundToInt()} px"
 }
 
+// ============================================================ canvas size
+
+/**
+ * Crop or resize the canvas. The result is a new document (the original and
+ * its undo history stay as they are), opened as soon as it is written.
+ */
+@Composable
+fun CanvasSizeDialog(
+    width: Int,
+    height: Int,
+    onDismiss: () -> Unit,
+    onCreate: (Int, Int, Boolean, Boolean) -> Unit
+) {
+    var wText by remember { mutableStateOf(width.toString()) }
+    var hText by remember { mutableStateOf(height.toString()) }
+    var scale by remember { mutableStateOf(true) }
+    var center by remember { mutableStateOf(true) }
+    var keepRatio by remember { mutableStateOf(true) }
+    val w = wText.toIntOrNull()?.coerceIn(16, 8192)
+    val h = hText.toIntOrNull()?.coerceIn(16, 8192)
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        PanelCard(Modifier.width(360.dp)) {
+            PanelHeader("Canvas size", onClose = onDismiss)
+            SegmentedRow(
+                options = listOf("Resize", "Crop / extend"),
+                selectedIndex = if (scale) 0 else 1,
+                onSelect = { scale = it == 0 }
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                androidx.compose.material3.OutlinedTextField(
+                    value = wText,
+                    onValueChange = { v ->
+                        wText = v.filter(Char::isDigit).take(4)
+                        val nw = wText.toIntOrNull()
+                        if (keepRatio && scale && nw != null) {
+                            hText = (nw.toLong() * height / width).coerceAtLeast(1).toString()
+                        }
+                    },
+                    singleLine = true,
+                    label = { Text("Width") },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                    )
+                )
+                androidx.compose.material3.OutlinedTextField(
+                    value = hText,
+                    onValueChange = { v ->
+                        hText = v.filter(Char::isDigit).take(4)
+                        val nh = hText.toIntOrNull()
+                        if (keepRatio && scale && nh != null) {
+                            wText = (nh.toLong() * width / height).coerceAtLeast(1).toString()
+                        }
+                    },
+                    singleLine = true,
+                    label = { Text("Height") },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                    )
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            if (scale) {
+                ToggleRow(Glyph.Lock, "Keep proportions", keepRatio) { keepRatio = it }
+            } else {
+                SegmentedRow(
+                    options = listOf("Centered", "Top left"),
+                    selectedIndex = if (center) 0 else 1,
+                    onSelect = { center = it == 0 }
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "Now $width × $height px. A copy is made and opened; this document stays as it is.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YumeColors.textDim
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallButton("Cancel") { onDismiss() }
+                SmallButton("Create copy", enabled = w != null && h != null) {
+                    if (w != null && h != null) onCreate(w, h, scale, center)
+                }
+            }
+        }
+    }
+}
+
 // =================================================================== history
 
 @Composable
@@ -1563,8 +1653,21 @@ fun ActionsPanel(
     onClose: () -> Unit,
     onImport: () -> Unit,
     onExport: () -> Unit,
-    onSave: () -> Unit
+    onSave: () -> Unit,
+    onCanvasCopy: (width: Int, height: Int, scale: Boolean, center: Boolean) -> Unit = { _, _, _, _ -> }
 ) {
+    var sizeDialog by remember { mutableStateOf(false) }
+    if (sizeDialog) {
+        CanvasSizeDialog(
+            width = state.width,
+            height = state.height,
+            onDismiss = { sizeDialog = false },
+            onCreate = { w, h, scale, center ->
+                sizeDialog = false
+                onCanvasCopy(w, h, scale, center)
+            }
+        )
+    }
     PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
         PanelHeader("Actions", onClose)
         Text(
@@ -1625,6 +1728,7 @@ fun ActionsPanel(
         ) { session.toggleSoloLayer() }
         DividerLine()
         MenuRow(Glyph.Picture, "Import image as layer") { onImport() }
+        MenuRow(Glyph.Select, "Crop or resize canvas…") { sizeDialog = true }
         MenuRow(Glyph.Droplet, "Fill layer with colour") { session.fillLayer(state.color) }
         MenuRow(Glyph.Share, "Export PNG to gallery") { onExport() }
         MenuRow(Glyph.Save, "Save now") { onSave() }

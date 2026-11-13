@@ -88,6 +88,15 @@ private fun YumeRoot() {
                         },
                         action = { projectId = null }
                     )
+                },
+                // A cropped / resized copy was written: save this one, open it.
+                onOpenProject = { newId ->
+                    controller.saveThen(
+                        onWarning = { message ->
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        },
+                        action = { projectId = newId }
+                    )
                 }
             )
         }
