@@ -1,5 +1,19 @@
 package com.yume.app.ui
 
+import androidx.compose.runtime.LaunchedEffect
+
+import kotlinx.coroutines.launch
+
+import androidx.compose.runtime.rememberCoroutineScope
+
+import androidx.compose.ui.zIndex
+
+import androidx.compose.foundation.rememberScrollState
+
+import androidx.compose.foundation.horizontalScroll
+
+import androidx.compose.runtime.collectAsState
+
 import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -176,48 +190,126 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
         val layerCount = state.layers.count { !it.isGroup }
         var dragId by remember { mutableStateOf(-1L) }
         var dragOffset by remember { mutableFloatStateOf(0f) }
+        var dragFrom by remember { mutableStateOf(-1) }
+        // While a drop is waiting for the new order to arrive, the rows keep
+        // the positions they were shifted to, so nothing jumps.
+        var frozenSlots by remember { mutableStateOf(0) }
+        var frozenFrom by remember { mutableStateOf(-1) }
+        val settle = remember { androidx.compose.animation.core.Animatable(0f) }
+        var settleId by remember { mutableStateOf(-1L) }
+        val scope = rememberCoroutineScope()
+        val order = state.layers.map { it.id }
+        LaunchedEffect(order) {
+            // The reorder landed: drop the temporary shifts and let the moved
+            // row spring the rest of the way into its slot.
+            frozenFrom = -1
+            frozenSlots = 0
+            if (settleId != -1L) {
+                settle.animateTo(0f, AppleSpring.move())
+                settleId = -1L
+            }
+        }
+        val liveSlots = if (dragId != -1L) (dragOffset / rowPx).roundToInt() else frozenSlots
+        val from = if (dragId != -1L) dragFrom else frozenFrom
 
         LazyColumn(
             Modifier.heightIn(max = 300.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
             itemsIndexed(state.layers, key = { _, row -> row.id }) { index, row ->
-                if (row.isGroup) {
-                    GroupRow(
-                        row = row,
-                        active = row.id == state.activeLayerId,
-                        onSelect = { session.selectGroup(row.id) },
-                        onToggleVisible = { session.toggleGroupVisibility(row.id) },
-                        onToggleExpanded = { session.toggleGroupExpanded(row.id) },
-                        onToggleLock = { session.toggleGroupLock(row.id) }
-                    )
-                } else {
-                    val dragging = dragId == row.id
-                    LayerRow(
-                        layer = row,
-                        active = row.id == state.activeLayerId,
-                        onSelect = { session.selectLayer(row.id) },
-                        onToggleVisible = { session.toggleLayerVisibility(row.id) },
-                        onToggleLock = { session.toggleLayerLock(row.id) },
-                        dragOffset = if (dragging) dragOffset else 0f,
-                        onDragStart = { dragId = row.id; dragOffset = 0f },
-                        onDrag = { dragOffset += it },
-                        onDragEnd = {
-                            val slots = (dragOffset / rowPx).roundToInt()
-                            val id = dragId
-                            dragId = -1L
-                            dragOffset = 0f
-                            if (slots != 0 && layerCount > 1) {
-                                val targetPanel = (index + slots).coerceIn(0, state.layers.size)
-                                val above = state.layers.take(targetPanel)
-                                    .count { !it.isGroup && it.id != id }
-                                session.moveLayerTo(
-                                    id,
-                                    (layerCount - 1 - above).coerceIn(0, layerCount - 1)
-                                )
+                // Rows the dragged layer has passed slide one slot out of its way.
+                val shiftTarget = when {
+                    from < 0 || index == from -> 0f
+                    liveSlots > 0 && index in (from + 1)..(from + liveSlots) -> -rowPx
+                    liveSlots < 0 && index in (from + liveSlots) until from -> rowPx
+                    else -> 0f
+                }
+                val shift by androidx.compose.animation.core.animateFloatAsState(
+                    targetValue = shiftTarget,
+                    animationSpec = if (frozenFrom >= 0 && dragId == -1L && shiftTarget == 0f) {
+                        androidx.compose.animation.core.snap()
+                    } else {
+                        AppleSpring.move()
+                    },
+                    label = "layerShift"
+                )
+                Box(Modifier.graphicsLayer { translationY = shift }) {
+                    if (row.isGroup) {
+                        GroupRow(
+                            row = row,
+                            active = row.id == state.activeLayerId,
+                            onSelect = { session.selectGroup(row.id) },
+                            onToggleVisible = { session.toggleGroupVisibility(row.id) },
+                            onToggleExpanded = { session.toggleGroupExpanded(row.id) },
+                            onToggleLock = { session.toggleGroupLock(row.id) }
+                        )
+                    } else {
+                        val dragging = dragId == row.id
+                        LayerRow(
+                            layer = row,
+                            active = row.id == state.activeLayerId,
+                            onSelect = { session.selectLayer(row.id) },
+                            onToggleVisible = { session.toggleLayerVisibility(row.id) },
+                            onToggleLock = { session.toggleLayerLock(row.id) },
+                            dragOffset = when {
+                                dragging -> dragOffset
+                                settleId == row.id -> settle.value
+                                else -> 0f
+                            },
+                            lifted = dragging,
+                            onDragStart = {
+                                scope.launch { settle.snapTo(0f) }
+                                settleId = -1L
+                                dragId = row.id
+                                dragFrom = index
+                                dragOffset = 0f
+                            },
+                            onDrag = { dragOffset += it },
+                            onDragEnd = {
+                                val slots = (dragOffset / rowPx).roundToInt()
+                                val id = dragId
+                                val residual = dragOffset - slots * rowPx
+                                dragId = -1L
+                                if (slots != 0 && layerCount > 1) {
+                                    frozenFrom = dragFrom
+                                    frozenSlots = slots
+                                    settleId = id
+                                    scope.launch {
+                                        settle.snapTo(residual)
+                                        // If the order does not change (a no-op move),
+                                        // release the shifts instead of holding them.
+                                        kotlinx.coroutines.delay(700)
+                                        if (frozenFrom >= 0) {
+                                            frozenFrom = -1
+                                            frozenSlots = 0
+                                            settle.animateTo(0f, AppleSpring.move())
+                                            settleId = -1L
+                                        }
+                                    }
+                                    val targetPanel = (index + slots).coerceIn(0, state.layers.size - 1)
+                                    // Rows that end up above it: everything up to and
+                                    // including the target row when moving down, or
+                                    // strictly before it when moving up.
+                                    val upTo = if (slots > 0) targetPanel + 1 else targetPanel
+                                    val above = state.layers.take(upTo)
+                                        .count { !it.isGroup && it.id != id }
+                                    session.moveLayerTo(
+                                        id,
+                                        (layerCount - 1 - above).coerceIn(0, layerCount - 1)
+                                    )
+                                } else {
+                                    // Not moved: spring back home from the finger.
+                                    settleId = id
+                                    scope.launch {
+                                        settle.snapTo(dragOffset)
+                                        settle.animateTo(0f, AppleSpring.move())
+                                        settleId = -1L
+                                    }
+                                }
+                                dragOffset = 0f
                             }
-                        }
-                    )
+                        )
+                    }
                 }
             }
         }
@@ -353,16 +445,38 @@ private fun LayerRow(
     onToggleVisible: () -> Unit,
     onToggleLock: () -> Unit,
     dragOffset: Float,
+    lifted: Boolean = false,
     onDragStart: () -> Unit,
     onDrag: (Float) -> Unit,
     onDragEnd: () -> Unit
 ) {
+    // A picked-up row lifts off the list: a little larger, with a shadow and a
+    // solid backing, and it springs into and out of that state.
+    val lift by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (lifted) 1f else 0f,
+        animationSpec = AppleSpring.sheet(),
+        label = "lift"
+    )
     Row(
         Modifier
             .fillMaxWidth()
-            .graphicsLayer { translationY = dragOffset }
+            .zIndex(if (lifted || dragOffset != 0f) 1f else 0f)
+            .graphicsLayer {
+                translationY = dragOffset
+                scaleX = 1f + 0.035f * lift
+                scaleY = 1f + 0.035f * lift
+                shadowElevation = 14.dp.toPx() * lift
+                shape = RoundedCornerShape(11.dp)
+                clip = false
+            }
             .clip(RoundedCornerShape(11.dp))
-            .background(if (active) YumeColors.accentSoft else Color.Transparent)
+            .background(
+                when {
+                    lift > 0.01f -> Color(0xFF2A2A31).copy(alpha = 0.6f + 0.4f * lift)
+                    active -> YumeColors.accentSoft
+                    else -> Color.Transparent
+                }
+            )
             .clickable(onClick = onSelect)
             // Long press picks the layer up; dragging then reorders the stack.
             .pointerInput(layer.id) {
@@ -873,16 +987,20 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                 }
             }
 
-            ColorMode.Square -> {
-                SvSquare(hue, sat, value, 150.dp) { s, v ->
-                    sat = s
-                    value = v
-                    emit()
-                }
-                Spacer(Modifier.height(10.dp))
-                HueBar(hue) { h ->
-                    hue = h
-                    emit()
+            ColorMode.Triangle -> {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                    ColorTriangle(
+                        hue = hue, sat = sat, value = value, size = 236.dp,
+                        onHue = { h ->
+                            hue = h
+                            emit()
+                        },
+                        onSv = { s, v ->
+                            sat = s
+                            value = v
+                            emit()
+                        }
+                    )
                 }
             }
 
@@ -981,9 +1099,7 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
             )
         }
         DividerLine()
-        SectionLabel("Palette")
-        Spacer(Modifier.height(8.dp))
-        SwatchGrid(state.palette) { picked -> adopt(picked) }
+        PaletteSection(current = current, onPick = { picked -> adopt(picked) })
         if (state.recentColors.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
             SectionLabel("Recent")
@@ -1095,6 +1211,113 @@ private fun SwatchGrid(colors: List<Int>, onPick: (Int) -> Unit) {
                 }
             }
         }
+    }
+}
+
+/**
+ * Saved palettes: pick one from the chips, tap a swatch to use it, "+" adds
+ * the current colour. Edit mode removes swatches, renames or deletes the
+ * palette. Palettes are app-wide and survive restarts.
+ */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun PaletteSection(current: Int, onPick: (Int) -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val store = remember { (context.applicationContext as com.yume.app.YumeApp).paletteStore }
+    val palettes by store.palettes.collectAsState()
+    val activeId by store.activeId.collectAsState()
+    val active = palettes.firstOrNull { it.id == activeId } ?: palettes.first()
+    var editing by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        SectionLabel("Palettes")
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = if (editing) "Done" else "Edit",
+            style = MaterialTheme.typography.labelMedium,
+            color = YumeColors.accent,
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .clickable { editing = !editing }
+                .padding(horizontal = 8.dp, vertical = 4.dp)
+        )
+    }
+    Spacer(Modifier.height(6.dp))
+    Row(
+        Modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        palettes.forEach { p ->
+            val on = p.id == active.id
+            Text(
+                text = p.name,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (on) YumeColors.bg else YumeColors.text,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(if (on) YumeColors.text else Color(0x1FFFFFFF))
+                    .clickable { store.select(p.id) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+        Text(
+            text = "+ New",
+            style = MaterialTheme.typography.labelMedium,
+            color = YumeColors.textDim,
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(Color(0x14FFFFFF))
+                .clickable { store.create(current) }
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        )
+    }
+    Spacer(Modifier.height(10.dp))
+    androidx.compose.foundation.layout.FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        maxItemsInEachRow = 8
+    ) {
+        active.colors.forEachIndexed { i, c ->
+            Box(contentAlignment = Alignment.Center) {
+                ColorSwatch(
+                    c, selected = false, size = 27.dp,
+                    onClick = { if (editing) store.removeColorAt(active.id, i) else onPick(c) }
+                )
+                if (editing) GlyphIcon(Glyph.Close, Color.White, size = 12.dp)
+            }
+        }
+        // Add the current colour.
+        Box(
+            Modifier
+                .size(27.dp)
+                .clip(CircleShape)
+                .border(1.5.dp, Color(0x55FFFFFF), CircleShape)
+                .clickable { store.addColor(active.id, current) },
+            contentAlignment = Alignment.Center
+        ) {
+            GlyphIcon(Glyph.Plus, YumeColors.text, size = 14.dp)
+        }
+    }
+    if (editing) {
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmallButton("Rename") { renaming = true }
+            SmallButton("Delete palette", enabled = palettes.size > 1) {
+                store.delete(active.id)
+                editing = false
+            }
+        }
+    }
+    if (renaming) {
+        RenameDialog(
+            current = active.name,
+            onDismiss = { renaming = false },
+            onRename = { name ->
+                store.rename(active.id, name)
+                renaming = false
+            }
+        )
     }
 }
 
@@ -1504,7 +1727,7 @@ private fun historyGlyph(kind: EditKind): Glyph = when (kind) {
 }
 
 @Composable
-private fun SmallButton(
+internal fun SmallButton(
     text: String,
     enabled: Boolean = true,
     onClick: () -> Unit

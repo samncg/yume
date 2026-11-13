@@ -56,7 +56,7 @@ data class EditorUiState(
     val quickShape: Boolean = true,
     val history: List<HistoryEntry> = emptyList(),
     val adjusting: Boolean = false,
-    val colorMode: ColorMode = ColorMode.Square,
+    val colorMode: ColorMode = ColorMode.Wheel,
     /** Bumped whenever the document changes; drives debounced autosave. */
     val documentVersion: Int = 0,
     val backgroundColor: Int = 0xFFFFFFFF.toInt(),

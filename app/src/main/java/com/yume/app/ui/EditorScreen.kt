@@ -48,6 +48,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.animation.togetherWith
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -62,6 +63,9 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 private const val TOP_BAR_HEIGHT = 54
+
+/** Panels that belong to a tool: they open on a second tap of that tool. */
+private val TOOL_PANELS = setOf(PanelId.Brush, PanelId.Fill, PanelId.Gradient, PanelId.Selection)
 
 @Composable
 fun EditorScreen(
@@ -89,7 +93,7 @@ fun EditorScreen(
 
     val state by session.uiState.collectAsStateWithLifecycle()
     var panel by remember { mutableStateOf<PanelId?>(null) }
-    var quickMenuOpen by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -143,15 +147,16 @@ fun EditorScreen(
                     state = state,
                     activePanel = panel,
                     onExit = onExit,
-                    onUndo = { session.undo() },
-                    onRedo = { session.redo() },
+                    onRename = { renaming = true },
                     onTool = { tool, panelId ->
+                        // First tap selects the tool; a tap on the tool that is
+                        // already selected opens (or closes) its settings.
                         val sameTool = state.tool == tool
                         session.chooseTool(tool)
                         panel = when {
-                            panelId == null -> null
-                            sameTool && panel == panelId -> null
-                            else -> panelId
+                            sameTool && panelId != null -> if (panel == panelId) null else panelId
+                            panel in TOOL_PANELS -> null
+                            else -> panel
                         }
                     },
                     onPanel = { id -> panel = if (panel == id) null else id },
@@ -164,68 +169,67 @@ fun EditorScreen(
             // measured against the full column height, which let a tall panel card
             // overflow below the screen so its scroll range stayed at zero.
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                if (state.chromeVisible && panel != null) {
-                    val onLeft = panel == PanelId.History
-                    Box(
-                        Modifier
-                            .align(if (onLeft) Alignment.TopStart else Alignment.TopEnd)
-                            .padding(top = 8.dp)
-                            .padding(
-                                start = if (onLeft) 12.dp else 0.dp,
-                                end = if (onLeft) 0.dp else 12.dp
+                // Panels grow out of the button that opened them and return to
+                // it, on Apple's sheet spring (damping 0.8, response 0.3): a
+                // small overshoot, interruptible at any moment.
+                androidx.compose.animation.AnimatedContent(
+                    targetState = if (state.chromeVisible) panel else null,
+                    transitionSpec = {
+                        val left = targetState == PanelId.History || initialState == PanelId.History
+                        val origin = androidx.compose.ui.graphics.TransformOrigin(if (left) 0f else 1f, 0f)
+                        (
+                            androidx.compose.animation.scaleIn(AppleSpring.sheet(), 0.6f, origin) +
+                                androidx.compose.animation.fadeIn(AppleSpring.fade())
+                            ) togetherWith (
+                            androidx.compose.animation.scaleOut(AppleSpring.sheet(), 0.6f, origin) +
+                                androidx.compose.animation.fadeOut(AppleSpring.fade())
                             )
-                            .claimCanvasTouches()
-                    ) {
-                        PanelHost(
-                            panel = panel,
-                            state = state,
-                            session = session,
-                            controller = controller,
-                            onClose = { panel = null },
-                            onOpenProject = onOpenProject,
-                            onImport = { importLauncher.launch("image/*") }
-                        )
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                    label = "panel"
+                ) { shown ->
+                    if (shown != null) {
+                        val onLeft = shown == PanelId.History
+                        Box(Modifier.fillMaxSize()) {
+                            Box(
+                                Modifier
+                                    .align(if (onLeft) Alignment.TopStart else Alignment.TopEnd)
+                                    .padding(top = 8.dp)
+                                    .padding(
+                                        start = if (onLeft) 12.dp else 0.dp,
+                                        end = if (onLeft) 0.dp else 12.dp
+                                    )
+                                    .claimCanvasTouches()
+                            ) {
+                                PanelHost(
+                                    panel = shown,
+                                    state = state,
+                                    session = session,
+                                    controller = controller,
+                                    onClose = { panel = null },
+                                    onOpenProject = onOpenProject,
+                                    onImport = { importLauncher.launch("image/*") }
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
 
         if (state.chromeVisible) {
-            // Side rail: brush size and opacity where the hand rests, with undo
-            // and redo right under them (as in Procreate), on one glass pill.
-            Column(
-                Modifier
-                    .align(Alignment.CenterStart)
-                    .padding(start = 12.dp)
-                    .glass(corner = 28f)
-                    .blockCanvasTouches()
-                    .padding(horizontal = 6.dp, vertical = 12.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Row(
-                    Modifier.height(260.dp),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    YumeVerticalSlider(
-                        value = state.brushSize,
-                        onChange = { session.setBrushSize(it) },
-                        label = "Size",
-                        valueLabel = state.brushSize.roundToInt().toString(),
-                        min = 1f,
-                        max = 300f
-                    )
-                    YumeVerticalSlider(
-                        value = state.brushOpacity,
-                        onChange = { session.setBrushOpacity(it) },
-                        label = "Opacity",
-                        valueLabel = formatPercent(state.brushOpacity),
-                        min = 0.02f
-                    )
+            SideRail(state, session)
+        }
+
+        if (renaming) {
+            RenameDialog(
+                current = state.title,
+                onDismiss = { renaming = false },
+                onRename = { name ->
+                    renaming = false
+                    controller.rename(name)
                 }
-                Spacer(Modifier.height(10.dp))
-                YumeIconButton(Glyph.Undo, { session.undo() }, enabled = state.canUndo, size = 44.dp, label = "Undo")
-                YumeIconButton(Glyph.Redo, { session.redo() }, enabled = state.canRedo, size = 44.dp, label = "Redo")
-            }
+            )
         }
 
         if (state.transforming) {
@@ -314,25 +318,25 @@ private fun EditorTopBar(
     state: EditorUiState,
     activePanel: PanelId?,
     onExit: () -> Unit,
-    onUndo: () -> Unit,
-    onRedo: () -> Unit,
+    onRename: () -> Unit,
     onTool: (Tool, PanelId?) -> Unit,
     onPanel: (PanelId) -> Unit,
     onColorDrop: (Offset) -> Unit = {}
 ) {
-    // Floating glass capsules instead of a solid bar: the painting stays
-    // visible between and through them. Grouped the way people think about
-    // them: document + "change what is there" on the left, "put paint down"
-    // on the right, then layers and colour.
+    // Floating glass capsules, grouped by intent: the document, then tools
+    // that change what is there, then tools that put paint down, then layers
+    // and colour. The painting stays visible between and through them.
     Row(
         Modifier
             .fillMaxWidth()
             .statusBarsPadding()
             .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Capsule {
             YumeIconButton(Glyph.Gallery, onExit, size = 44.dp, iconSize = 20.dp, label = "Gallery")
+            // Tap the name to rename the document.
             Text(
                 text = state.title,
                 style = MaterialTheme.typography.labelLarge,
@@ -340,65 +344,66 @@ private fun EditorTopBar(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
-                    .widthIn(max = 160.dp)
+                    .widthIn(max = 180.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .clickable { onPanel(PanelId.History) }
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
-            )
-            CapsuleDivider()
-            YumeIconButton(
-                Glyph.Wrench, { onPanel(PanelId.Actions) },
-                selected = activePanel == PanelId.Actions, size = 44.dp, label = "Actions"
-            )
-            YumeIconButton(
-                Glyph.Sliders, { onPanel(PanelId.Adjust) },
-                selected = activePanel == PanelId.Adjust, size = 44.dp, label = "Adjustments"
-            )
-            YumeIconButton(
-                Glyph.Select, { onTool(Tool.Selection, PanelId.Selection) },
-                selected = state.tool == Tool.Selection, size = 44.dp, label = "Select"
-            )
-            YumeIconButton(
-                Glyph.Transform, { onTool(Tool.Transform, null) },
-                selected = state.tool == Tool.Transform, size = 44.dp, label = "Transform"
+                    .clickable(onClick = onRename)
+                    .padding(start = 6.dp, end = 12.dp, top = 6.dp, bottom = 6.dp)
             )
         }
+        GlassToolCapsule(
+            listOf(
+                CapsuleItem(Glyph.History, "History", active = activePanel == PanelId.History) {
+                    onPanel(PanelId.History)
+                },
+                CapsuleItem(Glyph.Wrench, "Actions", active = activePanel == PanelId.Actions) {
+                    onPanel(PanelId.Actions)
+                },
+                CapsuleItem(Glyph.Sliders, "Adjustments", active = activePanel == PanelId.Adjust) {
+                    onPanel(PanelId.Adjust)
+                },
+                CapsuleItem(Glyph.Select, "Select", selected = state.tool == Tool.Selection) {
+                    onTool(Tool.Selection, PanelId.Selection)
+                },
+                CapsuleItem(Glyph.Transform, "Transform", selected = state.tool == Tool.Transform) {
+                    onTool(Tool.Transform, null)
+                }
+            )
+        )
         Spacer(Modifier.weight(1f))
-        Capsule {
-            YumeIconButton(
-                Glyph.Brush, { onTool(Tool.Brush, PanelId.Brush) },
-                selected = state.tool == Tool.Brush, size = 44.dp, label = "Paint"
+        GlassToolCapsule(
+            listOf(
+                CapsuleItem(Glyph.Brush, "Paint", selected = state.tool == Tool.Brush) {
+                    onTool(Tool.Brush, PanelId.Brush)
+                },
+                CapsuleItem(Glyph.Smudge, "Smudge", selected = state.tool == Tool.Smudge) {
+                    onTool(Tool.Smudge, PanelId.Brush)
+                },
+                CapsuleItem(Glyph.Eraser, "Erase", selected = state.tool == Tool.Eraser) {
+                    onTool(Tool.Eraser, PanelId.Brush)
+                },
+                CapsuleItem(Glyph.Bucket, "Fill", selected = state.tool == Tool.Fill) {
+                    onTool(Tool.Fill, PanelId.Fill)
+                },
+                CapsuleItem(Glyph.Gradient, "Gradient", selected = state.tool == Tool.Gradient) {
+                    onTool(Tool.Gradient, PanelId.Gradient)
+                }
             )
-            YumeIconButton(
-                Glyph.Smudge, { onTool(Tool.Smudge, PanelId.Brush) },
-                selected = state.tool == Tool.Smudge, size = 44.dp, label = "Smudge"
-            )
-            YumeIconButton(
-                Glyph.Eraser, { onTool(Tool.Eraser, PanelId.Brush) },
-                selected = state.tool == Tool.Eraser, size = 44.dp, label = "Erase"
-            )
-            YumeIconButton(
-                Glyph.Bucket, { onTool(Tool.Fill, PanelId.Fill) },
-                selected = state.tool == Tool.Fill, size = 44.dp, label = "Fill"
-            )
-            YumeIconButton(
-                Glyph.Gradient, { onTool(Tool.Gradient, PanelId.Gradient) },
-                selected = state.tool == Tool.Gradient, size = 44.dp, label = "Gradient"
-            )
-        }
-        Spacer(Modifier.width(10.dp))
-        Capsule {
-            YumeIconButton(
-                Glyph.Layers, { onPanel(PanelId.Layers) },
-                selected = activePanel == PanelId.Layers, size = 44.dp, label = "Layers"
-            )
-            ColorChip(
-                color = state.color,
-                selected = activePanel == PanelId.Color,
-                onClick = { onPanel(PanelId.Color) },
-                onDrop = onColorDrop
-            )
-        }
+        )
+        GlassToolCapsule(
+            listOf(
+                CapsuleItem(Glyph.Layers, "Layers", active = activePanel == PanelId.Layers) {
+                    onPanel(PanelId.Layers)
+                }
+            ),
+            trailing = {
+                ColorChip(
+                    color = state.color,
+                    selected = activePanel == PanelId.Color,
+                    onClick = { onPanel(PanelId.Color) },
+                    onDrop = onColorDrop
+                )
+            }
+        )
     }
 }
 

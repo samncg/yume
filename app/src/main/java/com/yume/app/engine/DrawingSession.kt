@@ -159,7 +159,7 @@ class DrawingSession(
     @Volatile var chromeVisible: Boolean = true
     @Volatile var assist: Float = 0.3f
     @Volatile var quickShapeEnabled: Boolean = true
-    @Volatile var colorMode: ColorMode = ColorMode.Square
+    @Volatile var colorMode: ColorMode = ColorMode.Wheel
 
     /** Sample the active layer instead of the flattened composite. */
     @Volatile var eyedropperLayerOnly: Boolean = false
@@ -209,6 +209,15 @@ class DrawingSession(
 
     // ---- render-thread only ----
     private val painter = StrokePainter(engine)
+
+    /** True while a brush / eraser / smudge stroke is being painted. */
+    val strokeInProgress: Boolean get() = painter.isActive
+
+    /** Renames the document (shown in the editor; written with the next save). */
+    fun renameDocument(name: String) = post {
+        title = name
+        requestState()
+    }
     private var transform: TransformSession? = null
     private var strokeLayer: Layer? = null
     private var strokePreset: BrushPreset? = null

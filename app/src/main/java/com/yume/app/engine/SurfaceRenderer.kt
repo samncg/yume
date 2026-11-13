@@ -208,7 +208,9 @@ class SurfaceRenderer(
     private fun updateGlass() {
         if (!session.chromeVisible || surfaceW <= 0 || surfaceH <= 0) return
         val now = android.os.SystemClock.uptimeMillis()
-        if (now - lastGlass < CanvasGlass.MIN_INTERVAL_MS) return
+        val interval = if (session.strokeInProgress) CanvasGlass.STROKE_INTERVAL_MS
+        else CanvasGlass.MIN_INTERVAL_MS
+        if (now - lastGlass < interval) return
         lastGlass = now
         val s = CanvasGlass.SCALE
         val bmp = CanvasGlass.obtain(

@@ -14,6 +14,9 @@ class YumeApp : Application() {
     lateinit var presetStore: PresetStore
         private set
 
+    lateinit var paletteStore: com.yume.app.data.PaletteStore
+        private set
+
     override fun onCreate() {
         super.onCreate()
         MemoryBudget.configure(getSystemService(ActivityManager::class.java))
@@ -22,5 +25,6 @@ class YumeApp : Application() {
         MemoryBudget.diskRoot = cacheDir
         projectStore = ProjectStore(this)
         presetStore = PresetStore(this)
+        paletteStore = com.yume.app.data.PaletteStore(this)
     }
 }

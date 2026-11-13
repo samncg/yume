@@ -67,10 +67,11 @@ fun YumeIconButton(
     iconSize: Dp = 21.dp,
     tint: Color = YumeColors.text,
     selectedTint: Color = YumeColors.accent,
-    label: String? = null
+    label: String? = null,
+    selectedBg: Color = YumeColors.accentSoft
 ) {
     val bg = when {
-        selected -> YumeColors.accentSoft
+        selected -> selectedBg
         else -> Color.Transparent
     }
     val fg = when {

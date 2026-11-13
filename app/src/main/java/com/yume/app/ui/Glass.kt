@@ -92,9 +92,10 @@ fun Modifier.glass(
         effects = {
             vibrancy()
             blur(weight.blurDp.dp.toPx())
-            // The refraction band must fit inside the corner radius.
-            val h = (corner * 0.6f).dp.toPx()
-            lens(h, h * 1.6f)
+            // The refraction band must fit inside the corner radius; strong
+            // chromatic aberration splits colours along the rim.
+            val h = (corner * 0.7f).dp.toPx()
+            lens(h, h * 2.4f, depthEffect = true, chromaticAberration = true)
         },
         onDrawSurface = { drawRect(weight.tint) }
     )

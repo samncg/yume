@@ -17,7 +17,10 @@ import kotlinx.coroutines.flow.StateFlow
  */
 object CanvasGlass {
     const val SCALE = 4
-    const val MIN_INTERVAL_MS = 80L
+    /** Republish every drawn frame while idle or panning, so glass tracks 1:1... */
+    const val MIN_INTERVAL_MS = 0L
+    /** ...and at ~30 Hz while a stroke is live, to keep the paint frame budget. */
+    const val STROKE_INTERVAL_MS = 33L
 
     /** The newest published frame (screen space, 1/[SCALE] resolution). */
     @Volatile var frame: Bitmap? = null

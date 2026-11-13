@@ -30,7 +30,7 @@ enum class BrushCategory(val label: String) {
 /** Colour picker presentation. */
 enum class ColorMode(val label: String) {
     Wheel("Wheel"),
-    Square("Square"),
+    Triangle("Triangle"),
     Rgb("RGB"),
     Hsl("HSL")
 }

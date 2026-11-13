@@ -174,6 +174,17 @@ class EditorController(
         scope.launch { saveNow(session) }
     }
 
+    /** Renames the open document and writes the new name right away. */
+    fun rename(name: String) {
+        val session = _session.value ?: return
+        val clean = name.trim().ifEmpty { return }
+        session.renameDocument(clean)
+        scope.launch {
+            runCatching { store.renameProject(projectId, clean) }
+            saveNow(session)
+        }
+    }
+
     /**
      * Writes a cropped / resized copy of the document as a new project and
      * hands its id to [onDone] (null on failure). The original is not changed.

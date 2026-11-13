@@ -1,5 +1,11 @@
 package com.yume.app.ui
 
+import androidx.compose.ui.unit.sp
+
+import androidx.compose.ui.graphics.graphicsLayer
+
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -102,73 +108,72 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                 .fillMaxSize()
                 .statusBarsPadding()
                 .navigationBarsPadding()
-                .padding(horizontal = 22.dp)
+                .padding(horizontal = 32.dp)
         ) {
-            Spacer(Modifier.height(18.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Spacer(Modifier.height(28.dp))
+            Row(verticalAlignment = Alignment.Bottom) {
                 Column {
                     Text(
-                        text = "Yume",
-                        style = MaterialTheme.typography.titleLarge,
+                        text = "Gallery",
+                        style = androidx.compose.ui.text.TextStyle(
+                            fontSize = 34.sp,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                            letterSpacing = (-0.6).sp,
+                            lineHeight = 38.sp
+                        ),
                         color = YumeColors.text
                     )
+                    Spacer(Modifier.height(2.dp))
                     Text(
-                        text = if (projects.isEmpty()) {
-                            "Your gallery is empty"
-                        } else {
-                            "${projects.size} canvas${if (projects.size == 1) "" else "es"}"
+                        text = when (projects.size) {
+                            0 -> "No artworks yet"
+                            1 -> "1 artwork"
+                            else -> "${projects.size} artworks"
                         },
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodyMedium,
                         color = YumeColors.textDim
                     )
                 }
                 Spacer(Modifier.weight(1f))
-                Row(
-                    Modifier
-                        .clip(RoundedCornerShape(13.dp))
-                        .background(YumeColors.accent)
-                        .clickable { showNewDialog = true }
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    GlyphIcon(Glyph.Plus, Color(0xFF1A1206), size = 16.dp)
+                PressableRow(onClick = { showNewDialog = true }) {
+                    GlyphIcon(Glyph.Plus, YumeColors.text, size = 16.dp)
                     Spacer(Modifier.width(8.dp))
                     Text(
                         text = "New canvas",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Color(0xFF1A1206)
+                        style = MaterialTheme.typography.labelLarge,
+                        color = YumeColors.text
                     )
                 }
             }
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(26.dp))
 
             if (projects.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        GlyphIcon(Glyph.Palette, YumeColors.textDim.copy(alpha = 0.5f), size = 64.dp)
-                        Spacer(Modifier.height(16.dp))
                         Text(
-                            text = "Nothing here yet",
+                            text = "Start your first painting",
                             style = MaterialTheme.typography.titleMedium,
                             color = YumeColors.text
                         )
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = "Tap “New canvas” to start painting.",
+                            text = "Tap New canvas to pick a size.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = YumeColors.textDim
                         )
                     }
                 }
             } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 190.dp),
-                    contentPadding = PaddingValues(bottom = 28.dp),
-                    horizontalArrangement = Arrangement.spacedBy(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                // Staggered, so every thumbnail keeps its document's shape.
+                androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid(
+                    columns = androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells.Adaptive(230.dp),
+                    contentPadding = PaddingValues(bottom = 40.dp),
+                    horizontalArrangement = Arrangement.spacedBy(28.dp),
+                    verticalItemSpacing = 30.dp,
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    items(projects, key = { it.id }) { meta ->
+                    items(projects.size, key = { projects[it].id }) { idx ->
+                        val meta = projects[idx]
                         ProjectCard(
                             meta = meta,
                             thumb = thumbs[meta.id],
@@ -260,6 +265,34 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
     }
 }
 
+/** Shrinks a little on touch-down and springs back: immediate feedback. */
+@Composable
+private fun pressScale(source: androidx.compose.foundation.interaction.MutableInteractionSource): Float {
+    val pressed by source.collectIsPressedAsState()
+    val scale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 600f),
+        label = "press"
+    )
+    return scale
+}
+
+@Composable
+private fun PressableRow(onClick: () -> Unit, content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) {
+    val source = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val scale = pressScale(source)
+    Row(
+        Modifier
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(50))
+            .background(Color(0x1AFFFFFF))
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        content = content
+    )
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ProjectCard(
@@ -268,58 +301,56 @@ private fun ProjectCard(
     onOpen: () -> Unit,
     onMenu: () -> Unit
 ) {
-    Column(
-        Modifier
-            .clip(RoundedCornerShape(18.dp))
-            .combinedClickable(onClick = onOpen, onLongClick = onMenu)
-    ) {
+    val source = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val scale = pressScale(source)
+    // The card is the document's own shape (clamped so extreme strips stay usable).
+    val ratio = (meta.width.toFloat() / meta.height.coerceAtLeast(1)).coerceIn(0.45f, 2.4f)
+    Column(Modifier.graphicsLayer { scaleX = scale; scaleY = scale }) {
         Box(
             Modifier
                 .fillMaxWidth()
-                .aspectRatio(1.28f)
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color(0xFF191920))
-                .border(1.dp, YumeColors.hairline, RoundedCornerShape(16.dp))
+                .aspectRatio(ratio)
+                .graphicsLayer {
+                    shadowElevation = 18.dp.toPx()
+                    shape = RoundedCornerShape(12.dp)
+                    clip = true
+                }
+                .background(Color(0xFF1C1C22))
+                .combinedClickable(
+                    interactionSource = source,
+                    indication = null,
+                    onClick = onOpen,
+                    onLongClick = onMenu
+                )
         ) {
             if (thumb != null) {
                 Image(
                     bitmap = thumb,
                     contentDescription = meta.name,
                     modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
+                    contentScale = ContentScale.Fit
                 )
-            } else {
-                GlyphIcon(
-                    Glyph.Picture,
-                    YumeColors.textDim.copy(alpha = 0.4f),
-                    size = 36.dp,
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            }
-            Box(Modifier.align(Alignment.TopEnd).padding(6.dp)) {
-                YumeIconButton(Glyph.More, onMenu, size = 30.dp, iconSize = 15.dp)
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = meta.name,
-            style = MaterialTheme.typography.titleMedium,
-            color = YumeColors.text,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Text(
-            text = "${meta.width} × ${meta.height} · ${meta.layerCount} layer${if (meta.layerCount == 1) "" else "s"}",
-            style = MaterialTheme.typography.bodySmall,
-            color = YumeColors.textDim,
-            maxLines = 1
-        )
-        Text(
-            text = formatDate(meta.updatedAt),
-            style = MaterialTheme.typography.bodySmall,
-            color = YumeColors.textDim.copy(alpha = 0.7f),
-            maxLines = 1
-        )
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = meta.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = YumeColors.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "${formatDate(meta.updatedAt)}  ·  ${meta.width} × ${meta.height}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YumeColors.textDim,
+                    maxLines = 1
+                )
+            }
+            YumeIconButton(Glyph.More, onMenu, size = 32.dp, iconSize = 15.dp, tint = YumeColors.textDim, label = "More")
+        }
     }
 }
 
@@ -444,5 +475,19 @@ private fun NewCanvasDialog(
     }
 }
 
-private fun formatDate(millis: Long): String =
-    SimpleDateFormat("MMM d, yyyy · HH:mm", Locale.getDefault()).format(Date(millis))
+/** "Today, 14:05", "Yesterday, 09:12", or "Nov 3" / "Nov 3, 2025" further back. */
+private fun formatDate(millis: Long): String {
+    val then = java.util.Calendar.getInstance().apply { timeInMillis = millis }
+    val now = java.util.Calendar.getInstance()
+    val days = ((now.timeInMillis - then.timeInMillis) / 86_400_000L).toInt()
+    val sameDay = now.get(java.util.Calendar.YEAR) == then.get(java.util.Calendar.YEAR) &&
+        now.get(java.util.Calendar.DAY_OF_YEAR) == then.get(java.util.Calendar.DAY_OF_YEAR)
+    val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(millis))
+    return when {
+        sameDay -> "Today, $time"
+        days <= 1 -> "Yesterday, $time"
+        now.get(java.util.Calendar.YEAR) == then.get(java.util.Calendar.YEAR) ->
+            SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(millis))
+        else -> SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(millis))
+    }
+}
