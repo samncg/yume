@@ -135,6 +135,61 @@ class DrawingEngine(val width: Int, val height: Int) {
         }
     }
 
+    /**
+     * Composite sub-rects skipped this flush because a non-active layer's tile
+     * was evicted and frames must not block on disk. They stay dirty (their
+     * composite pixels are stale) until the prefetched tiles are adopted.
+     */
+    private val deferred = Rect()
+
+    init {
+        TileCache.active?.let { c ->
+            c.externalBytes = {
+                mapOf(
+                    "composite" to (compositeTiles?.residentBytes() ?: 0L),
+                    "mip" to (mipTiles?.residentBytes() ?: 0L),
+                    "strokeCache" to strokeCacheBytes(),
+                    "captures" to TileCapture.liveBytes
+                )
+            }
+        }
+    }
+
+    /**
+     * True when compositing [r] would read an evicted tile of a layer other than
+     * the active one. Schedules those tiles for prefetch.
+     */
+    private fun needsDisk(r: Rect): Boolean {
+        val active = activeLayer
+        var found = false
+        // Layers the stroke caches already cover for this tile are not read by
+        // the composite, so their evicted tiles do not matter (r is within one
+        // tile: compositeRegion works tile by tile).
+        val ts = TileStoreConfig.tileSize
+        val tk = ((r.left / ts).toLong() shl 32) or ((r.top / ts).toLong() and 0xFFFFFFFFL)
+        val below = belowTiles
+        val belowCovered = below != null && belowFrom in 1 until layers.size &&
+            (belowSeeded.contains(tk) || below.getTile(r.left / ts, r.top / ts) != null)
+        val aboveCovered = aboveTiles != null && aboveFrom in 1..layers.size &&
+            aboveBuilt.contains(tk)
+        for ((i, l) in layers.withIndex()) {
+            if (!l.visible || l === active) continue
+            if (belowCovered && i < belowFrom) continue
+            if (aboveCovered && i >= aboveFrom) continue
+            val st = l.tiles as? SparseTileStore
+            if (st != null && st.hasEvictedIn(r)) {
+                st.prefetchIn(r)
+                found = true
+            }
+            val m = l.maskTiles as? SparseTileStore
+            if (m != null && l.maskEnabled && m.hasEvictedIn(r)) {
+                m.prefetchIn(r)
+                found = true
+            }
+        }
+        return found
+    }
+
     private fun newCompositeStore(bg: Int): SparseTileStore =
         SparseTileStore(width, height, TileStoreConfig.tileSize, null, null, bg)
 
@@ -440,11 +495,16 @@ class DrawingEngine(val width: Int, val height: Int) {
     /** Rebuilds the dirty part of the composite. Returns true if anything changed. */
     fun flush(): Boolean {
         if (dirty.isEmpty) return false
+        deferred.setEmpty()
         compositeRegion(dirty)
         if (sparseMode) mipDirtyUnion(dirty)
-        dirty.setEmpty()
+        dirty.set(deferred)
+        TileCache.active?.let { if (it.evictEveryOp) it.evictTo() }
         return true
     }
+
+    /** Composite area still waiting for prefetched tiles (stale on screen). */
+    fun deferredRect(): Rect = Rect(dirty)
 
     fun compositeAll() {
         compositeRegion(Rect(0, 0, width, height))
@@ -481,6 +541,9 @@ class DrawingEngine(val width: Int, val height: Int) {
         groupPool.trim()
         layerPool.trim()
         stagePool.trim()
+        val cache = TileCache.active
+        val nonBlocking = cache != null && !cache.blockingLoads
+        val passStart = System.nanoTime()
         for (ty in ty0..ty1) {
             for (tx in tx0..tx1) {
                 r.set(
@@ -496,6 +559,27 @@ class DrawingEngine(val width: Int, val height: Int) {
                 sub.set(rect)
                 sub.intersect(r)
                 if (sub.isEmpty) continue
+                // First touch of a tile by a stroke with a below cache: composite
+                // the whole tile once so the cache is seeded (a whole-tile pass
+                // produces the same pixels as the sub-rect pass, see Stage 3a).
+                // Later frames then read ~3 sources instead of every layer, and
+                // the layers below no longer need to stay resident.
+                val below = belowTiles
+                if (below != null && sub != r && belowBytes < belowBudget &&
+                    below.getTile(tx, ty) == null &&
+                    !belowSeeded.contains((tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL))
+                ) {
+                    sub.set(r)
+                }
+                val overTime = nonBlocking &&
+                    System.nanoTime() - passStart > cache!!.frameCompositeBudgetNs
+                if (overTime) cache!!.deferredTime++
+                if (nonBlocking && (overTime || needsDisk(sub))) {
+                    // Keep the stale composite pixels; retry once the tiles land.
+                    if (deferred.isEmpty) deferred.set(sub) else deferred.union(sub)
+                    cache.deferredTiles++
+                    continue
+                }
                 if (CompositeProfile.enabled) {
                     CompositeProfile.compositeDirtyPx += sub.width().toLong() * sub.height().toLong()
                 }
@@ -695,6 +779,12 @@ class DrawingEngine(val width: Int, val height: Int) {
     private var belowFrom = -1
     private var belowBytes = 0L
     private val belowBudget = 24L * 1024L * 1024L
+    /**
+     * Tiles whose below-cache entry was seeded. A seeded tile can be absent from
+     * [belowTiles] when the stack below is pure background (putTile drops
+     * default tiles), which then means "background", not "not cached".
+     */
+    private val belowSeeded = HashSet<Long>()
     private val belowPaint = Paint().apply {
         blendMode = BlendMode.SRC
         isFilterBitmap = false
@@ -737,6 +827,7 @@ class DrawingEngine(val width: Int, val height: Int) {
         belowTiles = SparseTileStore(
             width, height, TileStoreConfig.tileSize, null, null, backgroundColor
         )
+        belowSeeded.clear()
         belowFrom = activeIndex
         belowBytes = 0L
         // The above stack can be flattened only if it is all plain Normal.
@@ -765,6 +856,7 @@ class DrawingEngine(val width: Int, val height: Int) {
     }
 
     fun endStrokeCache() {
+        belowSeeded.clear()
         belowTiles = null
         belowFrom = -1
         belowBytes = 0L
@@ -800,6 +892,18 @@ class DrawingEngine(val width: Int, val height: Int) {
                 val stop = if (above != null && aboveFrom in 1..layers.size) aboveFrom
                 else layers.size
                 val cached = cache.getTile(tx, ty)
+                val seededBackground = cached == null &&
+                    belowSeeded.contains((tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL))
+                if (seededBackground) {
+                    // Seeded, and everything below the active layer is background.
+                    c.drawColor(backgroundColor, BlendMode.SRC)
+                    renderLayers(c, rect, belowFrom, stop)
+                    if (above != null && aboveFrom in 1..layers.size) {
+                        drawAboveInto(c, rect, tx, ty, above)
+                    }
+                    c.restoreToCount(checkpoint)
+                    return
+                }
                 if (cached != null) {
                     // The cached tile already includes the background and SRC
                     // replaces it exactly, so this is the same composite. It is
@@ -829,6 +933,7 @@ class DrawingEngine(val width: Int, val height: Int) {
                         cache.putTile(tx, ty, copy)
                         belowBytes += copy.byteCount.toLong()
                         copy.recycle()
+                        belowSeeded.add((tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL))
                     }
                     renderLayers(c, rect, belowFrom, stop)
                     if (above != null && aboveFrom in 1..layers.size) {

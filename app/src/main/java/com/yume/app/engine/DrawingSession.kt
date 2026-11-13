@@ -76,7 +76,14 @@ data class DocumentSnapshot(
     val symmetryX: Boolean = false,
     val symmetryY: Boolean = false,
     val symmetryXPos: Float = -1f,
-    val symmetryYPos: Float = -1f
+    val symmetryYPos: Float = -1f,
+    /**
+     * Runs a block that reads sparse layer tiles on the thread that owns the
+     * engine (the render thread while it runs), so a save never mutates tile
+     * maps (evicted-tile loads) concurrently with painting. Returns false when
+     * the owner did not run it in time; the caller then keeps the old file.
+     */
+    val onOwner: (() -> Unit) -> Boolean = { it(); true }
 )
 
 /** One persisted history step (pixel edits only). */
@@ -262,6 +269,46 @@ class DrawingSession(
     fun post(block: () -> Unit) {
         commands.add(block)
         wakeListener?.invoke()
+    }
+
+    /** The render thread while a renderer drives this session, else null. */
+    @Volatile var ownerThread: Thread? = null
+
+    /**
+     * Runs [block] on the owner thread and waits (at most [timeoutMs]). Inline
+     * when called on the owner or when no renderer is attached (harness, or
+     * after the renderer stopped).
+     */
+    fun runOnOwner(timeoutMs: Long = 30_000L, block: () -> Unit): Boolean {
+        val owner = ownerThread
+        if (owner == null || owner === Thread.currentThread()) {
+            block()
+            return true
+        }
+        val latch = CountDownLatch(1)
+        val claimed = java.util.concurrent.atomic.AtomicBoolean(false)
+        var error: Throwable? = null
+        post {
+            if (claimed.compareAndSet(false, true)) {
+                try {
+                    block()
+                } catch (t: Throwable) {
+                    error = t
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        while (!latch.await(50L, TimeUnit.MILLISECONDS)) {
+            // The renderer stopped before it ran the block: run it here. The
+            // claim makes sure it runs exactly once either way.
+            if (ownerThread == null && claimed.compareAndSet(false, true)) {
+                return runCatching(block).isSuccess
+            }
+            if (System.nanoTime() > deadline) return false
+        }
+        return error == null
     }
 
     fun pushInput(event: InputEvent) {
@@ -621,6 +668,7 @@ class DrawingSession(
         strokeLayer = null
         strokePreset = null
         quickShaping = false
+        TileCache.active?.let { if (it.evictEveryOp) it.evictTo() }
         requestState()
     }
 
@@ -1845,6 +1893,7 @@ class DrawingSession(
                 expanded = it.expanded
             )
         },
+        onOwner = { block -> runOnOwner(block = block) },
         symmetryX = engine.symmetryX,
         symmetryY = engine.symmetryY,
         symmetryXPos = engine.symmetryXPos,

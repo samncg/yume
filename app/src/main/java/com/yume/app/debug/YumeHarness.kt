@@ -34,6 +34,8 @@ import com.yume.app.engine.LayerSnapshotData
 import com.yume.app.engine.SelectionOp
 import com.yume.app.engine.SelectionUtil
 import com.yume.app.engine.SolidTiles
+import com.yume.app.engine.TileCache
+import com.yume.app.engine.LayerBlend as LB
 import com.yume.app.engine.SparseTileStore
 import com.yume.app.engine.StrokePainter
 import com.yume.app.engine.TilePool
@@ -121,6 +123,7 @@ object YumeHarness {
     private val presets = listOf(hard, soft, dyn, eraser, smudge, pen, marker)
 
     fun runAsync(app: YumeApp, only: String? = null, onDone: () -> Unit) {
+        cacheRoot = app.cacheDir
         Thread({
             val out = StringBuilder()
             try {
@@ -139,6 +142,18 @@ object YumeHarness {
                     } finally {
                         TileStoreConfig.solidTiles = old
                     }
+                } else if (only == "evict") {
+                    out.append(scoreFuzzEvict())
+                    out.append(scoreCacheFailures(app))
+                    out.append(scoreGoldenEvict(app))
+                    out.append(scoreCacheBig(app))
+                } else if (only == "cachepaint") {
+                    out.append(scoreCacheBig(app, quick = true))
+                } else if (only == "cachebig") {
+                    out.append(scoreCacheBig(app))
+                } else if (only == "cachefail") {
+                    out.append(scoreFuzzEvict())
+                    out.append(scoreCacheFailures(app))
                 } else if (only == "fuzz") {
                     out.append(scoreSparseStore())
                 } else if (only == "solids") {
@@ -190,6 +205,10 @@ object YumeHarness {
                 out.append(scoreSparseStore())
                 out.append(line(scoreMemory()))
                 out.append(scoreSolidMemory())
+                out.append(scoreFuzzEvict())
+                out.append(scoreCacheFailures(app))
+                out.append(scoreGoldenEvict(app))
+                out.append(scoreCacheBig(app))
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "harness failed", t)
@@ -343,12 +362,21 @@ object YumeHarness {
         val opaqueNotes = ArrayList<String>()
         fun phase(name: String) {
             engine.flush()
+            TileCache.active?.let { c ->
+                if (evictAllPerPhase) c.evictAll() else c.evictTo()
+            }
             val sb = StringBuilder("phase=").append(name)
             engine.layers.forEachIndexed { index, layer ->
                 sb.append(" L").append(index).append('=').append(hashLayer(layer))
             }
             sb.append(" C=").append(compositeHash(engine))
             phases.add(sb.toString())
+            if (TileCache.active != null) {
+                for (l in engine.layers) {
+                    goldenLost += (l.tiles as? SparseTileStore)?.lostTiles ?: 0
+                    goldenLost += (l.maskTiles as? SparseTileStore)?.lostTiles ?: 0
+                }
+            }
 
             // Debug: the per-tile opacity cache must still agree with the pixels
             // after every operation. A stale flag would let the compositor cull
@@ -1665,10 +1693,18 @@ object YumeHarness {
         every: Int,
         seed: Long,
         defaultPixel: Int = 0,
-        solids: Boolean = true
+        solids: Boolean = true,
+        evict: Boolean = false
     ): String {
         val rnd = Random(seed)
-        val store = SparseTileStore(w, h, tile, defaultPixel = defaultPixel, solidTiles = solids)
+        val fuzzCache = if (evict) {
+            TileCache(File(cacheRoot ?: File("/data/local/tmp"), "tilecache-fuzz-$seed"), 0L)
+        } else {
+            null
+        }
+        val store = SparseTileStore(
+            w, h, tile, defaultPixel = defaultPixel, solidTiles = solids, cache = fuzzCache
+        )
         // Colours shared with a second store, so the two hold the SAME shared
         // solid bitmaps. Writes to [store] must never show up in [twin].
         val palette = intArrayOf(
@@ -2180,6 +2216,18 @@ object YumeHarness {
             // Any op must keep the opaque cache consistent with the pixels.
             val stale = store.verifyOpaqueFlags(false)
             if (stale != 0) fail(step, "opaque cache stale=$stale")
+            if (fuzzCache != null && rnd.nextInt(3) == 0) {
+                // Forced eviction between operations: a random budget, all, or
+                // one random tile. Reads afterwards must load them back exactly.
+                when (rnd.nextInt(3)) {
+                    0 -> fuzzCache.evictTo(rnd.nextInt(4).toLong() * tile * tile * 4L)
+                    1 -> fuzzCache.evictAll()
+                    else -> store.evictTile(
+                        (rnd.nextInt(tileCountX).toLong() shl 32) or rnd.nextInt(tileCountY).toLong()
+                    )
+                }
+            }
+            if (store.lostTiles != 0) fail(step, "lost tiles=${store.lostTiles}")
             val badSolids = store.verifySolids()
             if (badSolids != 0) fail(step, "verifySolids=$badSolids")
             if (!solids && store.solidTileCount() != 0) fail(step, "solids while disabled")
@@ -2202,10 +2250,16 @@ object YumeHarness {
         ref.recycle()
         twinRef.recycle()
         twin.clear()
+        val evictNote = if (fuzzCache != null) {
+            " evict=${fuzzCache.evictions} loads=${fuzzCache.loads} written=${fuzzCache.dirtyWrites}"
+        } else {
+            ""
+        }
+        fuzzCache?.close()
         val verdict = if (mismatches == 0) "PASS" else "FAIL"
         val detail = if (note.isEmpty()) "" else " [$note]"
         return "ops=$ops comparisons=$comparisons mismatches=$mismatches" +
-            " solidPeak=$solidPeak unshares=$unshareSeen $verdict$detail"
+            " solidPeak=$solidPeak unshares=$unshareSeen$evictNote $verdict$detail"
     }
 
     // --------------------------------------------------------------- benchmark
@@ -2361,6 +2415,524 @@ object YumeHarness {
             TileStoreConfig.useSparseLayers = oldS
             TileStoreConfig.tileSize = oldT
             TileStoreConfig.solidTiles = oldSolid
+            Runtime.getRuntime().gc()
+        }
+        return out.toString()
+    }
+
+
+    // ============================================================ Stage 3b-1c
+
+    /** Set while a golden run must evict every unpinned tile at each phase. */
+    @Volatile private var evictAllPerPhase = false
+    /** Lost (unreadable) tiles seen at golden phases; must stay 0. */
+    @Volatile private var goldenLost = 0
+    private var cacheRoot: File? = null
+
+    private fun goldenSparse(w: Int, h: Int, tile: Int): GoldenRun {
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = tile
+        return try {
+            runGolden(w, h)
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
+            Runtime.getRuntime().gc()
+        }
+    }
+
+    /**
+     * Every golden phase on sparse stores under forced eviction, compared line by
+     * line with the same run without a cache. Modes: a 1 MB and a 4 MB budget
+     * enforced after every operation, and "evict every unpinned tile" before
+     * each phase is hashed (so every hash reads tiles back from the spill file).
+     */
+    private fun scoreGoldenEvict(app: YumeApp): String {
+        val out = StringBuilder()
+        data class Mode(val label: String, val budget: Long, val everyOp: Boolean, val all: Boolean)
+        val modes = listOf(
+            Mode("budget=1MB/op", 1L shl 20, true, false),
+            Mode("budget=4MB/op", 4L shl 20, true, false),
+            Mode("evictAll/phase", Long.MAX_VALUE / 4, false, true)
+        )
+        for ((w, h) in listOf(2048 to 2048, 2000 to 1333)) {
+            for (tile in listOf(64, 256)) {
+                val base = goldenSparse(w, h, tile).phases
+                for (m in modes) {
+                    val cache = TileCache.open(app.cacheDir, "harness-golden", m.budget)
+                    cache.evictEveryOp = m.everyOp
+                    evictAllPerPhase = m.all
+                    goldenLost = 0
+                    val run = try {
+                        goldenSparse(w, h, tile).phases
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "golden evict failed", t)
+                        emptyList()
+                    } finally {
+                        evictAllPerPhase = false
+                    }
+                    val stats = cache.stats()
+                    cache.close()
+                    var bad = 0
+                    var first = ""
+                    for (i in 0 until min(base.size, run.size)) {
+                        if (base[i] != run[i]) {
+                            bad++
+                            if (first.isEmpty()) first = " first=" + run[i].substringBefore(' ')
+                        }
+                    }
+                    bad += abs(base.size - run.size)
+                    val verdict = if (bad == 0 && goldenLost == 0 && run.isNotEmpty()) "MATCH" else "MISMATCH"
+                    out.append("golden-evict ${w}x$h tile=$tile ${m.label}: $verdict")
+                        .append(" (${run.size} phases, $bad bad, lost=$goldenLost)$first | $stats\n")
+                    Runtime.getRuntime().gc()
+                }
+            }
+        }
+        return out.toString()
+    }
+
+    /** Store fuzz with random forced evictions interleaved (all shapes, solids on). */
+    private fun scoreFuzzEvict(): String {
+        val out = StringBuilder()
+        val white = 0xFFFFFFFF.toInt()
+        data class C(val w: Int, val h: Int, val tile: Int, val ops: Int, val every: Int, val seed: Long, val def: Int = 0)
+        val combos = listOf(
+            C(2000, 1333, 256, 60, 1, 7013L),
+            C(37, 53, 16, 300, 1, 7011L),
+            C(1001, 777, 16, 300, 1, 7021L),
+            C(1001, 777, 64, 400, 1, 7022L),
+            C(1001, 777, 256, 400, 1, 7023L),
+            C(2048, 2048, 64, 1000, 100, 7031L),
+            C(2048, 2048, 256, 1000, 100, 7041L),
+            C(1000, 700, 64, 600, 50, 7051L, white),
+            C(301, 999, 64, 300, 1, 7061L, white)
+        )
+        for (c in combos) {
+            val res = try {
+                fuzzStore(c.w, c.h, c.tile, c.ops, c.every, c.seed, c.def, true, evict = true)
+            } catch (t: Throwable) {
+                "FAIL ${t.javaClass.simpleName}: ${t.message}"
+            }
+            out.append("evict-fuzz ").append(c.w).append('x').append(c.h)
+                .append(" tile=").append(c.tile)
+                .append(if (c.def != 0) " mask" else "")
+                .append(' ').append(res).append('\n')
+            Runtime.getRuntime().gc()
+        }
+        return out.toString()
+    }
+
+    private fun noiseTile(seed: Int, size: Int, opaque: Boolean = false): Bitmap {
+        val rnd = Random(seed.toLong())
+        val px = IntArray(size * size)
+        for (i in px.indices) {
+            val a = if (opaque) 255 else 128 + rnd.nextInt(128)
+            px[i] = (a shl 24) or (rnd.nextInt() and 0x00FFFFFF)
+        }
+        val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        b.setPixels(px, 0, size, 0, 0, size, size)
+        return b
+    }
+
+    /**
+     * Failure injection: a failing writer, low disk space, a corrupt and a
+     * truncated record, compaction, and a save that must refuse (keeping the
+     * previous PNG) when a cached tile is unreadable.
+     */
+    private fun scoreCacheFailures(app: YumeApp): String {
+        val out = StringBuilder()
+        val root = File(app.cacheDir, "tilecache-harness")
+        root.deleteRecursively()
+        fun painted(cache: TileCache, seed: Int): SparseTileStore {
+            val st = SparseTileStore(1000, 700, 64, solidTiles = true, cache = cache)
+            val n = noiseTile(seed, 64)
+            val rnd = Random(seed.toLong())
+            for (ty in 0 until 11) for (tx in 0 until 16) {
+                if (rnd.nextInt(3) == 0) continue
+                val r = Rect(tx * 64, ty * 64, min(1000, tx * 64 + 64), min(700, ty * 64 + 64))
+                st.writeRect(r, n, Rect(0, 0, r.width(), r.height()))
+            }
+            return st
+        }
+        fun same(a: Bitmap, b: Bitmap) = a.sameAs(b).also { a.recycle() }
+
+        // 1. Failing writer: nothing may be evicted, nothing may be lost.
+        run {
+            val cache = TileCache(File(root, "w"), 0L)
+            val st = painted(cache, 1)
+            val before = st.copyAll()
+            st.spillFile!!.failWrites = true
+            val n = cache.evictAll()
+            val ok1 = n == 0 && cache.writeFailures > 0 && cache.lastError != null &&
+                same(st.copyAll(), before)
+            st.spillFile!!.failWrites = false
+            val n2 = cache.evictAll()
+            val ok2 = n2 > 0 && same(st.copyAll(), before) && st.lostTiles == 0
+            out.append("cache-fail writer: ${if (ok1 && ok2) "PASS" else "FAIL"}")
+                .append(" refused=$n writeFail=${cache.writeFailures} later=$n2 msg=\"${cache.lastError}\"\n")
+            before.recycle()
+            cache.close()
+        }
+        // 2. Low disk space: refuse to spill, keep tiles, report it.
+        run {
+            val cache = TileCache(File(root, "d"), 0L)
+            val st = painted(cache, 2)
+            val before = st.copyAll()
+            cache.minFreeDiskBytes = Long.MAX_VALUE / 4
+            val n = cache.evictAll()
+            val ok = n == 0 && same(st.copyAll(), before) && cache.lastError?.contains("storage") == true
+            out.append("cache-fail lowdisk: ${if (ok) "PASS" else "FAIL"} refused=$n msg=\"${cache.lastError}\"\n")
+            before.recycle()
+            cache.close()
+        }
+        // 3/4. Corrupt and truncated records: CRC / short read detected, no
+        // crash, the tile is reported lost and every other tile still reads.
+        for (kind in listOf("corrupt", "truncate")) {
+            val cache = TileCache(File(root, kind), 0L)
+            val st = painted(cache, 3)
+            val before = st.copyAll()
+            cache.evictAll()
+            // The record with the highest offset: truncating then cuts only it.
+            var victim = -1L
+            var best = -1L
+            for (ty in 0 until 11) for (tx in 0 until 16) {
+                val k = (tx.toLong() shl 32) or ty.toLong()
+                val rec = st.spillFile!!.lookup(k) ?: continue
+                if (rec.offset > best) { best = rec.offset; victim = k }
+            }
+            if (kind == "corrupt") st.spillFile!!.corruptForTest(victim) else st.spillFile!!.truncateForTest(victim)
+            val vx = (victim ushr 32).toInt()
+            val vy = victim.toInt()
+            val crashed = runCatching { st.getTile(vx, vy) }.isFailure
+            val lost = st.lostTiles
+            // Every other tile: compare against the reference outside the victim.
+            val after = st.copyAll()
+            val c = Canvas(after)
+            val p = Paint().apply { blendMode = BlendMode.SRC }
+            val vr = Rect(vx * 64, vy * 64, min(1000, vx * 64 + 64), min(700, vy * 64 + 64))
+            c.drawBitmap(before, vr, vr, p)
+            val othersOk = after.sameAs(before)
+            after.recycle()
+            val ok = !crashed && lost == 1 && othersOk && cache.readFailures >= 1
+            out.append("cache-fail $kind: ${if (ok) "PASS" else "FAIL"} lost=$lost readFail=${cache.readFailures}")
+                .append(" othersIntact=$othersOk msg=\"${cache.lastError}\"\n")
+            before.recycle()
+            cache.close()
+        }
+        // 5. Compaction: rewrite tiles until garbage passes half the log.
+        run {
+            val cache = TileCache(File(root, "c"), 0L)
+            val st = SparseTileStore(1000, 700, 64, solidTiles = true, cache = cache)
+            var ok = true
+            for (round in 0 until 6) {
+                val n = noiseTile(100 + round, 64)
+                for (ty in 0 until 11) for (tx in 0 until 16) {
+                    val r = Rect(tx * 64, ty * 64, min(1000, tx * 64 + 64), min(700, ty * 64 + 64))
+                    st.writeRect(r, n, Rect(0, 0, r.width(), r.height()))
+                }
+                val want = st.copyAll()
+                cache.evictAll()
+                ok = ok && same(st.copyAll(), want)
+                want.recycle()
+            }
+            val f = st.spillFile!!
+            ok = ok && f.compactions > 0 && st.lostTiles == 0
+            out.append("cache-compaction: ${if (ok) "PASS" else "FAIL"} compactions=${f.compactions}")
+                .append(" file=${f.fileBytes / 1024}KB live=${f.liveBytes / 1024}KB written=${f.bytesWritten / 1024}KB\n")
+            cache.close()
+        }
+        // 6. Save refusal: a document whose layer has an unreadable cached tile
+        // keeps its previous PNG and reports a message.
+        run {
+            val ps = app.projectStore
+            val oldS = TileStoreConfig.useSparseLayers
+            val oldT = TileStoreConfig.tileSize
+            TileStoreConfig.useSparseLayers = true
+            TileStoreConfig.tileSize = 64
+            val project = ps.createProject("harness-cache-refuse", 1000, 700, BG)
+            val cache = TileCache.open(app.cacheDir, project.id, Long.MAX_VALUE / 4)
+            try {
+                val engine = DrawingEngine(1000, 700)
+                engine.backgroundColor = BG
+                val layer = engine.newLayer("L")
+                val n = noiseTile(9, 64)
+                for (ty in 0 until 11) for (tx in 0 until 16) {
+                    val r = Rect(tx * 64, ty * 64, min(1000, tx * 64 + 64), min(700, ty * 64 + 64))
+                    layer.tiles.writeRect(r, n, Rect(0, 0, r.width(), r.height()))
+                }
+                layer.touch()
+                val session = DrawingSession("refuse", "R", engine, History())
+                ps.saveProject(project.id, session.snapshotNow())
+                val file = File(ps.projectDir(project.id), "layer_0.png")
+                val crcA = crcBytes(file.readBytes())
+                layer.tiles.fillRect(Rect(10, 10, 300, 200), 0xFF00FF00.toInt())
+                layer.touch()
+                cache.evictAll()
+                val st = layer.tiles as SparseTileStore
+                // A tile with a spill record (fully filled tiles became solids).
+                var victim = -1L
+                for (ty in 0 until 11) for (tx in 0 until 16) {
+                    val k = (tx.toLong() shl 32) or ty.toLong()
+                    if (victim < 0 && st.spillFile!!.has(k)) victim = k
+                }
+                st.spillFile!!.corruptForTest(victim)
+                ps.saveWarning = null
+                ps.saveProject(project.id, session.snapshotNow())
+                val crcB = crcBytes(file.readBytes())
+                val warned = ps.saveWarning
+                val ok = crcA == crcB && warned != null && st.lostTiles > 0
+                out.append("cache-fail save-refuse: ${if (ok) "PASS" else "FAIL"} keptPrevious=${crcA == crcB}")
+                    .append(" lost=${st.lostTiles} msg=\"$warned\"\n")
+                ps.saveWarning = null
+            } catch (t: Throwable) {
+                out.append("cache-fail save-refuse: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+            } finally {
+                cache.close()
+                runCatching { ps.deleteProject(project.id) }
+                TileStoreConfig.useSparseLayers = oldS
+                TileStoreConfig.tileSize = oldT
+            }
+        }
+        root.deleteRecursively()
+        return out.toString()
+    }
+
+    private fun pct(sorted: LongArray, q: Double): String {
+        if (sorted.isEmpty()) return "-"
+        val i = ((sorted.size - 1) * q).toInt().coerceIn(0, sorted.size - 1)
+        return "%.2f".format(sorted[i] / 1e6)
+    }
+
+    private fun frameLine(label: String, times: List<Long>): String {
+        val a = times.toLongArray().also { it.sort() }
+        return "$label: frames=${a.size} p50=${pct(a, 0.5)} p95=${pct(a, 0.95)}" +
+            " p99=${pct(a, 0.99)} max=${pct(a, 1.0)}ms"
+    }
+
+    /**
+     * 4096^2 with 30 substantially painted layers (~50% of tiles with content)
+     * under the default budget: create, paint, save, close, reopen and compare
+     * the flattened composite hash; frame times while painting, while panning
+     * and while recompositing over cold (evicted) tiles.
+     */
+    private fun scoreCacheBig(app: YumeApp, quick: Boolean = false): String {
+        val out = StringBuilder()
+        val size = 4096
+        val layers = 30
+        val ps = app.projectStore
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = 256
+        val budget = TileCache.defaultBudget(app.getSystemService(android.app.ActivityManager::class.java))
+        val project = ps.createProject("harness-cache-big", size, size, BG)
+        var cache: TileCache? = null
+        val rt = Runtime.getRuntime()
+        var heapPeak = 0L
+        fun sampleHeap() {
+            val used = rt.totalMemory() - rt.freeMemory()
+            if (used > heapPeak) heapPeak = used
+        }
+        try {
+            cache = TileCache.open(app.cacheDir, project.id, budget)
+            val c0 = cache
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            // Opaque content: a PNG round trip is then lossless, so the reopen
+            // hash compares storage, not premultiply rounding.
+            val noise = (0 until 8).map { noiseTile(500 + it, 256, opaque = true) }
+            val blends = listOf(LayerBlend.Normal, LayerBlend.Multiply, LayerBlend.Screen, LayerBlend.Normal)
+            val tCreate = System.nanoTime()
+            var contentTiles = 0
+            for (i in 0 until layers) {
+                val layer = engine.newLayer("L$i")
+                layer.blend = blends[i % blends.size]
+                layer.opacity = if (i % 3 == 0) 0.8f else 1f
+                val rnd = Random(1000L + i)
+                for (ty in 0 until 16) for (tx in 0 until 16) {
+                    if (!rnd.nextBoolean()) continue
+                    val r = Rect(tx * 256, ty * 256, tx * 256 + 256, ty * 256 + 256)
+                    layer.tiles.writeRect(r, noise[(i + tx * 3 + ty) % noise.size], Rect(0, 0, 256, 256))
+                    contentTiles++
+                }
+                layer.touch()
+                c0.safePoint()
+                sampleHeap()
+            }
+            engine.markDirtyAll()
+            engine.flush()
+            c0.safePoint()
+            val createMs = (System.nanoTime() - tCreate) / 1e6
+            out.append("cache-big ${size}x$size x$layers contentTiles=$contentTiles")
+                .append(" (${contentTiles * 256L / 1024}MB of layer pixels) budget=${budget shr 20}MB")
+                .append(" create+composite=${"%.0f".format(createMs)}ms\n")
+            out.append("cache-big accounting after create: ")
+                .append(c0.accounting().entries.joinToString(" ") { "${it.key}=${it.value shr 20}MB" })
+                .append('\n')
+
+            // Painting on the top layer, frames composited as the renderer does
+            // (non-blocking for the other layers, safe point after each frame).
+            val session = DrawingSession("big", "Big", engine, History())
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            session.color = 0xFF3355AA.toInt()
+            engine.selectLayer(engine.layers.last().id)
+            c0.resetCounters()
+            fun frame(block: () -> Unit): Long {
+                val t0 = System.nanoTime()
+                c0.adoptPrefetched()
+                block()
+                c0.blockingLoads = false
+                try {
+                    engine.flush()
+                } finally {
+                    c0.blockingLoads = true
+                }
+                c0.evictIfNeeded()
+                sampleHeap()
+                return System.nanoTime() - t0
+            }
+            val paintTimes = ArrayList<Long>()
+            var strokeCachePeak = 0L
+            session.pushInput(InputEvent.Down(0, 100f, size * 0.5f, 1f, 0f, true, false))
+            session.runInput()
+            val steps = 1200
+            var i = 1
+            while (i <= steps) {
+                val end = min(i + 8, steps + 1)
+                paintTimes.add(frame {
+                    while (i < end) {
+                        val t = i / steps.toFloat()
+                        session.pushInput(
+                            InputEvent.Move(
+                                0, floatArrayOf(100f + t * (size - 200f)),
+                                floatArrayOf(size * 0.5f + sin(t * 12f) * size * 0.3f),
+                                floatArrayOf(1f), 0f
+                            )
+                        )
+                        session.runInput()
+                        i++
+                    }
+                    strokeCachePeak = max(strokeCachePeak, engine.strokeCacheBytes())
+                })
+            }
+            session.pushInput(InputEvent.Up(0))
+            session.runInput()
+            out.append(frameLine("cache-big painting", paintTimes))
+                .append(" syncLoads=${c0.syncLoads} syncRender=${c0.syncLoadsRender}")
+                .append(" deferred=${c0.deferredTiles}(time=${c0.deferredTime}) evict=${c0.evictions}")
+                .append(" strokeCachePeak=${strokeCachePeak shr 20}MB\n")
+
+            // Cold recomposite: evict everything, then hide the top layer so the
+            // whole composite must be rebuilt from cold tiles. Frames do not
+            // block on disk; count frames until the composite is complete.
+            run { var g = 0; while (engine.hasDirty() && g++ < 20000) frame { } }
+            c0.evictAll()
+            c0.resetCounters()
+            val coldTimes = ArrayList<Long>()
+            engine.layers.last().visible = false
+            engine.markDirtyAll()
+            val tCold = System.nanoTime()
+            var guard = 0
+            while (engine.hasDirty() && guard < 20000) {
+                coldTimes.add(frame { })
+                if (c0.pendingPrefetches() > 0) Thread.sleep(1)
+                guard++
+            }
+            val coldMs = (System.nanoTime() - tCold) / 1e6
+            val coldComplete = !engine.hasDirty()
+            out.append(frameLine("cache-big cold-recomposite", coldTimes))
+                .append(" done=$coldComplete in ${"%.0f".format(coldMs)}ms prefetch=${c0.prefetchLoads}")
+                .append(" syncRender=${c0.syncLoadsRender} deferred=${c0.deferredTiles}\n")
+            engine.layers.last().visible = true
+            engine.markDirtyAll()
+            run { var g = 0; while (engine.hasDirty() && g++ < 20000) frame { } }
+
+            // Panning at 100% over the whole document: what the renderer does per
+            // frame (viewport prefetch + composite blit) into a tablet-sized surface.
+            c0.evictAll()
+            c0.resetCounters()
+            val surface = Bitmap.createBitmap(2560, 1600, Bitmap.Config.ARGB_8888)
+            val sc = Canvas(surface)
+            val panTimes = ArrayList<Long>()
+            for (f in 0 until 240) {
+                val x = ((f * 37) % (size - 2560)).coerceAtLeast(0)
+                val y = ((f * 23) % (size - 1600)).coerceAtLeast(0)
+                val vp = Rect(x, y, x + 2560, y + 1600)
+                panTimes.add(frame {
+                    sc.save()
+                    sc.translate(-x.toFloat(), -y.toFloat())
+                    engine.drawComposite(sc, vp)
+                    sc.restore()
+                    val m = Rect(max(0, x - 256), max(0, y - 256), min(size, x + 2816), min(size, y + 1856))
+                    (engine.activeLayer?.tiles as? SparseTileStore)?.prefetchIn(m)
+                })
+            }
+            surface.recycle()
+            out.append(frameLine("cache-big panning", panTimes))
+                .append(" prefetch=${c0.prefetchLoads} syncRender=${c0.syncLoadsRender}\n")
+
+            if (quick) {
+                out.append("cache-big quick: ${c0.stats()}\n")
+                noise.forEach { it.recycle() }
+                return out.toString()
+            }
+            // Save, close, reopen. The reference hash is taken after every edit.
+            run { var g = 0; while (engine.hasDirty() && g++ < 20000) frame { } }
+            engine.compositeAll()
+            val hashBefore = compositeHash(engine)
+            val tSave = System.nanoTime()
+            ps.saveProject(project.id, session.snapshotNow())
+            val saveMs = (System.nanoTime() - tSave) / 1e6
+            val warn = ps.saveWarning
+            ps.saveWarning = null
+            sampleHeap()
+            val closeStats = c0.stats()
+            val closeAcc = c0.accounting().entries.joinToString(" ") { "${it.key}=${it.value shr 20}MB" }
+            val peak = c0.peakResident
+            c0.close()
+            cache = null
+            noise.forEach { it.recycle() }
+            out.append("cache-big save=${"%.0f".format(saveMs)}ms warning=${warn ?: "none"} | $closeStats\n")
+            out.append("cache-big accounting at close: $closeAcc peakResident=${peak shr 20}MB\n")
+            Runtime.getRuntime().gc()
+
+            val tOpen = System.nanoTime()
+            val c1 = TileCache.open(app.cacheDir, project.id, budget)
+            cache = c1
+            val loaded = ps.loadProject(project.id) ?: error("reload failed")
+            val rebuilt = DrawingEngine(size, size)
+            rebuilt.backgroundColor = loaded.background
+            for (d in loaded.layers) {
+                val l = rebuilt.newLayer(name = d.name, bitmap = d.bitmap, backingFile = d.file)
+                l.adoptMask(d.mask, d.maskFile)
+                l.opacity = d.opacity
+                l.blend = d.blend
+                l.visible = d.visible
+            }
+            rebuilt.compositeAll()
+            c1.safePoint()
+            sampleHeap()
+            val openMs = (System.nanoTime() - tOpen) / 1e6
+            val hashAfter = compositeHash(rebuilt)
+            val verdict = if (hashAfter == hashBefore) "PASS" else "FAIL"
+            out.append("cache-big reopen: $verdict before=$hashBefore after=$hashAfter")
+                .append(" open+composite=${"%.0f".format(openMs)}ms heapPeak=${heapPeak shr 20}MB | ${c1.stats()}\n")
+        } catch (t: Throwable) {
+            Log.e(TAG, "cache-big failed", t)
+            out.append("cache-big: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
             Runtime.getRuntime().gc()
         }
         return out.toString()

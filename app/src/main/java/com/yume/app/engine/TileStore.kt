@@ -267,7 +267,8 @@ object TileStoreFactory {
         if (TileStoreConfig.useSparseLayers) {
             SparseTileStore(
                 width, height, TileStoreConfig.tileSize, pixels, backing, defaultPixel,
-                solidTiles = TileStoreConfig.solidTiles
+                solidTiles = TileStoreConfig.solidTiles,
+                cache = TileCache.active
             )
         } else {
             SingleTileStore(width, height, pixels, backing)
@@ -280,7 +281,8 @@ object TileStoreFactory {
             // layer creation.
             SparseTileStore(
                 width, height, TileStoreConfig.tileSize,
-                solidTiles = TileStoreConfig.solidTiles
+                solidTiles = TileStoreConfig.solidTiles,
+                cache = TileCache.active
             )
         } else {
             SingleTileStore(
@@ -295,7 +297,8 @@ object TileStoreFactory {
         if (TileStoreConfig.useSparseLayers) {
             return SparseTileStore(
                 width, height, TileStoreConfig.tileSize, null, null, color,
-                solidTiles = TileStoreConfig.solidTiles
+                solidTiles = TileStoreConfig.solidTiles,
+                cache = TileCache.active
             )
         }
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -311,7 +314,8 @@ object TileStoreFactory {
         if (TileStoreConfig.useSparseLayers) {
             SparseTileStore(
                 width, height, TileStoreConfig.tileSize, pixels, backing, Color.WHITE,
-                solidTiles = TileStoreConfig.solidTiles
+                solidTiles = TileStoreConfig.solidTiles,
+                cache = TileCache.active
             )
         } else if (pixels != null) {
             SingleTileStore(width, height, pixels, backing)
@@ -597,8 +601,234 @@ class SparseTileStore(
     backing: File? = null,
     override val defaultPixel: Int = 0,
     /** Replace uniform tiles with shared immutable solids ([SolidTiles]). */
-    val solidTiles: Boolean = false
+    val solidTiles: Boolean = false,
+    /** Document tile cache: tiles of this store may be evicted to its spill file. */
+    cache: TileCache? = null
 ) : TileStore {
+
+    // ------------------------------------------------------- eviction (3b-1b)
+    /** The cache this store spills to, or null (no eviction). */
+    var cache: TileCache? = cache
+        private set
+    /** This store's spill log; null when it is not cached. */
+    var spillFile: SpillFile? = cache?.register(this)
+        private set
+    /**
+     * Tiles that exist but are not resident: their newest pixels are the spill
+     * record. Invariant: an evicted tile is never empty (empty tiles are removed
+     * instead) and never solid (solids hold no private bytes and stay resident).
+     */
+    private val evicted = HashSet<Long>()
+    /** Last access tick per resident tile (LRU). Only maintained when cached. */
+    private val lastUse = HashMap<Long, Long>()
+    /** Tiles pinned by a live [TileCapture] (stroke, transform, adjustment). */
+    private val pins = HashMap<Long, Int>()
+    /** The tile most recently handed out for writing; never evicted. */
+    private var lastWritable: Long = Long.MIN_VALUE
+    /** Evicted tiles whose spill record could not be read back (CRC / IO). */
+    private val lost = HashSet<Long>()
+
+    class EvictCandidate(val store: SparseTileStore, val key: Long, val lastUse: Long)
+
+    val evictedCount: Int get() = evicted.size
+    val lostTiles: Int get() = lost.size
+    val pinCount: Int get() = pins.size
+
+    fun pinTile(tx: Int, ty: Int) {
+        if (cache == null) return
+        val k = key(tx, ty)
+        pins[k] = (pins[k] ?: 0) + 1
+    }
+
+    fun unpinTile(tx: Int, ty: Int) {
+        if (cache == null) return
+        val k = key(tx, ty)
+        val n = (pins[k] ?: return) - 1
+        if (n <= 0) pins.remove(k) else pins[k] = n
+    }
+
+    private fun touch(k: Long) {
+        val c = cache ?: return
+        c.tick++
+        lastUse[k] = c.tick
+    }
+
+    /**
+     * The resident tile at [k], loading it from the spill file when it was
+     * evicted. Every read of a tile goes through here.
+     */
+    private fun tileAt(k: Long): Bitmap? {
+        val t = tiles[k]
+        if (t != null) {
+            if (cache != null) touch(k)
+            return t
+        }
+        if (evicted.isEmpty() || k !in evicted) return null
+        return loadTile(k)
+    }
+
+    private fun loadTile(k: Long): Bitmap? {
+        val c = cache
+        val f = spillFile
+        val rec = f?.lookup(k)
+        if (c == null || f == null || rec == null) {
+            evicted.remove(k)
+            lost.add(k)
+            return null
+        }
+        val bmp = TilePool.acquire(rec.w, rec.h)
+        try {
+            f.read(rec, bmp, c.readScratch)
+        } catch (e: java.io.IOException) {
+            TilePool.release(bmp)
+            c.readFailures++
+            c.lastError = "Could not read a cached tile back (${e.message}); " +
+                "this layer will not be saved until it is repainted"
+            // Mark it lost: reads show the default, and saving this layer
+            // refuses with a message instead of writing incomplete pixels.
+            evicted.remove(k)
+            lost.add(k)
+            return null
+        }
+        tiles[k] = bmp
+        evicted.remove(k)
+        lost.remove(k)
+        c.loads++
+        c.syncLoads++
+        if (!c.blockingLoads) c.syncLoadsRender++
+        touch(k)
+        // Loading can push far past the budget inside one long operation; trim
+        // other tiles (never [k]'s bitmap from under the caller: evicted
+        // bitmaps are dropped, not pooled, and [lastWritable] is skipped).
+        if (c.blockingLoads) c.evictIfFarOver()
+        return bmp
+    }
+
+    /** Drops any spill state for [k]: its pixels are being replaced. */
+    private fun forgetSpill(k: Long) {
+        if (spillFile == null) return
+        spillFile?.drop(k)
+        evicted.remove(k)
+        lost.remove(k)
+    }
+
+    /** Adds every evictable resident tile to [out]. */
+    fun collectEvictable(out: MutableList<EvictCandidate>) {
+        if (spillFile == null) return
+        for (k in tiles.keys) {
+            if (k in solids || k == lastWritable || pins.containsKey(k)) continue
+            out.add(EvictCandidate(this, k, lastUse[k] ?: 0L))
+        }
+    }
+
+    /**
+     * Evicts one tile: a clean one (current spill record) is just dropped, a
+     * dirty one is written first. Returns the private bytes freed, 0 if the
+     * tile stays (pinned, solid, write failure, no disk space).
+     */
+    fun evictTile(k: Long): Long {
+        val c = cache ?: return 0L
+        val f = spillFile ?: return 0L
+        if (k in solids || k == lastWritable || pins.containsKey(k)) return 0L
+        val t = tiles[k] ?: return 0L
+        val bytes = t.byteCount.toLong()
+        val tx = (k ushr 32).toInt()
+        val ty = k.toInt()
+        if (isTileEmpty(tx, ty)) {
+            removeTile(k)
+            return bytes
+        }
+        if (!f.has(k)) {
+            if (!c.diskHasRoom(bytes + SpillFile.HEADER)) {
+                c.writeFailures++
+                c.lastError = "Low storage: keeping canvas tiles in memory"
+                return 0L
+            }
+            try {
+                f.write(k, t)
+            } catch (e: java.io.IOException) {
+                c.writeFailures++
+                c.lastError = "Could not write the tile cache (${e.message}); " +
+                    "keeping tiles in memory"
+                return 0L
+            }
+            c.dirtyWrites++
+        }
+        tiles.remove(k)
+        canvases.remove(k)
+        lastUse.remove(k)
+        evicted.add(k)
+        c.evictions++
+        // Not pooled: a caller may still hold this bitmap for a read.
+        return bytes
+    }
+
+    fun evictAllUnpinned(): Int {
+        if (spillFile == null) return 0
+        var n = 0
+        for (k in ArrayList(tiles.keys)) if (evictTile(k) > 0L) n++
+        return n
+    }
+
+    /** Installs a tile the prefetcher decoded, if it is still the current data. */
+    fun adoptPrefetched(k: Long, rec: SpillFile.Record, bmp: Bitmap): Boolean {
+        if (k !in evicted || spillFile?.lookup(k) !== rec) return false
+        tiles[k] = bmp
+        evicted.remove(k)
+        touch(k)
+        return true
+    }
+
+    /** Schedules every evicted tile intersecting [rect] for background decode. */
+    fun prefetchIn(rect: Rect) {
+        val c = cache ?: return
+        if (evicted.isEmpty()) return
+        for (ty in tyRange(rect)) for (tx in txRange(rect)) {
+            val k = key(tx, ty)
+            if (k !in evicted) continue
+            val rec = spillFile?.lookup(k) ?: continue
+            c.requestPrefetch(this, k, rec)
+        }
+    }
+
+    /** True when a tile inside [rect] is evicted (it would need a disk read). */
+    fun hasEvictedIn(rect: Rect): Boolean {
+        if (evicted.isEmpty()) return false
+        for (ty in tyRange(rect)) for (tx in txRange(rect)) {
+            if (key(tx, ty) in evicted) return true
+        }
+        return false
+    }
+
+    /** Synchronous load of one evicted tile (a failed prefetch is retried here). */
+    fun loadEvicted(k: Long) {
+        if (k in evicted) loadTile(k)
+    }
+
+    /** Loads every evicted tile back (before the cache goes away). */
+    fun loadAll() {
+        for (k in ArrayList(evicted)) loadTile(k)
+    }
+
+    /** The cache is closing (document closed): forget the spill file. */
+    fun detachCache() {
+        spillFile?.close(delete = true)
+        spillFile = null
+        cache = null
+        lost.addAll(evicted)
+        evicted.clear()
+        lastUse.clear()
+        pins.clear()
+    }
+
+    /** Keys of every existing tile, resident or evicted (a snapshot). */
+    private fun allKeys(): List<Long> {
+        if (evicted.isEmpty()) return ArrayList(tiles.keys)
+        val out = ArrayList<Long>(tiles.size + evicted.size)
+        out.addAll(tiles.keys)
+        out.addAll(evicted)
+        return out
+    }
 
     override val isSparse: Boolean = true
 
@@ -670,6 +900,8 @@ class SparseTileStore(
     private fun removeTile(k: Long) {
         val b = tiles.remove(k)
         canvases.remove(k)
+        lastUse.remove(k)
+        forgetSpill(k)
         // A removed tile reads as missing, so any cached opacity is stale.
         opaqueTiles.remove(k)
         opaqueVerified.remove(k)
@@ -680,6 +912,10 @@ class SparseTileStore(
     private fun releaseAll() {
         for ((k, b) in tiles) if (k !in solids) TilePool.release(b)
         tiles.clear()
+        evicted.clear()
+        lost.clear()
+        lastUse.clear()
+        spillFile?.dropAll()
         solids.clear()
         canvases.clear()
         opaqueTiles.clear()
@@ -693,6 +929,14 @@ class SparseTileStore(
      * so cached opacity stays valid until the caller's write marks it dirty.
      */
     private fun writableTile(k: Long, tx: Int, ty: Int): Bitmap {
+        if (spillFile != null) {
+            // Protect the tile from eviction until the next one is handed out,
+            // and invalidate its spill record: the caller is about to change it.
+            lastWritable = k
+            val cur0 = tileAt(k)
+            spillFile?.drop(k)
+            if (cur0 == null) lost.remove(k)
+        }
         val cur = tiles[k]
         if (cur != null) {
             if (solids.isEmpty() || k !in solids) return cur
@@ -757,6 +1001,8 @@ class SparseTileStore(
         canvases.remove(k)
         tiles[k] = shared
         solids[k] = colour
+        // Solids stay resident (no private bytes), so a spill record is moot.
+        spillFile?.drop(k)
         TilePool.release(t)
         return true
     }
@@ -766,6 +1012,7 @@ class SparseTileStore(
      * whatever private tile was there. Pixels change, so the caller marks dirty.
      */
     private fun assignSolid(k: Long, shared: Bitmap, colour: Int) {
+        forgetSpill(k)
         val old = tiles[k]
         if (old != null && old !== shared) releaseOwned(k, old)
         canvases.remove(k)
@@ -838,6 +1085,7 @@ class SparseTileStore(
             if (t.width != tileW(tx) || t.height != tileH(ty)) bad++
         }
         for (k in solids.keys) if (!tiles.containsKey(k)) bad++
+        for (k in evicted) if (tiles.containsKey(k) || k in solids) bad++
         return bad
     }
 
@@ -873,6 +1121,9 @@ class SparseTileStore(
                 val k = key(tx, ty)
                 tiles[k] = tile
                 if (solidTiles) compactTile(k)
+                // Opening a large document splits layer after layer: keep the
+                // resident set inside the budget while doing it.
+                cache?.evictIfFarOver()
             }
         }
     }
@@ -908,7 +1159,12 @@ class SparseTileStore(
 
     override fun residentBytes(): Long {
         var total = 0L
-        for ((k, tile) in tiles) if (k !in solids) total += tile.byteCount.toLong()
+        // Arithmetic, not Bitmap.byteCount (a JNI call per tile): the cache
+        // sums this over every store at each safe point.
+        for (k in tiles.keys) {
+            if (k in solids) continue
+            total += tileW((k ushr 32).toInt()).toLong() * tileH(k.toInt()).toLong() * 4L
+        }
         return total
     }
 
@@ -920,7 +1176,7 @@ class SparseTileStore(
 
     override fun getTile(tx: Int, ty: Int): Bitmap? {
         if (tx !in 0 until tileCountX || ty !in 0 until tileCountY) return null
-        return tiles[key(tx, ty)]
+        return tileAt(key(tx, ty))
     }
 
     override fun obtainTileForWrite(tx: Int, ty: Int): Bitmap {
@@ -935,7 +1191,7 @@ class SparseTileStore(
         if (rect.isEmpty) return
         for (ty in tyRange(rect)) {
             for (tx in txRange(rect)) {
-                tiles[key(tx, ty)]?.let { action(tx, ty, it) }
+                tileAt(key(tx, ty))?.let { action(tx, ty, it) }
             }
         }
     }
@@ -943,6 +1199,8 @@ class SparseTileStore(
     override fun isTileEmpty(tx: Int, ty: Int): Boolean {
         if (tx !in 0 until tileCountX || ty !in 0 until tileCountY) return true
         val k = key(tx, ty)
+        // Evicted tiles are never empty (an empty tile is removed instead).
+        if (evicted.isNotEmpty() && k in evicted) return false
         val tile = tiles[k] ?: return true
         solids[k]?.let { return it == defaultPixel }
         val w = tile.width
@@ -1048,7 +1306,7 @@ class SparseTileStore(
         if (x !in 0 until width || y !in 0 until height) return defaultPixel
         val tx = x / tileSize
         val ty = y / tileSize
-        val tile = tiles[key(tx, ty)] ?: return defaultPixel
+        val tile = tileAt(key(tx, ty)) ?: return defaultPixel
         return tile.getPixel(x - tx * tileSize, y - ty * tileSize)
     }
 
@@ -1061,11 +1319,11 @@ class SparseTileStore(
         for (ty in tyRange(r)) {
             for (tx in txRange(r)) {
                 val k = key(tx, ty)
-                val tile = tiles[k] ?: continue
+                if (!tiles.containsKey(k) && (evicted.isEmpty() || k !in evicted)) continue
                 val x0 = tx * tileSize
                 val y0 = ty * tileSize
                 val covers = r.left <= x0 && r.top <= y0 &&
-                    r.right >= x0 + tile.width && r.bottom >= y0 + tile.height
+                    r.right >= x0 + tileW(tx) && r.bottom >= y0 + tileH(ty)
                 if (covers) {
                     remove.add(k)
                 } else {
@@ -1189,7 +1447,7 @@ class SparseTileStore(
         ensureResident()
         val k = key(tx, ty)
         if (source == null) {
-            if (!tiles.containsKey(k)) return
+            if (!tiles.containsKey(k) && (evicted.isEmpty() || k !in evicted)) return
             val c = canvasFor(k, writableTile(k, tx, ty))
             val save = c.save()
             c.clipRect(r.left - tx0, r.top - ty0, r.right - tx0, r.bottom - ty0)
@@ -1243,7 +1501,8 @@ class SparseTileStore(
     override fun drawInto(canvas: Canvas, paint: Paint?) {
         ensureResident()
         if (defaultPixel == 0) {
-            for ((k, tile) in tiles) {
+            for (k in allKeys()) {
+                val tile = tileAt(k) ?: continue
                 canvas.drawBitmap(
                     tile, ((k ushr 32).toInt() * tileSize).toFloat(),
                     (k.toInt() * tileSize).toFloat(), paint
@@ -1294,12 +1553,12 @@ class SparseTileStore(
                 for (tx in txr) {
                     val key = (tx.toLong() shl 32) or tyBits
                     if (!prof) {
-                        val tile = tiles[key] ?: continue
+                        val tile = tileAt(key) ?: continue
                         canvas.drawBitmap(tile, (tx * tileSize).toFloat(), y0, paint)
                         continue
                     }
                     val t0 = System.nanoTime()
-                    val tile = tiles[key]
+                    val tile = tileAt(key)
                     CompositeProfile.lookupNanos += System.nanoTime() - t0
                     if (tile == null) continue
                     CompositeProfile.tileLookups++
@@ -1344,7 +1603,7 @@ class SparseTileStore(
 
     /** Scans one tile for full opacity; the raw truth behind [isTileOpaque]. */
     private fun computeOpaque(k: Long, trustSolid: Boolean = true): Boolean {
-        val t = tiles[k]
+        val t = tileAt(k)
         // A missing tile is the store default, which is opaque for a mask.
         if (t == null || t.isRecycled) return (defaultPixel ushr 24) == 255
         // A solid's colour is its every pixel. The verifier passes false so it
@@ -1384,7 +1643,7 @@ class SparseTileStore(
         if (r.isEmpty) return true
         for (ty in tyRange(r)) {
             for (tx in txRange(r)) {
-                val tile = tiles[key(tx, ty)] ?: continue
+                val tile = tileAt(key(tx, ty)) ?: continue
                 val x0 = tx * tileSize
                 val y0 = ty * tileSize
                 val l = max(r.left, x0)
@@ -1447,7 +1706,7 @@ class SparseTileStore(
             for (tx in rect.left / tileSize..(rect.right - 1) / tileSize) {
                 val x0 = tx * tileSize
                 val y0 = ty * tileSize
-                val tile = tiles[key(tx, ty)]
+                val tile = tileAt(key(tx, ty))
                 if (tile != null) {
                     canvas.drawBitmap(tile, x0.toFloat(), y0.toFloat(), paint)
                 } else {
@@ -1476,7 +1735,8 @@ class SparseTileStore(
         val out = AllocTracker.bitmap("store.copyAll", width, height)
         val c = Canvas(out)
         c.drawColor(defaultPixel, BlendMode.SRC)
-        for ((k, tile) in tiles) {
+        for (k in allKeys()) {
+            val tile = tileAt(k) ?: continue
             val tx = (k ushr 32).toInt()
             val ty = k.toInt()
             c.drawBitmap(tile, (tx * tileSize).toFloat(), (ty * tileSize).toFloat(), srcPaint)
@@ -1486,7 +1746,7 @@ class SparseTileStore(
 
     override fun readTileCopy(tx: Int, ty: Int): Bitmap? {
         if (tx !in 0 until tileCountX || ty !in 0 until tileCountY) return null
-        val tile = tiles[key(tx, ty)] ?: return null
+        val tile = tileAt(key(tx, ty)) ?: return null
         if (isTileEmpty(tx, ty)) return null
         val out = TilePool.acquire(tile.width, tile.height)
         Canvas(out).drawBitmap(tile, 0f, 0f, null)
@@ -1532,6 +1792,7 @@ class SparseTileStore(
             Rect(0, 0, tw, th),
             srcPaint
         )
+        forgetSpill(k)
         val old = tiles[k]
         if (old != null && old !== source) releaseOwned(k, old)
         solids.remove(k)
@@ -1560,17 +1821,16 @@ class SparseTileStore(
     override fun nonEmptyBounds(): Rect {
         ensureResident()
         val out = Rect()
-        for ((k, tile) in tiles) {
+        // Evicted tiles are non-empty by invariant, so they count without a load.
+        for (k in allKeys()) {
             val tx = (k ushr 32).toInt()
             val ty = k.toInt()
             if (isTileEmpty(tx, ty)) continue
             val x0 = tx * tileSize
             val y0 = ty * tileSize
-            if (out.isEmpty) {
-                out.set(x0, y0, x0 + tile.width, y0 + tile.height)
-            } else {
-                out.union(x0, y0, x0 + tile.width, y0 + tile.height)
-            }
+            val x1 = x0 + tileW(tx)
+            val y1 = y0 + tileH(ty)
+            if (out.isEmpty) out.set(x0, y0, x1, y1) else out.union(x0, y0, x1, y1)
         }
         return out
     }

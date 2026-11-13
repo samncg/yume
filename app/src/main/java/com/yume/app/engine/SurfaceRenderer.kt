@@ -63,6 +63,7 @@ class SurfaceRenderer(
     private val invView = Matrix()
     private val viewCorners = FloatArray(8)
     private val viewportRect = Rect()
+    private val prefetchRect = Rect()
 
     /**
      * The document rectangle the surface currently shows, so a sparse composite
@@ -139,6 +140,7 @@ class SurfaceRenderer(
 
     override fun run() {
         session.wakeListener = { wake() }
+        session.ownerThread = Thread.currentThread()
         try {
             while (running) {
                 var work = false
@@ -148,7 +150,19 @@ class SurfaceRenderer(
                 session.rebuildTransformIfNeeded()
 
                 val engine = session.engine
-                if (engine.flush()) work = true
+                // Tile cache: adopt finished prefetches, then composite without
+                // blocking on disk (non-active layers' evicted tiles are deferred
+                // and their composite tiles stay stale until they land).
+                val cache = TileCache.active
+                cache?.adoptPrefetched()
+                if (cache != null) cache.blockingLoads = false
+                try {
+                    if (engine.flush()) work = true
+                } finally {
+                    if (cache != null) cache.blockingLoads = true
+                }
+                // While tiles are pending, keep polling for them.
+                if (cache != null && cache.pendingPrefetches() > 0) work = true
 
                 val antsActive = engine.selection != null
                 if (session.publishIfNeeded() && !work) work = true
@@ -160,6 +174,8 @@ class SurfaceRenderer(
                 if (renderRequested) {
                     renderRequested = false
                     drawFrame()
+                    // Safe point: nothing holds a writable tile between frames.
+                    cache?.evictIfNeeded()
                 } else {
                     lock.withLock {
                         if (!renderRequested && running) {
@@ -174,6 +190,7 @@ class SurfaceRenderer(
             }
         } finally {
             session.wakeListener = null
+            session.ownerThread = null
         }
     }
 
@@ -259,6 +276,21 @@ class SurfaceRenderer(
                     else engine.drawComposite(canvas, rect)
                 } else {
                     engine.drawComposite(canvas, rect)
+                    // Warm the visible tiles (plus a tile of margin) of the layer
+                    // being painted. Other layers are not needed to pan: the
+                    // composite stays resident, and prefetching all of them would
+                    // only thrash the budget.
+                    TileCache.active?.let { _ ->
+                        val m = TileStoreConfig.tileSize
+                        prefetchRect.set(
+                            max(0, rect.left - m), max(0, rect.top - m),
+                            min(engine.width, rect.right + m), min(engine.height, rect.bottom + m)
+                        )
+                        engine.activeLayer?.let { l ->
+                            (l.tiles as? SparseTileStore)?.prefetchIn(prefetchRect)
+                            (l.maskTiles as? SparseTileStore)?.prefetchIn(prefetchRect)
+                        }
+                    }
                 }
             } else {
                 canvas.drawBitmap(engine.composite, 0f, 0f, blitPaint)

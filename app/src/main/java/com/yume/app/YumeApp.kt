@@ -17,6 +17,8 @@ class YumeApp : Application() {
     override fun onCreate() {
         super.onCreate()
         MemoryBudget.configure(getSystemService(ActivityManager::class.java))
+        // Tile caches are scratch: anything left over is from a crash.
+        com.yume.app.engine.TileCache.removeStale(cacheDir)
         projectStore = ProjectStore(this)
         presetStore = PresetStore(this)
     }

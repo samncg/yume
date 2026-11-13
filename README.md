@@ -773,9 +773,16 @@ so documents written by either store open in the other and in the old build.
 - **Group children have one opacity, owned by the group.** Splitting a child's
   opacity from its group's is not supported; grouping a layer resets it to 100%
   and the per-layer slider is replaced by a note.
-- **Only hidden layers are swapped to disk.** Visible layers must stay in memory
-  for compositing, so a document with many *visible* layers at high resolution
-  still scales with resolution × layer count.
+- **Sparse documents evict tiles to disk (Stage 3b).** With sparse layers on,
+  a per-document tile cache keeps layer and mask tiles within a budget (half
+  the large-heap class) and spills the least recently used ones to a scratch
+  file in the app cache, read back on demand. Frames never wait on disk for
+  layers other than the one being painted: the affected composite tiles stay
+  stale for a moment while two background threads load them. The cache is
+  deleted when the document closes. Very fast strokes over a 30-layer 4096²
+  document whose painted tiles are four times the budget still exceed the
+  120 Hz frame budget at p99 (about 11 ms in the harness). Dense documents
+  still swap only hidden layers.
 - **Auto-select scans at half resolution** on documents larger than one
   megapixel, so its edges are accurate to about two pixels. That keeps a tap on
   a large blank area interactive (roughly 160 ms for a 2048² canvas) instead of

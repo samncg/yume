@@ -774,3 +774,55 @@ phase=58-edge-marker L0=75828c5b L1=a340a261/607ae157 L2=acb3259e/61a741de L3=05
 #   deliberately not tile aligned) and the tiles each stroke unshared.
 # Frame/paint tables are within noise of Stage 3a (4096^2 sparse x30 p99 2.70
 # ms, x10 3.18 ms; 2048^2 gate PASS everywhere); alloc-per-op unchanged.
+
+# ============================================================================
+# Stage 3b-1b/1c: tile cache with byte budget and LRU eviction (oracle unchanged)
+# ============================================================================
+# TileCache (per document, sparse only): budget = largeMemoryClass/2 (256 MB on
+# the Pad; debug override TileCache.debugBudgetOverride), covering layer, mask,
+# composite, mip, stroke-cache, capture, pool and solid tiles. Layer/mask stores
+# spill to one append-only SpillFile each (cache/tilecache/<doc>-<nonce>/):
+# 32-byte header with header CRC, payload CRC, Deflater level 1 or raw, an
+# in-memory index, compaction at 50% garbage. Clean tiles are dropped, dirty
+# ones written first; pinned (TileCapture), last-writable and solid tiles are
+# never evicted; evicted bitmaps are dropped, not pooled. Render frames do not
+# block on disk: a composite tile needing a non-active layer's evicted tile
+# keeps its stale pixels and is retried once two prefetch threads have loaded
+# it; frames also cap composite work at 4 ms. Saves read sparse tiles on the
+# engine's owner thread. Cache dir deleted on close, stale dirs at app start.
+#
+# Goldens under eviction (sparse, compared line by line with the uncached run):
+#   2048^2 and 2000x1333, tile 64 and 256, modes budget=1MB enforced after every
+#   op, budget=4MB after every op, evict-everything-unpinned before each phase
+#   hash: 12/12 MATCH (59 phases, 0 bad, 0 lost tiles). Per mode at 2048^2
+#   tile 64: 112179 / 60211 / 31258 evictions, 110690 / 58722 / 31152 loads,
+#   9.0 / 8.4 / 8.1 MB written, 1 compaction each.
+# Full run after 3b: every phase line and every tolerance diff/class line is
+# identical to the 3b-1a run; a fresh-process dense run reproduces the
+# recorded oracle (0 new lines).
+#
+# Evict fuzz (random forced evictions between ops: random budget, all, one
+# tile; solids on; verifySolids + opaque verifier + lost-tile check each op):
+#   9 configs (tiles 16/64/256, 37x53, 1001x777, 2000x1333, 2048^2, two mask
+#   canvases), all PASS, up to 164680 evictions / 160521 loads per config.
+# Failure injection: failing writer (nothing evicted, nothing lost, message),
+#   low disk (refuses, message), corrupt payload (CRC detects, 1 tile lost,
+#   others intact), truncated log (short read detected, same), compaction
+#   (5 compactions, pixels exact), save with an unreadable tile (previous PNG
+#   kept, message): all PASS.
+#
+# 4096^2 x 30 layers, ~50% of tiles opaque noise (3861 tiles = 965 MB), budget
+# 256 MB: reopen PASS (flattened hash 3d7b51ac before save and after reopen).
+#   create+composite 24.4 s; save 51.8 s (30 full PNG encodes); open+composite
+#   33.8 s; peak accounted 324 MB (budget + composite + slack), Java heap peak
+#   118 MB on reopen; spill 855 MB on disk; 0 write/read failures.
+#   frames (ms)            p50   p95   p99   max   notes
+#   painting (fast stroke) 5.88  9.80 11.29 19.03  syncRender=14, 7489 deferred
+#   cold recomposite       6.41  6.89  7.05  7.21  done in 2.7 s, syncRender=0
+#   panning 2560x1600      2.40  2.98  3.17  7.28  syncRender=0
+#   Painting misses 8.33 ms at p99 in this stress case (working set ~4x the
+#   budget, stroke crossing ~3 screens/s); reported, not tuned further.
+# Stroke cache: the below-layer cache is now seeded on a stroke's first touch
+# of a tile (whole-tile pass; same pixels as a sub-rect pass), so later frames
+# do not read, or need resident, the layers below. Painted-stack p99 stays
+# inside the gates (4096^2 x10 4.86 ms, x30 5.16 ms; 2048^2 x30 5.03 ms < 6).

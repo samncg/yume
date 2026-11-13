@@ -55,6 +55,16 @@ class EditorController(
             val project = store.loadProject(projectId)
                 ?: store.createProject("Untitled", 2048, 2048, 0xFFFFFFFF.toInt())
 
+            // Sparse documents get a tile cache: layer tiles beyond the budget
+            // are evicted to a spill file in the cache directory.
+            tileCache = if (com.yume.app.engine.TileStoreConfig.useSparseLayers) {
+                com.yume.app.engine.TileCache.open(
+                    store.cacheRoot(), project.id,
+                    com.yume.app.engine.TileCache.defaultBudget(store.activityManager())
+                )
+            } else {
+                null
+            }
             val engine = DrawingEngine(project.width, project.height)
             engine.backgroundColor = project.background
             engine.symmetryX = project.symmetryX
@@ -127,6 +137,10 @@ class EditorController(
         }
     }
 
+    /** This document's tile cache (sparse documents only). */
+    private var tileCache: com.yume.app.engine.TileCache? = null
+    private var exitSave: kotlinx.coroutines.Deferred<Boolean>? = null
+
     fun save() {
         val session = _session.value ?: return
         scope.launch { saveNow(session) }
@@ -155,6 +169,7 @@ class EditorController(
             val save = SaveScope.async {
                 runCatching { saveNow(session) }.isSuccess
             }
+            exitSave = save
             val completed = withTimeoutOrNull(EXIT_SAVE_TIMEOUT_MS) { save.await() } ?: false
             finalSaveDone = completed
             withContext(Dispatchers.Main) {
@@ -167,6 +182,14 @@ class EditorController(
     private suspend fun saveNow(session: DrawingSession) {
         val snapshot = session.snapshotBlocking() ?: return
         runCatching { store.saveProject(projectId, snapshot) }
+        store.saveWarning?.let {
+            store.saveWarning = null
+            _message.value = it
+        }
+        tileCache?.lastError?.let {
+            tileCache?.lastError = null
+            _message.value = it
+        }
         session.historyForDiskBlocking()?.let { history ->
             runCatching { store.saveHistory(projectId, history) }
         }
@@ -230,9 +253,21 @@ class EditorController(
         if (disposed) return
         disposed = true
         val session = _session.value
+        val cache = tileCache
+        tileCache = null
         if (session != null && !finalSaveDone && !exitSaveStarted) {
             // Detached from this controller's scope so the final save survives.
-            SaveScope.launch { saveNow(session) }
+            // The tile cache is only deleted once that save has read every tile.
+            SaveScope.launch {
+                runCatching { saveNow(session) }
+                cache?.close()
+            }
+        } else if (cache != null) {
+            val pending = exitSave
+            SaveScope.launch {
+                runCatching { pending?.await() }
+                cache.close()
+            }
         }
         scope.cancel()
     }

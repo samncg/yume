@@ -67,6 +67,12 @@ data class LoadedProject(
  */
 class ProjectStore(private val context: Context) {
 
+    /** Root for per-document tile caches (scratch, deleted on close). */
+    fun cacheRoot(): File = context.cacheDir
+
+    fun activityManager(): android.app.ActivityManager? =
+        context.getSystemService(android.app.ActivityManager::class.java)
+
     private val root: File
         get() = File(context.filesDir, "projects").apply { mkdirs() }
 
@@ -179,7 +185,12 @@ class ProjectStore(private val context: Context) {
                 // Lazy open: hidden layers stay on disk until something needs
                 // their pixels. A missing file still gets a blank surface so the
                 // layer has a valid size when it is painted on.
+                // Sparse documents open every layer lazily: the store decodes its
+                // file on first use and splits it into (evictable) tiles, so
+                // opening never holds all layers' full bitmaps at once.
+                val lazyAll = com.yume.app.engine.TileStoreConfig.useSparseLayers
                 val bitmap: Bitmap? = when {
+                    visible && exists && lazyAll -> null
                     visible && exists -> decodeLayerFile(file)
                     !visible && exists -> null
                     else -> Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -190,7 +201,7 @@ class ProjectStore(private val context: Context) {
                 } else {
                     File(dir, maskName).takeIf { it.exists() }
                 }
-                val mask = if (visible && maskFile != null) decodeLayerFile(maskFile) else null
+                val mask = if (visible && maskFile != null && !lazyAll) decodeLayerFile(maskFile) else null
                 layers.add(
                     LayerSnapshotData(
                         name = o.optString("name", "Layer ${i + 1}"),
@@ -279,7 +290,7 @@ class ProjectStore(private val context: Context) {
                     // Stage 2: assemble a full bitmap for the PNG encoder. One
                     // layer at a time, so peak extra memory is one canvas.
                     val tmp = tempFile(dir, name)
-                    if (encodeStorePng(tmp, layer.sparse)) pending.add(tmp to target)
+                    if (encodeStorePng(tmp, layer.sparse, snapshot.onOwner)) pending.add(tmp to target)
                 } else {
                     val src = layer.file ?: layer.sparse?.backingFile()
                     if (src != null && src.exists() && src.absolutePath != target.absolutePath) {
@@ -304,7 +315,9 @@ class ProjectStore(private val context: Context) {
             } else if (layer.maskSparse != null && layer.maskSparse.isResident) {
                 if (!unchanged || !maskTarget.exists()) {
                     val tmp = tempFile(dir, maskName)
-                    if (encodeStorePng(tmp, layer.maskSparse)) pending.add(tmp to maskTarget)
+                    if (encodeStorePng(tmp, layer.maskSparse, snapshot.onOwner)) {
+                        pending.add(tmp to maskTarget)
+                    }
                 }
                 seenMask.add(maskName)
             } else if (layer.maskFile != null) {
@@ -424,7 +437,22 @@ class ProjectStore(private val context: Context) {
     }.getOrDefault(false)
 
     /** Assembles a sparse store into one bitmap only for the length of a write. */
-    private fun encodeStorePng(file: File, store: TileStore): Boolean {
+    /** Last save problem worth telling the user about (cleared when read). */
+    @Volatile var saveWarning: String? = null
+
+    private fun encodeStorePng(
+        file: File,
+        store: TileStore,
+        onOwner: (() -> Unit) -> Boolean = { it(); true }
+    ): Boolean {
+        // A cached tile that could not be read back (CRC / IO error) must not be
+        // saved as blank: keep the previous file and say so.
+        val sparse = store as? com.yume.app.engine.SparseTileStore
+        if (sparse != null && sparse.lostTiles > 0) {
+            saveWarning = "A layer could not be saved: ${sparse.lostTiles} cached tile(s) " +
+                "were unreadable. The previous saved version was kept."
+            return false
+        }
         // The one canvas-sized assembly a sparse document is allowed to build:
         // the surface handed to the PNG encoder. Allocated through the shared
         // encode site so the debug allocation counter can prove it is the only
@@ -432,7 +460,18 @@ class ProjectStore(private val context: Context) {
         if (!MemoryBudget.fitsBitmaps(store.width, store.height, 1)) return false
         val full = runCatching {
             val b = AllocTracker.encodeCanvas(store.width, store.height)
-            store.readRectInto(Rect(0, 0, store.width, store.height), b)
+            // Evicted tiles load on the engine's owner thread, never here.
+            if (!onOwner { store.readRectInto(Rect(0, 0, store.width, store.height), b) }) {
+                b.recycle()
+                saveWarning = "Saving timed out waiting for the canvas; kept the previous version"
+                return false
+            }
+            if (sparse != null && sparse.lostTiles > 0) {
+                b.recycle()
+                saveWarning = "A layer could not be saved: cached tiles were unreadable. " +
+                    "The previous saved version was kept."
+                return false
+            }
             b
         }.getOrNull() ?: return false
         return try {
@@ -507,7 +546,7 @@ class ProjectStore(private val context: Context) {
                 canvas.scale(
                     w.toFloat() / snapshot.width, h.toFloat() / snapshot.height
                 )
-                layer.sparse.drawInto(canvas, paint)
+                snapshot.onOwner { layer.sparse.drawInto(canvas, paint) }
                 canvas.restoreToCount(save)
                 continue
             }

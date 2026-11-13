@@ -14,6 +14,11 @@ import kotlin.math.min
  */
 class TileCapture(val store: TileStore) {
 
+    companion object {
+        /** Bytes held by all live captures (tile-cache accounting, render thread). */
+        @Volatile var liveBytes: Long = 0L
+    }
+
     private val before = HashMap<Long, Bitmap?>()
     /** Union of every captured tile, in document pixels. */
     val bounds = Rect()
@@ -24,7 +29,12 @@ class TileCapture(val store: TileStore) {
     fun capture(tx: Int, ty: Int) {
         val k = key(tx, ty)
         if (before.containsKey(k)) return
-        before[k] = store.readTileCopy(tx, ty)
+        // Pinned until release: an active stroke / transform / adjustment never
+        // has its tiles evicted from under it.
+        (store as? SparseTileStore)?.pinTile(tx, ty)
+        val copy = store.readTileCopy(tx, ty)
+        before[k] = copy
+        if (copy != null) liveBytes += copy.byteCount.toLong()
         extendBounds(tx, ty)
         if (CompositeProfile.enabled) CompositeProfile.captures++
     }
@@ -37,6 +47,7 @@ class TileCapture(val store: TileStore) {
     fun markEmpty(tx: Int, ty: Int) {
         val k = key(tx, ty)
         if (before.containsKey(k)) return
+        (store as? SparseTileStore)?.pinTile(tx, ty)
         before[k] = null
         extendBounds(tx, ty)
     }
@@ -76,6 +87,10 @@ class TileCapture(val store: TileStore) {
      * history entry, so they must not be recycled here.
      */
     fun release(keep: Set<Long> = emptySet()) {
+        (store as? SparseTileStore)?.let { s ->
+            for (k in before.keys) s.unpinTile((k ushr 32).toInt(), k.toInt())
+        }
+        for ((_, tile) in before) if (tile != null) liveBytes -= tile.byteCount.toLong()
         for ((k, tile) in before) {
             if (k in keep || tile == null) continue
             // Captured copies are exclusively owned by the capture, so they can

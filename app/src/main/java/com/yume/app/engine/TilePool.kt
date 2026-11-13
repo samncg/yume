@@ -42,6 +42,10 @@ object TilePool {
 
     val heldBytes: Long get() = bytes
 
+    /** Every acquisition (hit or fresh); the tile cache uses it as a cheap change signal. */
+    @Volatile var acquisitions: Long = 0L
+        private set
+
     private fun key(w: Int, h: Int): Long =
         (w.toLong() shl 32) or (h.toLong() and 0xFFFFFFFFL)
 
@@ -51,6 +55,7 @@ object TilePool {
      */
     @Synchronized
     fun acquire(w: Int, h: Int, fill: Int = 0): Bitmap {
+        acquisitions++
         val k = key(w, h)
         val q = free[k]
         val bmp = if (q != null && q.isNotEmpty()) {
