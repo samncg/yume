@@ -26,6 +26,7 @@ class TileCapture(val store: TileStore) {
         if (before.containsKey(k)) return
         before[k] = store.readTileCopy(tx, ty)
         extendBounds(tx, ty)
+        if (CompositeProfile.enabled) CompositeProfile.captures++
     }
 
     /**

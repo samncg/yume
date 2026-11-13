@@ -703,6 +703,7 @@ class SparseTileStore(
         }
         val k = key(tx, ty)
         return tiles.getOrPut(k) {
+            if (CompositeProfile.enabled) CompositeProfile.tilesAllocated++
             val bmp = Bitmap.createBitmap(tileW(tx), tileH(ty), Bitmap.Config.ARGB_8888)
             if (defaultPixel != 0) bmp.eraseColor(defaultPixel)
             bmp

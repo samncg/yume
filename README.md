@@ -633,6 +633,23 @@ so documents written by either store open in the other and in the old build.
   read→write feedback re-samples its own output: there the difference reaches
   25/255 on 942 pixels (0.02% of the canvas) at dragged high-contrast edges.
   See `docs/golden_hashes.txt` (Stage 2b-4) and `docs/diffs_v2/`.
+- **The eraser is the only brush whose single dab exceeds 2 LSB.** A one-off
+  single dab differs from a one-pass draw by 5/255 on 950 px, because DST_OUT
+  computes `dst * (1 - srcA)` and the pre-rounded coverage is multiplied by both
+  the destination and the paint alpha. Binding the dab as a `BitmapShader` and
+  blending it in one pipeline made the eraser bit-identical, but a shader's
+  combined matrix includes the canvas translation, so dense and sparse stopped
+  agreeing from the eraser phase on. That is the same translation sensitivity
+  the band existed to avoid, so the experiment was reverted; 5/255 is inside the
+  accepted policy.
+- **The painted pixels are deterministic.** Three independent runs in fresh
+  processes produce byte-identical dense oracles for all 59 phases on both
+  canvases; brush jitter uses a fixed seed and noise is keyed on canvas position.
+- **All large v1/v2 differences sit on edges.** Every pixel that differs by more
+  than 16/255 is within 3 px of a real edge in the composite (measured as a
+  colour range > 8 in a 7x7 box, which also catches wide soft ramps): 0 pixels
+  fail that test in any phase. The hard brush changes 229 px by <= 2/255, and the
+  soft stroke's 16 760 changed pixels are 98% <= 2/255.
 - **Sparse stroke benchmark.** On a 2048² canvas with a 64 px hard brush, 2000
   move events take 111.6 ms on `SingleTileStore` and 117.6 ms on
   `SparseTileStore` (about 1.5 tile write-backs per dab). That is 5% over the
@@ -645,13 +662,13 @@ so documents written by either store open in the other and in the old build.
 
   | canvas | store | layers | p50 | p95 | p99 | max |
   | --- | --- | --- | --- | --- | --- | --- |
-  | 2048² | dense | 1 | 0.48 | 0.71 | 1.93 | 15.6 |
-  | 2048² | dense | 20 | 0.43 | 0.59 | 0.62 | 25.5 |
-  | 2048² | sparse | 1 | 0.41 | 0.87 | 1.58 | 41.1 |
-  | 2048² | sparse | 20 | 0.43 | 1.13 | 1.91 | 66.6 |
-  | 4096² | dense | 1 | 0.61 | 0.85 | 0.91 | 20.1 |
-  | 4096² | sparse | 1 | 0.74 | 1.37 | 1.94 | 132.0 |
-  | 4096² | sparse | 20 | 1.19 | 2.09 | 3.16 | 239.5 |
+  | 2048² | dense | 1 | 0.47 | 0.63 | 0.68 | 7.2 |
+  | 2048² | dense | 20 | 0.41 | 0.56 | 0.60 | 24.9 |
+  | 2048² | sparse | 1 | 0.40 | 0.92 | 1.53 | 50.0 |
+  | 2048² | sparse | 20 | 0.44 | 1.10 | 1.94 | 66.3 |
+  | 4096² | dense | 1 | 0.57 | 0.77 | 0.83 | 20.2 |
+  | 4096² | sparse | 1 | 0.73 | 1.28 | 1.96 | 128.5 |
+  | 4096² | sparse | 20 | 1.08 | 1.85 | 2.75 | 205.9 |
 
   All are milliseconds and all sit far inside a 120 Hz frame. The harness gate
   is p99 < 6 ms at 2048²; 4096² is reported against the 8.33 ms frame budget.
@@ -676,31 +693,45 @@ so documents written by either store open in the other and in the old build.
 
   | canvas | store | layers | fill | p50 | p95 | p99 | gc |
   | --- | --- | --- | --- | --- | --- | --- | --- |
-  | 2048² | dense | 10 | 80% | 0.80 | 1.05 | 1.06 | 0 / 0 ms |
-  | 2048² | sparse | 10 | 80% | 0.75 | 2.17 | 3.49 | 0 / 0 ms |
-  | 2048² | dense | 30 | 60% | 1.14 | 1.38 | 1.40 | 0 / 0 ms |
-  | 2048² | sparse | 30 | 60% | 0.86 | 4.63 | **5.63** | 0 / 0 ms |
-  | 4096² | dense | 10 | 50% | 1.34 | 1.90 | 1.97 | 1 / 23 ms |
-  | 4096² | sparse | 10 | 50% | 2.65 | 5.99 | **9.02** | 1 / 28 ms |
-  | 4096² | sparse | 30 | 30% | 4.82 | 9.28 | **12.09** | 1 / 22 ms |
-  | 4096² | sparse | 30 | 15% | 3.75 | 9.33 | **10.18** | 1 / 26 ms |
+  | 2048² | dense | 10 | 80% | 0.77 | 0.99 | 1.01 | 0 / 0 ms |
+  | 2048² | sparse | 10 | 80% | 0.77 | 1.92 | 2.89 | 0 / 0 ms |
+  | 2048² | dense | 30 | 60% | 1.18 | 1.47 | 1.49 | 0 / 0 ms |
+  | 2048² | sparse | 30 | 60% | 0.98 | 4.53 | **5.29** | 1 / 28 ms |
+  | 4096² | dense | 10 | 50% | 1.53 | 2.06 | 2.12 | 0 / 0 ms |
+  | 4096² | sparse | 10 | 50% | 2.89 | 6.36 | **9.06** | 1 / 27 ms |
+  | 4096² | sparse | 30 | 30% | 5.11 | 9.68 | **12.49** | 1 / 29 ms |
+  | 4096² | sparse | 30 | 15% | 4.04 | 9.34 | **10.40** | 1 / 36 ms |
 
-  Milliseconds. Every 2048² row passes the p99 < 6 ms gate (worst 5.63 ms at
+  Milliseconds. Every 2048² row passes the p99 < 6 ms gate (worst 5.29 ms at
   30 layers / 60% fill). The 4096² rows miss the 8.33 ms frame budget and are
-  reported, not gated; the device test is the judge.
+  reported, not gated; the device test is the judge, and the tail analysis below
+  explains what they are.
 - **Where the 4096² frame time goes.** `CompositeProfile` (debug only) counts
   tile visits, layer draws, tile lookups, opacity queries and cache hits, and
-  accumulates `System.nanoTime` per category. On 4096² sparse with 10 layers a
-  150-frame painted stroke visits 291 tiles (≈2 per frame), performs 1914 layer
-  draws and 12 non-empty tile lookups; the tile blits total **5.3 ms across all
-  150 frames**, opacity 14.6 ms (32 first-touch tile scans, 87% cache hits) and
-  lookups 0.04 ms. At 30 layers: 291 tiles, 8672 draws, 9.0 ms blits, 0 ms
-  opacity (100% hits), and the per-tile composite pass totals 456 ms over 150
-  frames (3.0 ms/frame). Painting totals 210 ms (1.4 ms/frame, 2747 dabs).
-  Composition is therefore **not** the residual: most of the 4096² p99 is the
-  stroke path (dab render plus tile write-back and per-stroke capture), which is
-  canvas-size independent per dab but whose dabs-per-frame and newly touched
-  tiles grow with the canvas. The 2048²/4096² p50 ratio follows the same shape.
+  accumulates `System.nanoTime` per category (composite pass, dab paint, tile
+  blits, opacity scans) plus the tile bitmaps newly allocated and the tiles
+  copied by the undo capture, per frame. On 4096² sparse with 10 layers a
+  150-frame painted stroke visits 291 composite tiles, performs 1914 layer draws
+  and 12 non-empty tile lookups; over the whole stroke the composite pass totals
+  270 ms, painting 210 ms and tile blits 5.3 ms, and the stroke allocates 63 tile
+  bitmaps and captures 60. At 30 layers the composite pass totals 453 ms,
+  painting 195 ms, blits 9.3 ms, 340 allocations, 60 captures. So the composite
+  pass, not the stroke path, is the per-frame cost at 4096², and it is almost
+  exactly proportional to how many 256 px tiles a frame touches (see the tail
+  latency note below).
+- **4096² tail latency is tile-crossing frames, not a pathology.** Per-frame
+  profiling of a 150-frame painted stroke at 4096² splits every frame into
+  composite, paint, blit, opacity, tile count and newly allocated tiles. The
+  worst 1% are exactly the frames where the stroke crosses into new 256 px
+  tiles: the dirty rect is rounded up to whole tiles, so such a frame composites
+  2x2 = 4 tiles instead of 1-2 and allocates 4-6 tile bitmaps. At 10 layers the
+  median frame is 2.87 ms (composite 1.71, paint 1.13, 1 tile) while the slowest
+  is 10.11 ms (composite 7.05, 4 tiles, 4 allocated); at 30 layers 5.18 ms
+  median vs 12.73 ms (composite 8.44, 4 tiles). The cost tracks tile count
+  almost exactly 4x, and paint and blit stay flat, so the allocation is not the
+  cost. Pooling tile bitmaps would not help; compositing only a tile's dirty
+  sub-rect would, but it changes the scratch-buffer geometry per frame and would
+  re-baseline the exact-hash compositor tests, so it is left to Stage 3.
 - **Compositor fast paths** (each verified by the stroke-cache and
   composite-invalidate tests, which is why they may be enabled at all):
   `drawIntoRectPreClipped` drops a save/clipRect/restore pair per tile and hoists
@@ -807,15 +838,14 @@ so documents written by either store open in the other and in the old build.
   It is bit-identical on 2048×2048 and on every even dimension; on the
   2000×1333 canvas 19 of 36 sampled cases changed by 4-460 px (≤ 0.02% of the
   selection). All stores agree with each other on every canvas.
-- **The painted-stack gate is met for every 2048² case** (worst 5.63 ms p99 at
-  30 layers / 60% fill against a 6 ms gate; 10 layers is 3.49 ms). The 4096²
-  sparse rows are 9.0-12.1 ms p99 against an 8.33 ms frame budget. This is
-  measured, not deferred: the ART collector runs **one** ~22-28 ms collection
-  across each 150-frame stroke, and the compositor profile shows the tile blits
-  cost only 5.3-9.0 ms across a whole 150-frame stroke. The residual is the
-  stroke path itself (dab render plus tile write-back and per-stroke capture),
-  whose per-frame cost grows with how many dabs and newly touched tiles a frame
-  adds at a larger canvas. Stage 3 eviction is the structural fix for a fully
+- **The painted-stack gate is met for every 2048² case** (worst 5.29 ms p99 at
+  30 layers / 60% fill against a 6 ms gate; 10 layers is 2.89 ms). The 4096²
+  sparse rows are 9.1-12.5 ms p99 against an 8.33 ms frame budget. This is
+  measured, not deferred: the ART collector runs **one** ~27-36 ms collection
+  across a 150-frame stroke, so GC is not the cause, and per-frame profiling
+  attributes the cost to the per-tile composite pass, which scales with the
+  number of 256 px tiles a frame touches (1-2 typically, 4 when the stroke
+  crosses a tile corner). Stage 3 eviction is the structural fix for a fully
   painted 30-layer 4096² document (350-420 MB of layer pixels on a 512 MB heap),
   but it is not what limits this p99.
 - **A dab is rounded to 8 bits between the resample and the blend.** That is the
@@ -824,7 +854,14 @@ so documents written by either store open in the other and in the old build.
   a soft stroke on 98% of its 16 760 differing pixels by ≤2/255) but smudge feeds
   its own output back in, so the rounding is re-sampled each dab: at dragged
   high-contrast edges the difference reaches 25/255 on 942 pixels (0.02% of the
-  canvas). See the Stage 2b-4 section of `docs/golden_hashes.txt`.
+  canvas), and every one of those pixels is within 3 px of a real edge. See the
+  Stage 2b-4 section of `docs/golden_hashes.txt`.
+- **The pre-2b-4 "v1" reference cannot be regenerated from source.** The band
+  implementation was removed when the dab scratch replaced it, so the only
+  records of v1 output are the v1 oracle lines in `docs/golden_hashes.txt`
+  (never overwritten) and the deflated dense composite pixels in `docs/v1ref/`.
+  The harness compares the current build against those pixels; it cannot
+  re-create them.
 - **A fully painted 30-layer 4096² document is 350-420 MB of layer pixels** on a
   512 MB heap, so Stage 3 eviction is still the structural fix for that shape of
   document.

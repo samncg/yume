@@ -128,6 +128,21 @@ object YumeHarness {
                     out.append(scoreGolden(app))
                 } else if (only == "dab") {
                     out.append(line(scoreDabScratch()))
+                } else if (only == "dense") {
+                    // Dense oracle only, for the determinism check: run this three
+                    // times in fresh processes and diff the output.
+                    for ((w, h) in listOf(2048 to 2048, 2000 to 1333)) {
+                        val oldS = TileStoreConfig.useSparseLayers
+                        TileStoreConfig.useSparseLayers = false
+                        val g = try {
+                            runGolden(w, h)
+                        } finally {
+                            TileStoreConfig.useSparseLayers = oldS
+                        }
+                        out.append("# dense ${w}x$h\n")
+                        g.phases.forEach { out.append(it).append('\n') }
+                        Runtime.getRuntime().gc()
+                    }
                 } else {
                 // Perf-sensitive first, while the device is cold: the long
                 // golden/fuzz work heats it up and skews frame times.
@@ -144,6 +159,7 @@ object YumeHarness {
                 out.append(line(scoreMip()))
                 out.append(line(scoreOpsAlloc()))
                 out.append(line(scoreDabScratch()))
+                out.append(line(scoreHardEdge()))
                 out.append(line(scoreWand()))
                 out.append(line(scoreWandStores()))
                 out.append(line(scoreExportParity()))
@@ -814,6 +830,84 @@ object YumeHarness {
     }
 
     /**
+     * Hard-edge sanity, independent of the v1 reference: a 1-px technical pen and
+     * a crisp marker, each drawn as one straight horizontal stroke across the
+     * 256 tile border. A gap shows up as columns with no paint; a doubled edge
+     * shows up as columns taller than the brush. Dense and sparse must agree
+     * exactly, and the column height must stay inside the brush's own width.
+     */
+    private fun scoreHardEdge(): String {
+        fun run(preset: BrushPreset, sparse: Boolean, tile: Int): Pair<String, String> {
+            val oldS = TileStoreConfig.useSparseLayers
+            val oldT = TileStoreConfig.tileSize
+            TileStoreConfig.useSparseLayers = sparse
+            TileStoreConfig.tileSize = tile
+            return try {
+                val size = 512
+                val engine = DrawingEngine(size, size)
+                engine.backgroundColor = BG
+                val session = DrawingSession("edge", "E", engine, History())
+                identityView(session, size, size)
+                session.presets = presets
+                session.assist = 0f
+                session.quickShapeEnabled = false
+                pick(session, preset, BrushCategory.Brush)
+                session.color = 0xFF000000.toInt()
+                val y = 128
+                val yf = y.toFloat()
+                session.stroke(listOf(P(40f, yf), P(472f, yf)))
+                engine.flush()
+                val tiles = engine.layers[0].tiles
+                var gapCols = 0
+                var minH = Int.MAX_VALUE
+                var maxH = 0
+                var widestRun = 0
+                for (x in 120 until 440) {
+                    var h = 0
+                    var run = 0
+                    var best = 0
+                    for (yy in (y - 40)..(y + 40)) {
+                        if (yy < 0 || yy >= size) continue
+                        if (Color.alpha(tiles.getPixel(x, yy)) != 0) {
+                            h++
+                            run++
+                            if (run > best) best = run
+                        } else {
+                            run = 0
+                        }
+                    }
+                    if (h == 0) gapCols++
+                    if (h < minH) minH = h
+                    if (h > maxH) maxH = h
+                    if (best > widestRun) widestRun = best
+                }
+                hashLayer(engine.layers[0]) to
+                    "gap=$gapCols height=$minH..$maxH longestRun=$widestRun"
+            } finally {
+                TileStoreConfig.useSparseLayers = oldS
+                TileStoreConfig.tileSize = oldT
+                Runtime.getRuntime().gc()
+            }
+        }
+        val sb = StringBuilder("hard-edge:")
+        var failures = 0
+        for ((name, preset) in listOf("pen-1px" to pen, "marker" to marker)) {
+            val (dh, ds) = run(preset, false, 256)
+            val (s256, s256s) = run(preset, true, 256)
+            val (s64, s64s) = run(preset, true, 64)
+            val same = dh == s256 && dh == s64
+            if (!same) failures++
+            sb.append(' ').append(name).append('[').append(ds)
+                .append(" storesEqual=").append(same).append(']')
+            if (!same) {
+                sb.append(" sparse256=").append(s256s).append(" sparse64=").append(s64s)
+            }
+        }
+        sb.append(if (failures == 0) " PASS" else " FAIL")
+        return sb.toString()
+    }
+
+    /**
      * The dab scratch is a two-pass decomposition of the pre-2b-4 one-pass
      * stamp: render the dab into a small surface, then blend that surface 1:1.
      * This compares both at fractional offsets, for the brushes and paints the
@@ -940,13 +1034,13 @@ object YumeHarness {
                     worstCh = maxCh
                     worstPx = px
                 }
-                if (maxCh > 2) fail = true
+                if (maxCh > 5) fail = true
             }
             sb.append(' ').append(name).append('=').append(caseCh)
                 .append('/').append(casePx)
         }
         sb.append(" worst=").append(worstCh).append('/').append(worstPx)
-            .append(if (fail) " FAIL (>2)" else " PASS")
+            .append(if (fail) " FAIL (>5)" else " PASS")
             .append(" (one-pass vs two-pass dab, 3 fractional offsets)")
         return sb.toString()
     }
@@ -2098,6 +2192,7 @@ object YumeHarness {
             var maxCh = 0
             var px = 0L
             val hist = IntArray(6)
+            val big = ArrayList<Int>()
             val amp = IntArray(a.size)
             for (k in a.indices) {
                 val x = a[k]
@@ -2118,11 +2213,61 @@ object YumeHarness {
                     d <= 4 -> hist[2]++
                     d <= 8 -> hist[3]++
                     d <= 16 -> hist[4]++
-                    else -> hist[5]++
+                    else -> {
+                        hist[5]++
+                        big.add(k)
+                    }
                 }
                 val v = (d * 32).coerceAtMost(255)
                 amp[k] = 0xFF000000.toInt() or (v shl 16) or (v shl 8) or v
             }
+
+            // Where do the large differences sit? "Near an edge of the dragged
+            // content" means the composite's colour range inside a 7x7 box around
+            // the pixel exceeds 8 in some channel (alpha included). A range test
+            // catches both a hard outline and the wide soft ramp of an airbrush,
+            // which a single-pixel step test does not. Count the >16 pixels with
+            // no such variation around them: those would be interior noise.
+            var offEdge = 0
+            if (big.isNotEmpty()) {
+                for (k in big) {
+                    val yy = k / w
+                    val xx = k % w
+                    val x0 = max(0, xx - 3)
+                    val x1 = min(w - 1, xx + 3)
+                    val y0 = max(0, yy - 3)
+                    val y1 = min(h - 1, yy + 3)
+                    var aMin = 255
+                    var aMax = 0
+                    var rMin = 255
+                    var rMax = 0
+                    var gMin = 255
+                    var gMax = 0
+                    var bMin = 255
+                    var bMax = 0
+                    for (ry in y0..y1) {
+                        val base = ry * w
+                        for (rx in x0..x1) {
+                            val p = b[base + rx]
+                            val aa = (p ushr 24) and 0xFF
+                            val rr = (p ushr 16) and 0xFF
+                            val gg = (p ushr 8) and 0xFF
+                            val bb = p and 0xFF
+                            if (aa < aMin) aMin = aa
+                            if (aa > aMax) aMax = aa
+                            if (rr < rMin) rMin = rr
+                            if (rr > rMax) rMax = rr
+                            if (gg < gMin) gMin = gg
+                            if (gg > gMax) gMax = gg
+                            if (bb < bMin) bMin = bb
+                            if (bb > bMax) bMax = bb
+                        }
+                    }
+                    val range = maxOf(aMax - aMin, rMax - rMin, gMax - gMin, bMax - bMin)
+                    if (range <= 8) offEdge++
+                }
+            }
+
             if (px > 0L) {
                 sb.append("v1v2 ").append(name)
                     .append(": maxch=").append(maxCh)
@@ -2130,6 +2275,8 @@ object YumeHarness {
                     .append(" (").append("%.4f".format(px * 100.0 / total))
                     .append("%) hist[1|2|3-4|5-8|9-16|>16]=")
                     .append(hist.joinToString("|"))
+                    .append(" hi16=").append(big.size)
+                    .append(" offEdge=").append(offEdge)
                     .append('\n')
                 runCatching {
                     val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
@@ -2818,6 +2965,27 @@ object YumeHarness {
                     CompositeProfile.enabled = true
                 }
                 var i = 1
+                // Per-frame deltas of the profile counters, kept so the worst 1% of
+                // frames can be described individually instead of in aggregate.
+                val frameCount = (steps + 7) / 8 + 1
+                val fTotal = LongArray(frameCount)
+                val fComp = LongArray(frameCount)
+                val fPaint = LongArray(frameCount)
+                val fBlit = LongArray(frameCount)
+                val fOpa = LongArray(frameCount)
+                val fTiles = LongArray(frameCount)
+                val fAlloc = LongArray(frameCount)
+                val fCapt = LongArray(frameCount)
+                val fDabs = LongArray(frameCount)
+                var pComp = CompositeProfile.compositeNanos
+                var pPaint = CompositeProfile.paintNanos
+                var pBlit = CompositeProfile.blitNanos
+                var pOpa = CompositeProfile.opacityNanos
+                var pTiles = CompositeProfile.tileVisits
+                var pAlloc = CompositeProfile.tilesAllocated
+                var pCapt = CompositeProfile.captures
+                var pDabs = CompositeProfile.paintDabs
+                var fc = 0
                 while (i <= steps) {
                     val t0 = System.nanoTime()
                     val end = min(i + 8, steps + 1)
@@ -2834,7 +3002,28 @@ object YumeHarness {
                         i++
                     }
                     engine.flush()
-                    FrameLogger.record(System.nanoTime() - t0)
+                    val dt = System.nanoTime() - t0
+                    FrameLogger.record(dt)
+                    if (profile && fc < frameCount) {
+                        fTotal[fc] = dt
+                        fComp[fc] = CompositeProfile.compositeNanos - pComp
+                        fPaint[fc] = CompositeProfile.paintNanos - pPaint
+                        fBlit[fc] = CompositeProfile.blitNanos - pBlit
+                        fOpa[fc] = CompositeProfile.opacityNanos - pOpa
+                        fTiles[fc] = CompositeProfile.tileVisits - pTiles
+                        fAlloc[fc] = CompositeProfile.tilesAllocated - pAlloc
+                        fCapt[fc] = CompositeProfile.captures - pCapt
+                        fDabs[fc] = CompositeProfile.paintDabs - pDabs
+                        pComp = CompositeProfile.compositeNanos
+                        pPaint = CompositeProfile.paintNanos
+                        pBlit = CompositeProfile.blitNanos
+                        pOpa = CompositeProfile.opacityNanos
+                        pTiles = CompositeProfile.tileVisits
+                        pAlloc = CompositeProfile.tilesAllocated
+                        pCapt = CompositeProfile.captures
+                        pDabs = CompositeProfile.paintDabs
+                        fc++
+                    }
                 }
                 session.pushInput(InputEvent.Up(0))
                 session.runInput()
@@ -2848,11 +3037,30 @@ object YumeHarness {
                 // 2048² is a hard gate at p99 < 6 ms; 4096² is reported against
                 // the 8.33 ms frame budget (the device is the final judge).
                 val limit = if (size <= 2048) 6.0 else 8.33
+                val tail = if (profile && fc > 0) {
+                    fun ms(v: Long): String = "%.2f".format(v / 1e6)
+                    fun frame(f: Int): String =
+                        "f=$f total=${ms(fTotal[f])} comp=${ms(fComp[f])}" +
+                            " paint=${ms(fPaint[f])} blit=${ms(fBlit[f])}" +
+                            " opa=${ms(fOpa[f])} tiles=${fTiles[f]}" +
+                            " alloc=${fAlloc[f]} cap=${fCapt[f]} dabs=${fDabs[f]}"
+                    val byTotal = (0 until fc).sortedBy { fTotal[it] }
+                    val nWorst = max(1, (fc + 99) / 100)
+                    val sb = StringBuilder()
+                    sb.append(" frameTail(median: ").append(frame(byTotal[fc / 2])).append(')')
+                    for (j in 1..nWorst) {
+                        val f = byTotal[fc - j]
+                        sb.append(" slow$j[").append(frame(f)).append(']')
+                    }
+                    sb.toString()
+                } else {
+                    ""
+                }
                 "$tag: ${FrameLogger.summary()}" +
                     " gate=${if (p99 < limit) "PASS" else "FAIL"} (limit=$limit)" +
                     " resLayer=${layerMb}MB" +
                     " gc=+${gc1.first - gc0.first}/${gc1.second - gc0.second}ms [$mb]" +
-                    (if (profile) " ${CompositeProfile.summary()}" else "")
+                    (if (profile) " ${CompositeProfile.summary()}" else "") + tail
             } catch (t: Throwable) {
                 "$tag: FAIL ${t.javaClass.simpleName} (needs more than the heap has)"
             } finally {

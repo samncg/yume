@@ -34,7 +34,12 @@ object CompositeProfile {
     /** Time inside stroke stamping (dab render + tile write-back). */
     var paintNanos: Long = 0L
     var paintDabs: Long = 0L
+    /** Tile bitmaps newly allocated by a write (a one-off cost per tile). */
+    var tilesAllocated: Long = 0L
+    /** Tiles copied by the undo capture (one copy per tile per stroke). */
+    var captures: Long = 0L
 
+    @Synchronized
     fun reset() {
         frames = 0L
         tileVisits = 0L
@@ -50,6 +55,8 @@ object CompositeProfile {
         compositeNanos = 0L
         paintNanos = 0L
         paintDabs = 0L
+        tilesAllocated = 0L
+        captures = 0L
     }
 
     private fun ms(nanos: Long): String =
@@ -69,6 +76,7 @@ object CompositeProfile {
             "cull=$cullScans " +
             "blit=${ms(blitNanos)}ms lookup=${ms(lookupNanos)}ms " +
             "opacity=${ms(opacityNanos)}ms composite=${ms(compositeNanos)}ms " +
-            "paint=${ms(paintNanos)}ms dabs=$paintDabs"
+            "paint=${ms(paintNanos)}ms dabs=$paintDabs " +
+            "allocTiles=$tilesAllocated captured=$captures"
     }
 }
