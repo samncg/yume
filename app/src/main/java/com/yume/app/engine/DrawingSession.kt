@@ -2042,6 +2042,8 @@ class DrawingSession(
                         mask = action.mask
                     )
                     is TilePixelAction -> {
+                        // A spilled (disk-tier) step is read back for the write.
+                        if (!history.ensureLoaded(action)) break
                         val legacy = engine.tileActionToRect(action, PERSIST_PATCH_BUDGET)
                             ?: break
                         PersistedHistoryEntry(

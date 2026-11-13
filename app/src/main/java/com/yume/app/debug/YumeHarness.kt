@@ -149,6 +149,7 @@ object YumeHarness {
                     out.append(scoreCacheBig(app))
                 } else if (only == "journal") {
                     out.append(scoreJournal(app))
+                    out.append(line(scoreHistorySpill(app)))
                 } else if (only == "png") {
                     out.append(scorePngParity(app))
                     out.append(line(scoreOpsAlloc(app)))
@@ -214,6 +215,7 @@ object YumeHarness {
                 out.append(scoreSolidMemory())
                 out.append(scorePngParity(app))
                 out.append(scoreJournal(app))
+                out.append(line(scoreHistorySpill(app)))
                 out.append(scoreFuzzEvict())
                 out.append(scoreCacheFailures(app))
                 out.append(scoreGoldenEvict(app))
@@ -2983,6 +2985,70 @@ object YumeHarness {
             TileStoreConfig.tileSize = oldT
         }
         return out.toString()
+    }
+
+
+    /**
+     * History disk tier (Stage 3c): 40 overlapping strokes with a 4 MB
+     * in-memory history cap and a spill file. Undo all the way back and redo
+     * all the way forward must reproduce the hash recorded after every step,
+     * exactly like an unlimited in-memory history.
+     */
+    private fun scoreHistorySpill(app: YumeApp): String {
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = 256
+        val file = File(app.cacheDir, "history-spill-test.spill")
+        return try {
+            val size = 2048
+            val history = History(maxBytes = 4L shl 20)
+            history.spill = com.yume.app.engine.HistorySpill(file)
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("hist", "H", engine, History().let { history })
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = soft.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            val l = engine.newLayer("L")
+            engine.selectLayer(l.id)
+            val hashes = ArrayList<String>()
+            hashes.add(hashLayer(l))
+            val steps = 40
+            for (i in 0 until steps) {
+                session.color = 0xFF000000.toInt() or ((i * 0x2F3B17) and 0xFFFFFF)
+                val y = 100f + (i % 20) * 90f
+                session.stroke(listOf(P(80f + i * 7f, y), P(1900f - i * 11f, y + 300f), P(1000f, 1900f - i * 13f)))
+                engine.flush()
+                hashes.add(hashLayer(l))
+            }
+            var bad = 0
+            var firstBad = -1
+            for (i in steps downTo 1) {
+                if (!history.undo(engine)) { bad++; if (firstBad < 0) firstBad = i; break }
+                if (hashLayer(l) != hashes[i - 1]) { bad++; if (firstBad < 0) firstBad = i }
+            }
+            for (i in 1..steps) {
+                if (!history.redo(engine)) { bad++; break }
+                if (hashLayer(l) != hashes[i]) { bad++; if (firstBad < 0) firstBad = 100 + i }
+            }
+            val s = history.spill!!
+            val verdict = if (bad == 0 && history.spilledActions > 0) "PASS" else "FAIL"
+            "history-spill 2048x2048 steps=$steps cap=4MB: $verdict bad=$bad firstBad=$firstBad" +
+                " spilledActions=${history.spilledActions} loads=${history.loadedActions}" +
+                " diskWrites=${s.writes} diskReads=${s.reads} disk=${s.diskBytes / 1024}KB" +
+                " error=${history.lastError ?: "none"}"
+        } catch (t: Throwable) {
+            Log.e(TAG, "history spill failed", t)
+            "history-spill: FAIL ${t.javaClass.simpleName}: ${t.message}"
+        } finally {
+            file.delete()
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
+        }
     }
 
     private fun pct(sorted: LongArray, q: Double): String {

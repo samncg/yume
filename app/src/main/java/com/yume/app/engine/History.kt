@@ -153,6 +153,40 @@ class History(
     private val redoStack = ArrayDeque<HistoryAction>()
     private var bytes = 0L
 
+    /**
+     * Disk tier (Stage 3c). When set, the oldest tile edits are spilled here
+     * once the in-memory history passes [maxBytes] instead of being dropped;
+     * history depth is then bounded by [diskCap].
+     */
+    var spill: HistorySpill? = null
+    var diskCap: Long = 1024L * 1024L * 1024L
+    var spilledActions: Long = 0L; private set
+    var loadedActions: Long = 0L; private set
+    /** Set when a spilled step could not be read back (that step is skipped). */
+    var lastError: String? = null
+
+    /** In-memory bytes of the undo stack (spilled crops count as 0). */
+    private fun residentUndoBytes(): Long {
+        var t = 0L
+        for (a in undoStack) t += a.bytes
+        return t
+    }
+
+    /** Brings [action]'s spilled crops back into memory. False if unreadable. */
+    fun ensureLoaded(action: HistoryAction): Boolean {
+        val t = action as? TilePixelAction ?: return true
+        if (t.isResident) return true
+        val s = spill ?: return false
+        return try {
+            t.loadFrom(s)
+            loadedActions++
+            true
+        } catch (e: java.io.IOException) {
+            lastError = "An older undo step could not be read back (${e.message})"
+            false
+        }
+    }
+
     /** Bumped on every change so the UI can cache its derived list. */
     var version: Int = 0
         private set
@@ -279,19 +313,24 @@ class History(
     }
 
     fun undo(engine: DrawingEngine): Boolean {
-        val action = undoStack.removeLastOrNull() ?: return false
+        val action = undoStack.lastOrNull() ?: return false
+        if (!ensureLoaded(action)) return false
+        undoStack.removeLast()
         action.undo(engine)
-        bytes -= action.bytes
         redoStack.addLast(action)
+        bytes = residentUndoBytes()
         changed()
         return true
     }
 
     fun redo(engine: DrawingEngine): Boolean {
-        val action = redoStack.removeLastOrNull() ?: return false
+        val action = redoStack.lastOrNull() ?: return false
+        if (!ensureLoaded(action)) return false
+        redoStack.removeLast()
         action.redo(engine)
-        bytes += action.bytes
         undoStack.addLast(action)
+        bytes = residentUndoBytes()
+        trim()
         changed()
         return true
     }
@@ -332,11 +371,41 @@ class History(
     }
 
     private fun trim() {
+        bytes = residentUndoBytes()
+        val s = spill
         while (bytes > maxBytes && undoStack.size > 1) {
+            // Prefer spilling the oldest in-memory tile edit to disk; drop
+            // (as before) only when there is no disk tier, it is full, or the
+            // oldest steps are not tile edits.
+            if (s != null && s.diskBytes < diskCap) {
+                var freed = 0L
+                for (a in undoStack) {
+                    if (a === undoStack.last()) break
+                    val t = a as? TilePixelAction ?: continue
+                    if (t.bytes <= 0L) continue
+                    freed = t.spillTo(s)
+                    if (freed > 0L) spilledActions++
+                    break
+                }
+                if (freed > 0L) {
+                    bytes -= freed
+                    continue
+                }
+                // Nothing left to spill. Dropping the oldest step only helps if it
+                // still holds memory (a structural snapshot or a dense patch);
+                // a spilled step frees nothing, so stop instead of losing it.
+                // The newest step stays in memory even when it alone exceeds
+                // the cap.
+                if (undoStack.first().bytes <= 0L) break
+            }
             val dropped = undoStack.removeFirst()
             bytes -= dropped.bytes
             dropped.releaseBitmaps()
         }
+        while (s != null && s.diskBytes > diskCap && undoStack.size > 1) {
+            undoStack.removeFirst().releaseBitmaps()
+        }
+        s?.compactIfNeeded()
     }
 
     private fun changed() {
@@ -350,7 +419,7 @@ class History(
                 before.recycle()
                 after.recycle()
             }
-            is TilePixelAction -> releaseTiles()
+            is TilePixelAction -> releaseTiles(spill)
             else -> Unit
         }
     }

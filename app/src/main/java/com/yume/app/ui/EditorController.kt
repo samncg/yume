@@ -139,6 +139,10 @@ class EditorController(
                 session.onPresetsChanged = { list -> schedulePresetSave(list) }
                 session.onMessage = { text -> _message.value = text }
                 project.recovery?.let { session.nextJournalSlot = it.maxSlot + 1 }
+                // Older undo steps spill to the document's cache directory.
+                tileCache?.let { c ->
+                    session.history.spill = com.yume.app.engine.HistorySpill(java.io.File(c.dir, "history.spill"))
+                }
             }
 
             // Re-attach the previous session's reversible edits. After a journal

@@ -112,9 +112,60 @@ class TileChange(
     val tx: Int,
     val ty: Int,
     val clip: Rect,
-    val before: Bitmap?,
-    val after: Bitmap?
-)
+    var before: Bitmap?,
+    var after: Bitmap?
+) {
+    /** Spill keys while the crop lives on disk (Stage 3c); -1 = in memory. */
+    var beforeKey: Long = -1L
+    var afterKey: Long = -1L
+}
+
+/**
+ * Disk tier for undo history (Stage 3c): older tile crops are written here when
+ * the in-memory history passes its cap, and read back on undo / redo. Reuses
+ * the CRC-checked [SpillFile] log, keyed by a running counter.
+ */
+class HistorySpill(file: java.io.File) {
+    private val spill = SpillFile(file)
+    private val scratch = SpillFile.ReadScratch()
+    private var nextKey = 1L
+    var writes: Long = 0L; private set
+    var reads: Long = 0L; private set
+
+    val diskBytes: Long get() = spill.liveBytes
+
+    /** Writes [bmp]; returns its key. Throws IOException on failure. */
+    fun write(bmp: Bitmap): Long {
+        val k = nextKey++
+        spill.write(k, bmp)
+        writes++
+        return k
+    }
+
+    /** Reads the crop stored under [key]. Throws IOException when it is gone or corrupt. */
+    fun read(key: Long): Bitmap {
+        val rec = spill.lookup(key) ?: throw java.io.IOException("history record $key missing")
+        val bmp = Bitmap.createBitmap(rec.w, rec.h, Bitmap.Config.ARGB_8888)
+        try {
+            spill.read(rec, bmp, scratch)
+        } catch (e: java.io.IOException) {
+            bmp.recycle()
+            throw e
+        }
+        reads++
+        return bmp
+    }
+
+    fun drop(key: Long) {
+        if (key >= 0) spill.drop(key)
+    }
+
+    fun compactIfNeeded() {
+        if (spill.shouldCompact()) runCatching { spill.compact(scratch) }
+    }
+
+    fun close() = spill.close(delete = true)
+}
 
 /**
  * A pixel edit stored as per-tile before/after snapshots. Undo and redo touch
@@ -148,10 +199,62 @@ class TilePixelAction(
     override fun redo(engine: DrawingEngine) =
         engine.applyTileChanges(layerId, changes, bounds, before = false, mask = mask)
 
-    internal fun releaseTiles() {
+    internal fun releaseTiles(spill: HistorySpill? = null) {
         for (c in changes) {
             c.before?.recycle()
             c.after?.recycle()
+            c.before = null
+            c.after = null
+            spill?.drop(c.beforeKey)
+            spill?.drop(c.afterKey)
+            c.beforeKey = -1L
+            c.afterKey = -1L
+        }
+    }
+
+    /** True when every crop is in memory. */
+    val isResident: Boolean get() = changes.none { it.beforeKey >= 0 || it.afterKey >= 0 }
+
+    /**
+     * Moves every in-memory crop to [spill] and frees it. Returns the bytes
+     * freed. On a write failure the remaining crops stay in memory.
+     */
+    fun spillTo(spill: HistorySpill): Long {
+        var freed = 0L
+        try {
+            for (c in changes) {
+                c.before?.let { b ->
+                    c.beforeKey = spill.write(b)
+                    freed += b.byteCount
+                    b.recycle()
+                    c.before = null
+                }
+                c.after?.let { b ->
+                    c.afterKey = spill.write(b)
+                    freed += b.byteCount
+                    b.recycle()
+                    c.after = null
+                }
+            }
+        } catch (_: java.io.IOException) {
+            // Keep whatever is still in memory; nothing is lost.
+        }
+        return freed
+    }
+
+    /** Reads spilled crops back. Throws IOException if one is unreadable. */
+    fun loadFrom(spill: HistorySpill) {
+        for (c in changes) {
+            if (c.beforeKey >= 0) {
+                c.before = spill.read(c.beforeKey)
+                spill.drop(c.beforeKey)
+                c.beforeKey = -1L
+            }
+            if (c.afterKey >= 0) {
+                c.after = spill.read(c.afterKey)
+                spill.drop(c.afterKey)
+                c.afterKey = -1L
+            }
         }
     }
 }
