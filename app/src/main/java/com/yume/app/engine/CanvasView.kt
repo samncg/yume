@@ -262,7 +262,7 @@ class CanvasView(
         }
 
         // Holding still at the end of a stroke straightens it (QuickShape).
-        if (mode == Mode.Stroke && !twoFinger) scheduleQuickShape()
+        if (mode == Mode.Stroke && !twoFinger) scheduleQuickShape(event.x, event.y)
     }
 
     private fun onPointerUp(event: MotionEvent) {
@@ -383,7 +383,19 @@ class CanvasView(
         menuHoldAction = null
     }
 
-    private fun scheduleQuickShape() {
+    private var holdAnchorX = 0f
+    private var holdAnchorY = 0f
+
+    /**
+     * QuickShape fires when the pen rests. A stylus never stops reporting
+     * moves (pressure and sub-pixel jitter), so the timer restarts only when
+     * the pen leaves a small circle around where the rest began, not on every
+     * move event; otherwise it would never fire with a pen.
+     */
+    private fun scheduleQuickShape(x: Float, y: Float) {
+        if (quickShapeAction != null && hypot(x - holdAnchorX, y - holdAnchorY) < QUICKSHAPE_SLOP_DP * density) return
+        holdAnchorX = x
+        holdAnchorY = y
         quickShapeAction?.let { handler.removeCallbacks(it) }
         val action = Runnable {
             if (mode == Mode.Stroke && !twoFinger) {
@@ -392,7 +404,7 @@ class CanvasView(
             }
         }
         quickShapeAction = action
-        handler.postDelayed(action, 700L)
+        handler.postDelayed(action, QUICKSHAPE_HOLD_MS)
     }
 
     private fun cancelQuickShape() {
@@ -553,3 +565,7 @@ class CanvasView(
 private const val MENU_HOLD_MS = 520L
 private const val MENU_HOLD_SLOP_DP = 14f
 private const val MENU_HOLD_TURN_DEG = 6.0
+
+/** How long the pen rests before QuickShape snaps, and how still it must be. */
+private const val QUICKSHAPE_HOLD_MS = 600L
+private const val QUICKSHAPE_SLOP_DP = 6f

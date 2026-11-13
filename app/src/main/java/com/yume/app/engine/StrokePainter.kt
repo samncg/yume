@@ -129,7 +129,8 @@ class StrokePainter(private val engine: DrawingEngine) {
         initialPressure: Float,
         initialTilt: Float,
         captureBase: Boolean = true,
-        assistStrength: Float = 0f
+        assistStrength: Float = 0f,
+        startTaper: Boolean = true
     ) {
         layer = target
         preset = brush
@@ -211,7 +212,8 @@ class StrokePainter(private val engine: DrawingEngine) {
         lastStampX = x
         lastStampY = y
         distanceSinceStamp = 0f
-        travel = 0f
+        // A drawn shape starts at full size: no taper where its ends meet.
+        travel = if (startTaper) 0f else 1e9f
         pressure = initialPressure.coerceIn(0.02f, 1f)
         tilt = initialTilt.coerceIn(0f, 1f)
         isActive = true

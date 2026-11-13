@@ -3,7 +3,7 @@ package com.yume.app.engine
 import android.graphics.BlendMode
 
 /** Which tool the canvas is currently using. */
-enum class Tool { Brush, Eraser, Smudge, Selection, Transform, Fill, Gradient }
+enum class Tool { Brush, Eraser, Smudge, Selection, Transform, Fill, Gradient, Shape, Liquify, Text }
 
 /** Shape used when dragging out a selection. */
 enum class SelectionShape(val label: String) {

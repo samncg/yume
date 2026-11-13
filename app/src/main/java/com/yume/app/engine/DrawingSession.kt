@@ -249,6 +249,28 @@ class DrawingSession(
     private var strokeLayer: Layer? = null
     private var strokePreset: BrushPreset? = null
     private var quickShaping = false
+    // The freehand stroke's points, for QuickShape recognition (doc px).
+    private var qsXs = FloatArray(512)
+    private var qsYs = FloatArray(512)
+    private var qsCount = 0
+    private var qsPressureSum = 0f
+    private var qsPressureCount = 0
+    /** The recognised shape, and where the pen was when it snapped. */
+    private var qsShape: ShapePath? = null
+    private var qsAnchorX = 0f
+    private var qsAnchorY = 0f
+    private var qsCenterX = 0f
+    private var qsCenterY = 0f
+    private var qsPressure = 1f
+
+    /** Shape tool settings. */
+    @Volatile var shapeKind: ShapeKind = ShapeKind.Ellipse
+        private set
+    @Volatile var shapePerfect: Boolean = false
+        private set
+    @Volatile var shapeSides: Int = 5
+        private set
+    private var shapeDragging = false
     private var strokeStartX = 0f
     private var strokeStartY = 0f
     private var strokeLastX = 0f
@@ -516,6 +538,7 @@ class DrawingSession(
                     tool == Tool.Transform -> beginTransformDrag(doc[0], doc[1])
                     tool == Tool.Fill -> fillAtInternal(doc[0], doc[1], color, false)
                     tool == Tool.Gradient -> gradientGuide = floatArrayOf(doc[0], doc[1], doc[0], doc[1])
+                    tool == Tool.Shape -> beginShape(doc[0], doc[1], event.pressure)
                     else -> beginStroke(doc[0], doc[1], event.pressure, event.tilt, event.eraserButton)
                 }
                 true
@@ -567,9 +590,12 @@ class DrawingSession(
                         painter.isActive -> {
                             strokeLastX = doc[0]
                             strokeLastY = doc[1]
-                            if (quickShaping) {
+                            if (shapeDragging) {
+                                redrawShapeDrag()
+                            } else if (quickShaping) {
                                 redrawQuickStroke()
                             } else {
+                                recordStrokePoint(doc[0], doc[1], event.pressures[i])
                                 painter.move(doc[0], doc[1], event.pressures[i], event.tilt)
                             }
                             changed = true
@@ -680,10 +706,26 @@ class DrawingSession(
             InputEvent.QuickShape -> {
                 val length = hypot(strokeLastX - strokeStartX, strokeLastY - strokeStartY)
                 if (quickShapeEnabled && length > 30f && painter.isActive &&
-                    strokePreset != null && !quickShaping
+                    strokePreset != null && !quickShaping && !shapeDragging
                 ) {
-                    quickShaping = true
-                    redrawQuickStroke()
+                    // What did the user mean? A line, polyline, polygon or
+                    // ellipse; nothing when the stroke fits none of them.
+                    val shape = ShapeGeometry.recognize(qsXs, qsYs, qsCount)
+                        ?: if (qsCount >= 2) ShapeGeometry.line(strokeStartX, strokeStartY, strokeLastX, strokeLastY) else null
+                    if (shape != null) {
+                        quickShaping = true
+                        qsShape = shape
+                        qsAnchorX = strokeLastX
+                        qsAnchorY = strokeLastY
+                        var cx = 0f
+                        var cy = 0f
+                        val n = if (shape.closed) shape.size - 1 else shape.size
+                        for (k in 0 until n) { cx += shape.xs[k]; cy += shape.ys[k] }
+                        qsCenterX = cx / n
+                        qsCenterY = cy / n
+                        qsPressure = if (qsPressureCount > 0) qsPressureSum / qsPressureCount else 1f
+                        redrawQuickStroke()
+                    }
                 }
                 true
             }
@@ -749,6 +791,11 @@ class DrawingSession(
         strokeLastX = x
         strokeLastY = y
         quickShaping = false
+        qsShape = null
+        qsCount = 0
+        qsPressureSum = 0f
+        qsPressureCount = 0
+        recordStrokePoint(x, y, pressure)
         painter.begin(layer, brush, color, x, y, pressure, tilt, assistStrength = assist)
         FrameLogger.strokeActive = true
         // Cache the layers below for the tiles this stroke touches, so a frame
@@ -761,18 +808,113 @@ class DrawingSession(
      * current point. The pre-stroke snapshot is kept, so this is cheap enough
      * to run on every pointer move while the user adjusts the line.
      */
+    private fun recordStrokePoint(x: Float, y: Float, pressure: Float) {
+        qsPressureSum += pressure
+        qsPressureCount++
+        if (qsCount > 0 && hypot(x - qsXs[qsCount - 1], y - qsYs[qsCount - 1]) < 1.5f) return
+        if (qsCount == qsXs.size) {
+            if (qsCount >= 8192) return
+            qsXs = qsXs.copyOf(qsCount * 2)
+            qsYs = qsYs.copyOf(qsCount * 2)
+        }
+        qsXs[qsCount] = x
+        qsYs[qsCount] = y
+        qsCount++
+    }
+
+    /**
+     * Redraws the snapped QuickShape as the pen keeps moving: a line's end
+     * follows the pen; other shapes scale and turn about their centre, the way
+     * the pen moves relative to where it was when the shape snapped. The
+     * pre-stroke snapshot is kept, so this is cheap enough for every move.
+     */
     private fun redrawQuickStroke() {
+        val shape = qsShape ?: return
+        val drawn = when (shape.kind) {
+            "line" -> ShapeGeometry.line(shape.xs[0], shape.ys[0], strokeLastX, strokeLastY)
+            else -> {
+                val d0 = hypot(qsAnchorX - qsCenterX, qsAnchorY - qsCenterY)
+                val d1 = hypot(strokeLastX - qsCenterX, strokeLastY - qsCenterY)
+                if (d0 < 4f) {
+                    shape
+                } else {
+                    val scale = (d1 / d0).coerceIn(0.05f, 20f)
+                    val a0 = kotlin.math.atan2(qsAnchorY - qsCenterY, qsAnchorX - qsCenterX)
+                    val a1 = kotlin.math.atan2(strokeLastY - qsCenterY, strokeLastX - qsCenterX)
+                    // Closed shapes only scale: a turning ellipse feels unsteady.
+                    val angle = if (shape.closed) 0f else a1 - a0
+                    shape.transformed(qsCenterX, qsCenterY, scale, angle)
+                }
+            }
+        }
+        paintShape(drawn, qsPressure)
+    }
+
+    /** Paints [shape] with the stroke's brush from the pre-stroke pixels. */
+    private fun paintShape(shape: ShapePath, pressure: Float) {
         val layer = strokeLayer ?: return
         val brush = strokePreset ?: return
         painter.cancel()
-        // Smoothing would lag the single move call, so the snapped line must
-        // use a non-streamlined version of the brush.
+        // Smoothing would lag the vertices, so shapes use a non-streamlined
+        // version of the brush, at the stroke's average pressure.
         painter.begin(
             layer, brush.copy(smoothing = 0f), color,
-            strokeStartX, strokeStartY, 1f, 0f,
-            captureBase = false, assistStrength = 0f
+            shape.xs[0], shape.ys[0], pressure, 0f,
+            captureBase = false, assistStrength = 0f, startTaper = !shape.closed
         )
-        painter.move(strokeLastX, strokeLastY, 1f, 0f)
+        for (k in 1 until shape.size) painter.move(shape.xs[k], shape.ys[k], pressure, 0f)
+    }
+
+    // ------------------------------------------------------------ shape tool
+
+    private var shapeStartX = 0f
+    private var shapeStartY = 0f
+    private var shapePressure = 1f
+
+    private fun beginShape(x: Float, y: Float, pressure: Float) {
+        val layer = engine.activeLayer ?: return
+        if (!layer.visible || !editable(layer)) return
+        if (adjusting) commitAdjustmentInternal()
+        val brush = presets.firstOrNull { it.id == activePresetId && it.category == BrushCategory.Brush }
+            ?: presets.firstOrNull { it.category == BrushCategory.Brush } ?: return
+        strokeLayer = layer
+        strokePreset = brush
+        strokeStartX = x
+        strokeStartY = y
+        strokeLastX = x
+        strokeLastY = y
+        shapeStartX = x
+        shapeStartY = y
+        // Shapes are drawn at an even weight; a light press still draws a line.
+        shapePressure = 1f
+        quickShaping = false
+        shapeDragging = true
+        painter.begin(layer, brush.copy(smoothing = 0f), color, x, y, shapePressure, 0f, startTaper = false)
+        FrameLogger.strokeActive = true
+        engine.beginStrokeCache()
+    }
+
+    private fun redrawShapeDrag() {
+        if (hypot(strokeLastX - shapeStartX, strokeLastY - shapeStartY) < 1f) return
+        val shape = ShapeGeometry.fromDrag(
+            shapeKind, shapeStartX, shapeStartY, strokeLastX, strokeLastY, shapePerfect, shapeSides
+        )
+        paintShape(shape, shapePressure)
+    }
+
+    fun setShapeKind(kind: ShapeKind) {
+        shapeKind = kind
+        requestState()
+    }
+
+    fun setShapePerfect(value: Boolean) {
+        shapePerfect = value
+        requestState()
+    }
+
+    fun setShapeSides(value: Int) {
+        shapeSides = value.coerceIn(3, 24)
+        requestState()
     }
 
     private fun endStroke() {
@@ -791,7 +933,11 @@ class DrawingSession(
                 BrushCategory.Smudge -> "Smudge stroke" to EditKind.Stroke
                 else -> "Brush stroke" to EditKind.Stroke
             }
-            val patchText = if (quickShaping) "QuickShape line" else label
+            val patchText = when {
+                shapeDragging -> shapeKind.label
+                quickShaping -> "QuickShape " + (qsShape?.kind ?: "line")
+                else -> label
+            }
             val sizePx = (brush?.size ?: 0f).roundToInt()
             val detail = if (brush != null) "${brush.name} · $sizePx px" else ""
             val swatch = if (brush?.category == BrushCategory.Eraser) 0 else color
@@ -812,6 +958,7 @@ class DrawingSession(
         }
         strokeLayer = null
         strokePreset = null
+        shapeDragging = false
         quickShaping = false
         TileCache.active?.let { if (it.evictEveryOp) it.evictTo() }
         requestState()
@@ -1005,7 +1152,8 @@ class DrawingSession(
             Tool.Brush -> category = BrushCategory.Brush
             Tool.Eraser -> category = BrushCategory.Eraser
             Tool.Smudge -> category = BrushCategory.Smudge
-            Tool.Selection, Tool.Transform, Tool.Fill, Tool.Gradient -> Unit
+            Tool.Selection, Tool.Transform, Tool.Fill, Tool.Gradient,
+            Tool.Shape, Tool.Liquify, Tool.Text -> Unit
         }
         if (newTool == Tool.Brush || newTool == Tool.Eraser || newTool == Tool.Smudge) {
             val list = presetsOf(category)
@@ -2535,6 +2683,9 @@ class DrawingSession(
             soloLayerId = engine.soloLayerId ?: -1L,
             assist = assist,
             quickShape = quickShapeEnabled,
+            shapeKind = shapeKind,
+            shapePerfect = shapePerfect,
+            shapeSides = shapeSides,
             history = historyCache,
             adjusting = adjusting,
             colorMode = colorMode,
