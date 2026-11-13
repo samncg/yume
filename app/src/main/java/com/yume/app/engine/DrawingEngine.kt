@@ -230,6 +230,25 @@ class DrawingEngine(val width: Int, val height: Int) {
         backgroundColor
     )
 
+    /**
+     * The composite scaled down to fit [maxPx]: exactly what the canvas shows,
+     * so a thumbnail honours groups, clipping, masks and blend modes. Null while
+     * the composite is not the plain document (solo view or a live preview).
+     */
+    fun compositeThumb(maxPx: Int): Bitmap? {
+        if (soloLayerId != null || preview != null) return null
+        val scale = maxPx.toFloat() / maxOf(width, height)
+        val w = (width * scale).toInt().coerceAtLeast(1)
+        val h = (height * scale).toInt().coerceAtLeast(1)
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+        c.scale(w.toFloat() / width, h.toFloat() / height)
+        val st = compositeTiles
+        if (st != null) st.drawInto(c, paint) else c.drawBitmap(composite, 0f, 0f, paint)
+        return out
+    }
+
     /** The dense composite surface. Only valid in dense mode. */
     val composite: Bitmap
         get() = denseComposite

@@ -944,6 +944,23 @@ class ProjectStore(private val context: Context) {
     }
 
     private fun makeThumb(snapshot: DocumentSnapshot): Bitmap? {
+        // Preferred: the engine's own composite, scaled. It is what the canvas
+        // shows, groups, clipping, masks and all.
+        val compose = snapshot.composeThumb
+        if (compose != null) {
+            var composed: Bitmap? = null
+            snapshot.onOwner { composed = compose(512) }
+            composed?.let { return it }
+        }
+        return makeThumbFromLayers(snapshot)
+    }
+
+    /**
+     * Layer-by-layer fallback (solo view or a live preview on screen, or no
+     * engine): layer opacity and blend, plus group visibility, opacity and
+     * blend. Clipping and masks are not applied here.
+     */
+    private fun makeThumbFromLayers(snapshot: DocumentSnapshot): Bitmap? {
         val scale = 512f / maxOf(snapshot.width, snapshot.height)
         val w = (snapshot.width * scale).toInt().coerceAtLeast(1)
         val h = (snapshot.height * scale).toInt().coerceAtLeast(1)
@@ -951,7 +968,26 @@ class ProjectStore(private val context: Context) {
         val canvas = android.graphics.Canvas(out)
         canvas.drawColor(snapshot.background)
         val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+        val groups = snapshot.groups.associateBy { it.id }
+        var openGroup = 0L
+        var groupSave = -1
         for (layer in snapshot.layers) {
+            if (layer.groupId != openGroup) {
+                // Leaving a group: blend its isolated layer down.
+                if (groupSave >= 0) canvas.restoreToCount(groupSave)
+                groupSave = -1
+                openGroup = layer.groupId
+                val g = groups[openGroup]
+                if (g != null && g.visible) {
+                    val gp = android.graphics.Paint().apply {
+                        alpha = (g.opacity * 255f).toInt().coerceIn(0, 255)
+                        blendMode = g.blend.mode
+                    }
+                    groupSave = canvas.saveLayer(null, gp)
+                }
+            }
+            val group = groups[layer.groupId]
+            if (group != null && (!group.visible || group.opacity <= 0.002f)) continue
             if (!layer.visible || layer.opacity <= 0.002f) continue
             // A visible layer can still be swapped out (for example right after
             // it is shown and before the next composite). Sample its file at
@@ -984,6 +1020,7 @@ class ProjectStore(private val context: Context) {
             )
             if (sampled != null && sampled !== resident) sampled.recycle()
         }
+        if (groupSave >= 0) canvas.restoreToCount(groupSave)
         return out
     }
 

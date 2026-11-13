@@ -89,6 +89,12 @@ data class DocumentSnapshot(
      * the owner did not run it in time; the caller then keeps the old file.
      */
     val onOwner: (() -> Unit) -> Boolean = { it(); true },
+    /**
+     * Draws the document as it looks (groups, clipping, masks, blend modes)
+     * scaled to fit [maxPx], from the live composite. Owner thread only; null
+     * when the composite is not the plain document (solo view, live preview).
+     */
+    val composeThumb: ((maxPx: Int) -> Bitmap?)? = null,
     /** Journal slot of each layer's store / mask store (-1 = none), by index. */
     val slots: IntArray = IntArray(0),
     val maskSlots: IntArray = IntArray(0)
@@ -2308,6 +2314,7 @@ class DrawingSession(
             )
         },
         onOwner = { block -> runOnOwner(block = block) },
+        composeThumb = { maxPx -> engine.compositeThumb(maxPx) },
         slots = IntArray(engine.layers.size) { (engine.layers[it].tiles as? SparseTileStore)?.journalSlot ?: -1 },
         maskSlots = IntArray(engine.layers.size) {
             (engine.layers[it].maskTiles as? SparseTileStore)?.journalSlot ?: -1
