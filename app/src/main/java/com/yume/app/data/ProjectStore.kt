@@ -58,14 +58,173 @@ data class LoadedProject(
     val symmetryX: Boolean = false,
     val symmetryY: Boolean = false,
     val symmetryXPos: Float = -1f,
-    val symmetryYPos: Float = -1f
+    val symmetryYPos: Float = -1f,
+    /** Set when the document was restored from its crash-recovery journal. */
+    val recovery: JournalRecovery? = null
 )
+
+/**
+ * A valid crash-recovery journal found while opening (Stage 3c): the layers in
+ * [LoadedProject.layers] are the journal's base PNGs; [apply] replays the tiles
+ * on top once the engine has built its stores.
+ */
+class JournalRecovery(
+    private val log: File,
+    private val length: Long,
+    /** Journal slot of each layer store / mask store, by layer index (-1 = none). */
+    val slots: IntArray,
+    val maskSlots: IntArray,
+    /** Layers whose mask exists only in the journal (no mask PNG yet). */
+    val emptyMasks: Set<Int>
+) {
+    val maxSlot: Int get() = maxOf(slots.maxOrNull() ?: -1, maskSlots.maxOrNull() ?: -1)
+
+    /**
+     * Replays the journal into [engine]'s layer stores. Returns the number of
+     * records applied; throws IOException when the journal is damaged inside
+     * its committed length (the document is then left at its base PNGs plus
+     * the records before the damage).
+     */
+    fun apply(engine: com.yume.app.engine.DrawingEngine): Int {
+        val bySlot = HashMap<Int, com.yume.app.engine.TileStore>()
+        engine.layers.forEachIndexed { i, l ->
+            if (i in emptyMasks && l.maskTiles == null) {
+                l.maskTiles = com.yume.app.engine.TileStoreFactory.maskEmpty(engine.width, engine.height)
+            }
+            slots.getOrNull(i)?.takeIf { it >= 0 }?.let { s ->
+                bySlot[s] = l.tiles
+                (l.tiles as? com.yume.app.engine.SparseTileStore)?.journalSlot = s
+            }
+            maskSlots.getOrNull(i)?.takeIf { it >= 0 }?.let { s ->
+                val m = l.maskTiles ?: return@let
+                bySlot[s] = m
+                (m as? com.yume.app.engine.SparseTileStore)?.journalSlot = s
+            }
+        }
+        val touched = HashSet<com.yume.app.engine.TileStore>()
+        try {
+            return com.yume.app.engine.TileJournal.replay(log, length) { slot, tx, ty, kind, tile ->
+                val st = bySlot[slot]
+                if (st == null) {
+                    if (tile != null) com.yume.app.engine.TilePool.release(tile)
+                    return@replay
+                }
+                if (touched.add(st)) st.ensureResident()
+                when (kind) {
+                    com.yume.app.engine.TileJournal.RESET -> st.clear()
+                    com.yume.app.engine.TileJournal.DEFAULT -> st.clearTile(tx, ty)
+                    else -> if (tile != null) {
+                        st.putTile(tx, ty, tile)
+                        com.yume.app.engine.TilePool.release(tile)
+                    }
+                }
+            }
+        } finally {
+            // The replayed changes are already in the journal: start clean.
+            for (st in touched) (st as? com.yume.app.engine.SparseTileStore)?.journalTake()
+            engine.layers.forEach { l -> l.touch() }
+            engine.markDirtyAll()
+        }
+    }
+}
 
 /**
  * Flat-file document store: one directory per project containing a JSON
  * manifest plus one PNG per layer. Simple, crash tolerant and easy to inspect.
  */
 class ProjectStore(private val context: Context) {
+
+    /**
+     * Which PNG holds each layer's pixels as of the last full save (or open):
+     * the journal's base. Key "<project>/<layerId>/L|M". Absent = no base yet
+     * (a layer created since), so the journal dumps that store in full.
+     */
+    private val bases = HashMap<String, String>()
+
+    /** True when the last saveProject wrote every layer and mask it had to. */
+    @Volatile var lastSaveComplete: Boolean = true
+
+    private fun baseKey(id: String, layerId: Long, mask: Boolean) =
+        "$id/$layerId/${if (mask) "M" else "L"}"
+
+    fun baseOf(id: String, layerId: Long, mask: Boolean): String? = bases[baseKey(id, layerId, mask)]
+
+    /** Records the base PNGs of freshly opened layers (by index, after load). */
+    fun adoptBases(id: String, layerIds: List<Long>, loaded: List<LayerSnapshotData>) {
+        bases.keys.removeAll { it.startsWith("$id/") }
+        for ((i, lid) in layerIds.withIndex()) {
+            val d = loaded.getOrNull(i) ?: continue
+            d.file?.let { bases[baseKey(id, lid, false)] = it.name }
+            d.maskFile?.let { bases[baseKey(id, lid, true)] = it.name }
+        }
+    }
+
+    private fun journalDir(id: String) = File(projectDir(id), "journal")
+
+    private fun readSaveSeq(dir: File): Int = runCatching {
+        JSONObject(File(dir, "manifest.json").readText()).optInt("saveSeq", 0)
+    }.getOrDefault(0)
+
+    /** Deletes the journal (after a full save made it obsolete). */
+    fun resetJournal(id: String) {
+        journalDir(id).deleteRecursively()
+    }
+
+    /**
+     * Appends one autosave's tile changes and commits the matching state
+     * (layer list, bases, slots, committed log length). Throws on IO failure.
+     */
+    fun writeJournal(id: String, batch: com.yume.app.engine.JournalBatch) {
+        val dir = projectDir(id)
+        val jdir = journalDir(id).apply { mkdirs() }
+        val log = File(jdir, "tiles.log")
+        val stateFile = File(jdir, "state.json")
+        val seq = readSaveSeq(dir)
+        val prevSeq = runCatching { JSONObject(stateFile.readText()).optInt("saveSeq", -1) }
+            .getOrDefault(-1)
+        if (prevSeq != seq) {
+            // A journal from before the last full save: start over.
+            log.delete()
+            stateFile.delete()
+        }
+        val length = com.yume.app.engine.TileJournal.append(log, batch.changes)
+        val snap = batch.snapshot
+        val layersJson = JSONArray()
+        snap.layers.forEachIndexed { i, layer ->
+            val o = layerJson(layer, i)
+            o.put("file", baseOf(id, layer.id, false) ?: NO_FILE)
+            o.put("slot", snap.slots.getOrElse(i) { -1 })
+            o.put("maskSlot", snap.maskSlots.getOrElse(i) { -1 })
+            val hasMask = layer.mask != null || layer.maskFile != null || layer.maskSparse != null
+            o.put("hasMask", hasMask)
+            if (hasMask) o.put("mask", baseOf(id, layer.id, true) ?: "") else o.remove("mask")
+            layersJson.put(o)
+        }
+        val state = JSONObject().apply {
+            put("saveSeq", seq)
+            put("logLength", length)
+            put("name", snap.title)
+            put("width", snap.width)
+            put("height", snap.height)
+            put("background", snap.background)
+            put("active", snap.activeIndex)
+            put("symmetryX", snap.symmetryX)
+            put("symmetryY", snap.symmetryY)
+            put("symmetryXPos", snap.symmetryXPos.toDouble())
+            put("symmetryYPos", snap.symmetryYPos.toDouble())
+            put("layers", layersJson)
+            put("groups", JSONArray().apply {
+                snap.groups.forEach { g ->
+                    put(JSONObject().apply {
+                        put("id", g.id); put("name", g.name); put("opacity", g.opacity.toDouble())
+                        put("blend", g.blend.name); put("visible", g.visible); put("locked", g.locked)
+                        put("expanded", g.expanded)
+                    })
+                }
+            })
+        }
+        com.yume.app.engine.TileJournal.writeAtomically(stateFile, state.toString())
+    }
 
     /** Root for per-document tile caches (scratch, deleted on close). */
     fun cacheRoot(): File = context.cacheDir
@@ -172,7 +331,14 @@ class ProjectStore(private val context: Context) {
         val manifestFile = File(dir, "manifest.json")
         if (!manifestFile.exists()) return null
         return runCatching {
-            val json = JSONObject(manifestFile.readText())
+            val manifestJson = JSONObject(manifestFile.readText())
+            // Crash recovery: a journal written against this manifest's saveSeq
+            // restores the document to its last autosave.
+            val seq = manifestJson.optInt("saveSeq", 0)
+            val stateFile = File(journalDir(id), "state.json")
+            val state = runCatching { JSONObject(stateFile.readText()) }.getOrNull()
+                ?.takeIf { it.optInt("saveSeq", -1) == seq && it.optLong("logLength", -1L) >= 0L }
+            val json = state ?: manifestJson
             val width = json.optInt("width", 2048)
             val height = json.optInt("height", 2048)
             val layersJson = json.optJSONArray("layers") ?: JSONArray()
@@ -193,6 +359,8 @@ class ProjectStore(private val context: Context) {
                     visible && exists && lazyAll -> null
                     visible && exists -> decodeLayerFile(file)
                     !visible && exists -> null
+                    // A sparse blank layer needs no canvas-sized surface.
+                    lazyAll -> null
                     else -> Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                 }
                 val maskName = o.optString("mask", "")
@@ -258,13 +426,31 @@ class ProjectStore(private val context: Context) {
                 symmetryX = json.optBoolean("symmetryX", false),
                 symmetryY = json.optBoolean("symmetryY", false),
                 symmetryXPos = json.optDouble("symmetryXPos", -1.0).toFloat(),
-                symmetryYPos = json.optDouble("symmetryYPos", -1.0).toFloat()
+                symmetryYPos = json.optDouble("symmetryYPos", -1.0).toFloat(),
+                recovery = state?.let { st ->
+                    val n = layersJson.length()
+                    JournalRecovery(
+                        log = File(journalDir(id), "tiles.log"),
+                        length = st.optLong("logLength", 0L),
+                        slots = IntArray(n) { layersJson.getJSONObject(it).optInt("slot", -1) },
+                        maskSlots = IntArray(n) { layersJson.getJSONObject(it).optInt("maskSlot", -1) },
+                        emptyMasks = (0 until n).filter {
+                            val o = layersJson.getJSONObject(it)
+                            o.optBoolean("hasMask", false) && o.optString("mask", "").isEmpty()
+                        }.toSet()
+                    )
+                }
             )
         }.getOrNull()
     }
 
     fun saveProject(id: String, snapshot: DocumentSnapshot) {
         val dir = projectDir(id).apply { mkdirs() }
+        // Stage 3c: every full save bumps saveSeq, which invalidates any journal
+        // written against the previous PNG set.
+        val saveSeq = readSaveSeq(dir) + 1
+        var complete = true
+        val failedLayers = HashSet<Long>()
         // Drop leftovers from a save that was interrupted before its renames.
         dir.listFiles()?.forEach { if (it.name.startsWith(TMP_PREFIX)) it.delete() }
 
@@ -285,17 +471,17 @@ class ProjectStore(private val context: Context) {
                 val bmp = layer.bitmap
                 if (bmp != null) {
                     val tmp = tempFile(dir, name)
-                    if (encodePng(tmp, bmp)) pending.add(tmp to target)
+                    if (encodePng(tmp, bmp)) pending.add(tmp to target) else { complete = false; failedLayers.add(layer.id) }
                 } else if (layer.sparse != null && layer.sparse.isResident) {
                     // Stage 2: assemble a full bitmap for the PNG encoder. One
                     // layer at a time, so peak extra memory is one canvas.
                     val tmp = tempFile(dir, name)
-                    if (encodeStorePng(tmp, layer.sparse, snapshot.onOwner)) pending.add(tmp to target)
+                    if (encodeStorePng(tmp, layer.sparse, snapshot.onOwner)) pending.add(tmp to target) else { complete = false; failedLayers.add(layer.id) }
                 } else {
                     val src = layer.file ?: layer.sparse?.backingFile()
                     if (src != null && src.exists() && src.absolutePath != target.absolutePath) {
                         val tmp = tempFile(dir, name)
-                        if (copyBytes(src, tmp)) pending.add(tmp to target)
+                        if (copyBytes(src, tmp)) pending.add(tmp to target) else { complete = false; failedLayers.add(layer.id) }
                     }
                     // When src == target the file already holds these pixels.
                 }
@@ -309,7 +495,7 @@ class ProjectStore(private val context: Context) {
             if (mask != null) {
                 if (!unchanged || !maskTarget.exists()) {
                     val tmp = tempFile(dir, maskName)
-                    if (encodePng(tmp, mask)) pending.add(tmp to maskTarget)
+                    if (encodePng(tmp, mask)) pending.add(tmp to maskTarget) else { complete = false; failedLayers.add(layer.id) }
                 }
                 seenMask.add(maskName)
             } else if (layer.maskSparse != null && layer.maskSparse.isResident) {
@@ -317,6 +503,9 @@ class ProjectStore(private val context: Context) {
                     val tmp = tempFile(dir, maskName)
                     if (encodeStorePng(tmp, layer.maskSparse, snapshot.onOwner)) {
                         pending.add(tmp to maskTarget)
+                    } else {
+                        complete = false
+                        failedLayers.add(layer.id)
                     }
                 }
                 seenMask.add(maskName)
@@ -325,7 +514,7 @@ class ProjectStore(private val context: Context) {
                     val src = layer.maskFile
                     if (src.exists() && src.absolutePath != maskTarget.absolutePath) {
                         val tmp = tempFile(dir, maskName)
-                        if (copyBytes(src, tmp)) pending.add(tmp to maskTarget)
+                        if (copyBytes(src, tmp)) pending.add(tmp to maskTarget) else { complete = false; failedLayers.add(layer.id) }
                     }
                 }
                 seenMask.add(maskName)
@@ -389,8 +578,19 @@ class ProjectStore(private val context: Context) {
             put("updatedAt", System.currentTimeMillis())
             put("layers", layersJson)
             put("groups", groupsJson)
+            put("saveSeq", saveSeq)
         }
         File(dir, "manifest.json").writeText(manifest.toString())
+        // The journal described the previous PNG set: it is obsolete now.
+        resetJournal(id)
+        bases.keys.removeAll { it.startsWith("$id/") }
+        snapshot.layers.forEachIndexed { index, layer ->
+            if (layer.id in failedLayers) return@forEachIndexed
+            bases[baseKey(id, layer.id, false)] = "layer_$index.png"
+            val hasMask = layer.mask != null || layer.maskFile != null || layer.maskSparse != null
+            if (hasMask) bases[baseKey(id, layer.id, true)] = "mask_$index.png"
+        }
+        lastSaveComplete = complete
     }
 
     private fun layerJson(layer: LayerSnapshotData, index: Int): JSONObject = JSONObject().apply {
@@ -811,6 +1011,8 @@ class ProjectStore(private val context: Context) {
     private companion object {
         /** Rows per encoder band for dense surfaces (Stage 3c banded PNG). */
         const val ENCODE_BAND = 256
+        /** state.json file name for a layer that has no base PNG yet. */
+        const val NO_FILE = "__none__.png"
         /** Prefix for in-progress writes; must not look like a layer file. */
         const val TMP_PREFIX = ".tmp-"
     }

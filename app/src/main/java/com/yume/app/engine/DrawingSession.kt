@@ -83,7 +83,16 @@ data class DocumentSnapshot(
      * maps (evicted-tile loads) concurrently with painting. Returns false when
      * the owner did not run it in time; the caller then keeps the old file.
      */
-    val onOwner: (() -> Unit) -> Boolean = { it(); true }
+    val onOwner: (() -> Unit) -> Boolean = { it(); true },
+    /** Journal slot of each layer's store / mask store (-1 = none), by index. */
+    val slots: IntArray = IntArray(0),
+    val maskSlots: IntArray = IntArray(0)
+)
+
+/** One autosave's worth of journal data, captured on the owner thread. */
+class JournalBatch(
+    val snapshot: DocumentSnapshot,
+    val changes: List<TileJournal.Change>
 )
 
 /** One persisted history step (pixel edits only). */
@@ -269,6 +278,53 @@ class DrawingSession(
     fun post(block: () -> Unit) {
         commands.add(block)
         wakeListener?.invoke()
+    }
+
+    /** Next free journal slot (recovery sets it past the recovered ones). */
+    var nextJournalSlot: Int = 0
+
+    /**
+     * Captures every sparse store's changes since the last autosave as journal
+     * records, plus a snapshot of the document structure (owner thread).
+     * [isNew] tells whether a store has no base PNG yet (then it is dumped in
+     * full). Returns null when the document cannot be journaled (a dense layer)
+     * or the batch would be larger than [maxBytes]; the caller then does a full
+     * save instead.
+     */
+    fun collectJournal(isNew: (layerId: Long, mask: Boolean) -> Boolean, maxBytes: Long): JournalBatch? {
+        val changes = ArrayList<TileJournal.Change>()
+        var bytes = 0L
+        for (l in engine.layers) {
+            for (mask in listOf(false, true)) {
+                val st = (if (mask) l.maskTiles else l.tiles) ?: continue
+                val sp = st as? SparseTileStore ?: return null
+                var full = false
+                if (sp.journalSlot < 0) {
+                    sp.journalSlot = nextJournalSlot++
+                    full = isNew(l.id, mask)
+                } else if (isNew(l.id, mask) && sp.journalHasChanges()) {
+                    full = false
+                }
+                if (!full && !sp.journalHasChanges()) continue
+                if (!full && !sp.isResident) continue
+                bytes += sp.journalCollect(sp.journalSlot, full, changes)
+                if (bytes > maxBytes) return null
+            }
+        }
+        val snap = snapshotNow()
+        return JournalBatch(snap, changes)
+    }
+
+    /** Takes the pending journal state of every sparse store (before a full save). */
+    fun journalTakeAll(): List<Pair<SparseTileStore, Pair<Set<Long>, Boolean>>> {
+        val out = ArrayList<Pair<SparseTileStore, Pair<Set<Long>, Boolean>>>()
+        for (l in engine.layers) {
+            for (st in listOf(l.tiles, l.maskTiles)) {
+                val sp = st as? SparseTileStore ?: continue
+                out.add(sp to sp.journalTake())
+            }
+        }
+        return out
     }
 
     /** The render thread while a renderer drives this session, else null. */
@@ -1894,6 +1950,10 @@ class DrawingSession(
             )
         },
         onOwner = { block -> runOnOwner(block = block) },
+        slots = IntArray(engine.layers.size) { (engine.layers[it].tiles as? SparseTileStore)?.journalSlot ?: -1 },
+        maskSlots = IntArray(engine.layers.size) {
+            (engine.layers[it].maskTiles as? SparseTileStore)?.journalSlot ?: -1
+        },
         symmetryX = engine.symmetryX,
         symmetryY = engine.symmetryY,
         symmetryXPos = engine.symmetryXPos,

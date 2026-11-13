@@ -90,7 +90,7 @@ fun EditorScreen(controller: EditorController, onExit: () -> Unit) {
     LaunchedEffect(session) {
         while (true) {
             delay(25_000)
-            controller.save()
+            controller.autosave()
         }
     }
 
@@ -98,7 +98,7 @@ fun EditorScreen(controller: EditorController, onExit: () -> Unit) {
     LaunchedEffect(state.documentVersion) {
         if (state.documentVersion == 0) return@LaunchedEffect
         delay(1200)
-        controller.save()
+        controller.autosave()
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current

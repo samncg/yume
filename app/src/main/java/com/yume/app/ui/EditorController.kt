@@ -4,6 +4,7 @@ import android.net.Uri
 import com.yume.app.data.PresetStore
 import com.yume.app.data.ProjectStore
 import com.yume.app.engine.BrushLibrary
+import kotlinx.coroutines.sync.withLock
 import com.yume.app.engine.BrushPreset
 import com.yume.app.engine.DrawingEngine
 import com.yume.app.engine.DrawingSession
@@ -109,6 +110,19 @@ class EditorController(
                 val index = project.activeIndex.coerceIn(0, engine.layers.size - 1)
                 engine.selectLayer(engine.layers[index].id)
             }
+            // Bases of the journal: the PNG each layer was opened from.
+            store.adoptBases(project.id, engine.layers.map { it.id }, project.layers)
+            // Crash recovery: replay the journal written by the last autosave.
+            var recovered = false
+            project.recovery?.let { r ->
+                recovered = true
+                val ok = runCatching { r.apply(engine) }
+                _message.value = if (ok.isSuccess) {
+                    "Recovered your work from the last autosave"
+                } else {
+                    "Recovered your work partially: the autosave journal was damaged"
+                }
+            }
             engine.compositeAll()
 
             _session.value = DrawingSession(
@@ -124,13 +138,18 @@ class EditorController(
                     ?: presets.first().id
                 session.onPresetsChanged = { list -> schedulePresetSave(list) }
                 session.onMessage = { text -> _message.value = text }
+                project.recovery?.let { session.nextJournalSlot = it.maxSlot + 1 }
             }
 
-            // Re-attach the previous session's reversible edits.
-            runCatching { store.loadHistory(projectId) }
-                .getOrNull()
-                ?.takeIf { it.entries.isNotEmpty() }
-                ?.let { _session.value?.restoreHistory(it) }
+            // Re-attach the previous session's reversible edits. After a journal
+            // recovery the persisted history describes the last FULL save, not
+            // the recovered pixels, so it is not restored.
+            if (!recovered) {
+                runCatching { store.loadHistory(projectId) }
+                    .getOrNull()
+                    ?.takeIf { it.entries.isNotEmpty() }
+                    ?.let { _session.value?.restoreHistory(it) }
+            }
             // Allocate the dab scratch before the first gesture so the first
             // stroke does not pay for the allocation inside its first frame.
             _session.value?.warmup()
@@ -141,9 +160,52 @@ class EditorController(
     private var tileCache: com.yume.app.engine.TileCache? = null
     private var exitSave: kotlinx.coroutines.Deferred<Boolean>? = null
 
+    /** Serialises saves and journal writes (they share the project folder). */
+    private val saveMutex = kotlinx.coroutines.sync.Mutex()
+    /** A journal write failed: the next autosave writes PNGs instead. */
+    @Volatile private var journalBroken = false
+
     fun save() {
         val session = _session.value ?: return
         scope.launch { saveNow(session) }
+    }
+
+    /**
+     * Periodic / idle autosave. Sparse documents append only the changed tiles
+     * to the crash-recovery journal (Stage 3c); dense documents, or a journal
+     * that failed, get a full PNG save as before.
+     */
+    fun autosave() {
+        val session = _session.value ?: return
+        if (!session.engine.compositeIsSparse || journalBroken) {
+            save()
+            return
+        }
+        scope.launch {
+            saveMutex.withLock {
+                var batch: com.yume.app.engine.JournalBatch? = null
+                var bigger = false
+                val ran = session.runOnOwner {
+                    batch = session.collectJournal(
+                        isNew = { layerId, mask -> store.baseOf(projectId, layerId, mask) == null },
+                        maxBytes = JOURNAL_MAX_BYTES
+                    )
+                    if (batch == null) bigger = true
+                }
+                val b = batch
+                if (!ran || b == null) {
+                    if (bigger) journalBroken = true
+                    return@withLock
+                }
+                runCatching { store.writeJournal(projectId, b) }.onFailure {
+                    // The changes left the stores' journal state: only a full
+                    // save can persist them now.
+                    journalBroken = true
+                    _message.value = "Autosave journal failed (${it.message}); saving in full"
+                }
+            }
+            if (journalBroken) saveNow(session)
+        }
     }
 
     /**
@@ -179,9 +241,28 @@ class EditorController(
         }
     }
 
-    private suspend fun saveNow(session: DrawingSession) {
-        val snapshot = session.snapshotBlocking() ?: return
-        runCatching { store.saveProject(projectId, snapshot) }
+    private suspend fun saveNow(session: DrawingSession) = saveMutex.withLock {
+        saveNowLocked(session)
+    }
+
+    private fun saveNowLocked(session: DrawingSession) {
+        // Take the pending journal changes in the same owner turn as the
+        // snapshot: a change made after it stays pending for the next autosave.
+        var snapshot: com.yume.app.engine.DocumentSnapshot? = null
+        var taken: List<Pair<com.yume.app.engine.SparseTileStore, Pair<Set<Long>, Boolean>>> = emptyList()
+        if (!session.runOnOwner {
+                taken = session.journalTakeAll()
+                snapshot = session.snapshotNow()
+            }
+        ) return
+        val snap = snapshot ?: return
+        val saved = runCatching { store.saveProject(projectId, snap) }.isSuccess
+        if (saved && store.lastSaveComplete) {
+            journalBroken = false
+        } else {
+            // Some pixels did not reach a PNG: keep them pending.
+            session.runOnOwner { for ((st, t) in taken) st.journalRestore(t) }
+        }
         store.saveWarning?.let {
             store.saveWarning = null
             _message.value = it
@@ -283,6 +364,8 @@ class EditorController(
     private companion object {
         /** Bound on the save performed while leaving, so exit cannot hang. */
         const val EXIT_SAVE_TIMEOUT_MS = 3_000L
+        /** Larger journal batches (a big import) fall back to a full save. */
+        const val JOURNAL_MAX_BYTES = 96L * 1024L * 1024L
         val SaveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 }

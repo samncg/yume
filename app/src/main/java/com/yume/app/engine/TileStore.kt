@@ -848,6 +848,73 @@ class SparseTileStore(
     @Volatile var modCount: Long = 0L
         private set
 
+    // ------------------------------------------------------ journal (3c)
+    /** Stable id of this store in the crash-recovery journal (-1 = none yet). */
+    var journalSlot: Int = -1
+    /** Tiles changed since the last journal write or full save. */
+    private val journalDirty = HashSet<Long>()
+    /** The whole store was cleared / filled: the next journal write dumps it all. */
+    private var journalFullDump = false
+
+    private fun journalMark(k: Long) {
+        if (!journalFullDump) journalDirty.add(k)
+    }
+
+    fun journalHasChanges(): Boolean = journalFullDump || journalDirty.isNotEmpty()
+
+    /**
+     * Captures the changes since the last journal write as journal records for
+     * [slot] (owner thread), then forgets them. [full] dumps every tile after a
+     * RESET (a store the journal has never seen, or one that was cleared).
+     * Returns the raw bytes captured.
+     */
+    fun journalCollect(slot: Int, full: Boolean, out: MutableList<TileJournal.Change>): Long {
+        var bytes = 0L
+        if (full || journalFullDump) {
+            ensureResident()
+            out.add(TileJournal.Change(slot, 0, 0, TileJournal.RESET, 0, 0, null))
+            for (k in allKeys()) {
+                val t = tileAt(k) ?: continue
+                val raw = TileJournal.copyRaw(t)
+                bytes += raw.size
+                out.add(
+                    TileJournal.Change(
+                        slot, (k ushr 32).toInt(), k.toInt(), TileJournal.TILE_RAW, t.width, t.height, raw
+                    )
+                )
+            }
+        } else {
+            for (k in journalDirty) {
+                val tx = (k ushr 32).toInt()
+                val ty = k.toInt()
+                val t = tileAt(k)
+                if (t == null) {
+                    out.add(TileJournal.Change(slot, tx, ty, TileJournal.DEFAULT, 0, 0, null))
+                } else {
+                    val raw = TileJournal.copyRaw(t)
+                    bytes += raw.size
+                    out.add(TileJournal.Change(slot, tx, ty, TileJournal.TILE_RAW, t.width, t.height, raw))
+                }
+            }
+        }
+        journalDirty.clear()
+        journalFullDump = false
+        return bytes
+    }
+
+    /** Forgets pending journal changes (their pixels are now in the PNG). */
+    fun journalTake(): Pair<Set<Long>, Boolean> {
+        val r = HashSet(journalDirty) to journalFullDump
+        journalDirty.clear()
+        journalFullDump = false
+        return r
+    }
+
+    /** Puts back changes taken by [journalTake] when the full save failed. */
+    fun journalRestore(taken: Pair<Set<Long>, Boolean>) {
+        if (taken.second) journalFullDump = true else journalDirty.addAll(taken.first)
+    }
+
     /** Solid -> private copies made because something wrote into a solid. */
     var unshares: Long = 0L
         private set
@@ -907,6 +974,7 @@ class SparseTileStore(
 
     private fun removeTile(k: Long) {
         modCount++
+        journalMark(k)
         val b = tiles.remove(k)
         canvases.remove(k)
         lastUse.remove(k)
@@ -940,6 +1008,7 @@ class SparseTileStore(
      */
     private fun writableTile(k: Long, tx: Int, ty: Int): Bitmap {
         modCount++
+        journalMark(k)
         if (spillFile != null) {
             // Protect the tile from eviction until the next one is handed out,
             // and invalidate its spill record: the caller is about to change it.
@@ -1024,6 +1093,7 @@ class SparseTileStore(
      */
     private fun assignSolid(k: Long, shared: Bitmap, colour: Int) {
         modCount++
+        journalMark(k)
         forgetSpill(k)
         val old = tiles[k]
         if (old != null && old !== shared) releaseOwned(k, old)
@@ -1865,6 +1935,7 @@ class SparseTileStore(
         )
         forgetSpill(k)
         modCount++
+        journalMark(k)
         val old = tiles[k]
         if (old != null && old !== source) releaseOwned(k, old)
         solids.remove(k)
@@ -1909,6 +1980,8 @@ class SparseTileStore(
 
     override fun clear() {
         releaseAll()
+        journalFullDump = true
+        journalDirty.clear()
         backing = null
         materialized = true
         markDirty(Rect(0, 0, width, height))
@@ -1916,6 +1989,8 @@ class SparseTileStore(
 
     override fun fill(color: Int) {
         releaseAll()
+        journalFullDump = true
+        journalDirty.clear()
         backing = null
         materialized = true
         if (color != defaultPixel) {

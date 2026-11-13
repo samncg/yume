@@ -147,6 +147,8 @@ object YumeHarness {
                     out.append(scoreCacheFailures(app))
                     out.append(scoreGoldenEvict(app))
                     out.append(scoreCacheBig(app))
+                } else if (only == "journal") {
+                    out.append(scoreJournal(app))
                 } else if (only == "png") {
                     out.append(scorePngParity(app))
                     out.append(line(scoreOpsAlloc(app)))
@@ -211,6 +213,7 @@ object YumeHarness {
                 out.append(line(scoreMemory()))
                 out.append(scoreSolidMemory())
                 out.append(scorePngParity(app))
+                out.append(scoreJournal(app))
                 out.append(scoreFuzzEvict())
                 out.append(scoreCacheFailures(app))
                 out.append(scoreGoldenEvict(app))
@@ -2826,6 +2829,159 @@ object YumeHarness {
         }
         out.append("png-parity verdict=${if (fails == 0) "PASS" else "FAIL"}\n")
         dir.deleteRecursively()
+        return out.toString()
+    }
+
+
+    /**
+     * Crash recovery (Stage 3c): full save, then two journal autosaves covering
+     * a stroke, a fill, a new layer, a deletion, a new mask and a reorder, then
+     * edits that are NOT autosaved. Reopening must give exactly the state at the
+     * second autosave. Also: a torn log tail is ignored, a corrupt record is
+     * reported without a crash, a later full save retires the journal, and a
+     * journal from before a full save (stale saveSeq) is ignored.
+     */
+    private fun scoreJournal(app: YumeApp): String {
+        val out = StringBuilder()
+        val ps = app.projectStore
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = 256
+        val w = 1500
+        val h = 1000
+        val project = ps.createProject("harness-journal", w, h, BG)
+        var cache: TileCache? = null
+        fun state(engine: DrawingEngine): String {
+            engine.compositeAll()
+            return engine.layers.joinToString(" ") { it.name + "=" + hashLayer(it) } +
+                " C=" + compositeHash(engine)
+        }
+        fun rebuild(): Pair<DrawingEngine, String> {
+            cache?.close()
+            cache = TileCache.open(app.cacheDir, project.id, 64L shl 20)
+            val loaded = ps.loadProject(project.id) ?: error("reload failed")
+            val e = DrawingEngine(w, h)
+            e.backgroundColor = loaded.background
+            for (d in loaded.layers) {
+                val l = e.newLayer(name = d.name, bitmap = d.bitmap, backingFile = d.file)
+                l.adoptMask(d.mask, d.maskFile)
+                l.opacity = d.opacity
+                l.blend = d.blend
+                l.visible = d.visible
+                l.maskEnabled = d.maskEnabled
+            }
+            ps.adoptBases(project.id, e.layers.map { it.id }, loaded.layers)
+            var note = "none"
+            loaded.recovery?.let { r ->
+                note = runCatching { "replayed=" + r.apply(e) }.getOrElse { "error=" + it.message }
+            }
+            return e to note
+        }
+        try {
+            cache = TileCache.open(app.cacheDir, project.id, 64L shl 20)
+            val engine = DrawingEngine(w, h)
+            engine.backgroundColor = BG
+            val session = DrawingSession("journal", "J", engine, History())
+            identityView(session, w, h)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            val names = listOf("A", "B", "C")
+            for (n in names) {
+                val l = engine.newLayer(n)
+                engine.selectLayer(l.id)
+                session.color = 0xFF000000.toInt() or (n.hashCode() * 0x3F5A1 and 0xFFFFFF)
+                session.stroke(listOf(P(50f, 100f + n[0].code), P(1400f, 900f), P(700f, 80f)))
+            }
+            ps.saveProject(project.id, session.snapshotNow())
+            ps.adoptBases(project.id, emptyList(), emptyList())
+            // saveProject recorded the bases itself; re-derive them like the editor.
+            ps.saveProject(project.id, session.snapshotNow())
+            fun autosave(): String {
+                val batch = session.collectJournal(
+                    isNew = { id, m -> ps.baseOf(project.id, id, m) == null },
+                    maxBytes = 96L shl 20
+                ) ?: return "collect-null"
+                ps.writeJournal(project.id, batch)
+                return "records=${batch.changes.size}"
+            }
+            // Autosave 1: stroke, fill, a new layer, delete, mask, reorder.
+            engine.selectLayer(engine.layers[0].id)
+            session.color = 0xFF33AA55.toInt()
+            session.stroke(listOf(P(100f, 500f), P(1300f, 520f)))
+            engine.fillLayer(engine.layers[1].id, 0x8033CCFF.toInt())
+            val d = engine.newLayer("D")
+            engine.selectLayer(d.id)
+            session.color = 0xFFAA2244.toInt()
+            session.stroke(listOf(P(300f, 300f), P(1200f, 800f)))
+            engine.deleteLayer(engine.layers.first { it.name == "C" }.id)
+            val a = engine.layers.first { it.name == "A" }
+            engine.addMask(a)
+            a.maskTiles!!.fillRect(Rect(200, 200, 900, 700), 0xFF000000.toInt())
+            engine.moveLayer(0, engine.layers.size - 1)
+            val j1 = autosave()
+            // Autosave 2: more paint, a cleared region.
+            engine.selectLayer(d.id)
+            session.color = 0xFF2266EE.toInt()
+            session.stroke(listOf(P(1400f, 100f), P(100f, 900f)))
+            engine.layers.first { it.name == "B" }.tiles.clearRect(Rect(0, 0, 600, 400))
+            val j2 = autosave()
+            val expected = state(engine)
+            // Not autosaved: must not come back after the "crash".
+            session.color = 0xFF000000.toInt()
+            session.stroke(listOf(P(10f, 10f), P(1490f, 990f)))
+            engine.layers.first { it.name == "D" }.tiles.fillRect(Rect(0, 0, 300, 300), 0xFFFFFF00.toInt())
+            val unsaved = state(engine)
+
+            // Crash: nothing else is written. Reopen.
+            val (r1, n1) = rebuild()
+            val got1 = state(r1)
+            val ok1 = got1 == expected && got1 != unsaved
+            out.append("journal recover: ${if (ok1) "PASS" else "FAIL"} $j1 $j2 $n1\n")
+            if (!ok1) out.append("  expected: $expected\n  got:      $got1\n")
+
+            // Torn tail: bytes after the committed length are ignored.
+            val log = File(File(ps.projectDir(project.id), "journal"), "tiles.log")
+            log.appendBytes(ByteArray(777) { (it * 37).toByte() })
+            val (r2, n2) = rebuild()
+            val ok2 = state(r2) == expected
+            out.append("journal torn-tail: ${if (ok2) "PASS" else "FAIL"} $n2\n")
+
+            // Corrupt record inside the committed length: reported, no crash.
+            val bytes = log.readBytes()
+            val mid = bytes.size / 2
+            bytes[mid] = (bytes[mid].toInt() xor 0x55).toByte()
+            val saved = log.readBytes()
+            log.writeBytes(bytes)
+            val crashed = runCatching { rebuild() }
+            val ok3 = crashed.isSuccess && crashed.getOrNull()!!.second.startsWith("error=")
+            out.append("journal corrupt: ${if (ok3) "PASS" else "FAIL"} ${crashed.getOrNull()?.second ?: crashed.exceptionOrNull()}\n")
+            log.writeBytes(saved)
+
+            // Stale journal: a full save happened after it (saveSeq moved on).
+            val (r4, _) = rebuild()
+            val s4 = DrawingSession("journal2", "J2", r4, History())
+            val stateBefore = state(r4)
+            val journalState = File(File(ps.projectDir(project.id), "journal"), "state.json").readText()
+            ps.saveProject(project.id, s4.snapshotNow())
+            val retired = !File(ps.projectDir(project.id), "journal").exists()
+            File(File(ps.projectDir(project.id), "journal").apply { mkdirs() }, "state.json").writeText(journalState)
+            log.writeBytes(saved)
+            val (r5, n5) = rebuild()
+            val ok5 = retired && n5 == "none" && state(r5) == stateBefore
+            out.append("journal full-save+stale: ${if (ok5) "PASS" else "FAIL"} retired=$retired recovery=$n5\n")
+        } catch (t: Throwable) {
+            Log.e(TAG, "journal test failed", t)
+            out.append("journal: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
+        }
         return out.toString()
     }
 
