@@ -1792,6 +1792,12 @@ class DrawingSession(
     }
 
     fun duplicateLayer() = post {
+        val gid = engine.activeGroupId
+        if (gid != 0L) {
+            val before = engine.snapshotState()
+            if (engine.duplicateGroup(gid)) pushStructural(before, "Duplicate group", EditKind.LayerDuplicate)
+            return@post
+        }
         val id = engine.activeLayer?.id ?: return@post
         val src = engine.layerById(id) ?: return@post
         // The copy is a new full-canvas surface; decoding a swapped-out source
@@ -1807,6 +1813,12 @@ class DrawingSession(
     }
 
     fun mergeDown() = post {
+        val gid = engine.activeGroupId
+        if (gid != 0L) {
+            val before = engine.snapshotState()
+            if (engine.mergeGroup(gid)) pushStructural(before, "Merge group", EditKind.LayerOrder)
+            return@post
+        }
         val id = engine.activeLayer?.id ?: return@post
         val extra = engine.mergeCost(id)
         if (extra > 0 && !engine.canAfford(extra)) {
@@ -1823,6 +1835,12 @@ class DrawingSession(
     }
 
     fun deleteLayer() = post {
+        val gid = engine.activeGroupId
+        if (gid != 0L) {
+            val before = engine.snapshotState()
+            if (engine.deleteGroup(gid)) pushStructural(before, "Delete group", EditKind.LayerDelete)
+            return@post
+        }
         val id = engine.activeLayer?.id ?: return@post
         val before = engine.snapshotState()
         if (engine.deleteLayer(id)) {
@@ -2083,14 +2101,21 @@ class DrawingSession(
     }
 
     /** Moves a layer to an absolute position in the stack (engine order). */
-    fun moveLayerTo(id: Long, targetIndex: Int) = post {
+    fun moveLayerTo(id: Long, targetIndex: Int, groupId: Long? = null) = post {
         val from = engine.indexOf(id)
         if (from < 0) return@post
         val to = targetIndex.coerceIn(0, engine.layers.size - 1)
-        if (from == to) return@post
+        val layer = engine.layers[from]
+        if (from == to && (groupId == null || layer.groupId == groupId)) return@post
         val before = engine.snapshotState()
-        engine.moveLayer(from, to)
-        pushStructural(before, "Reorder layers", EditKind.LayerOrder)
+        val oldGroup = layer.groupId
+        if (groupId != null) engine.moveLayerInto(from, to, groupId) else engine.moveLayer(from, to)
+        val label = when {
+            groupId == null || groupId == oldGroup -> "Reorder layers"
+            groupId != 0L -> "Move into group"
+            else -> "Move out of group"
+        }
+        pushStructural(before, label, EditKind.LayerOrder)
     }
 
     /** Moves a layer one slot up (delta > 0) or down in the stack. */

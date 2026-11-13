@@ -366,9 +366,25 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                                     val upTo = if (slots > 0) targetPanel + 1 else targetPanel
                                     val above = rows.take(upTo)
                                         .count { !it.isGroup && it.id != id }
+                                    // The row the layer lands under decides its
+                                    // group: under an open group's header or
+                                    // among its layers joins it; anywhere else
+                                    // leaves any group.
+                                    val landing = if (slots > 0) rows.getOrNull(targetPanel)
+                                    else rows.getOrNull(targetPanel - 1)
+                                    val joinGroup: Long = when {
+                                        landing == null -> 0L
+                                        landing.isGroup -> if (landing.expanded) landing.id else 0L
+                                        landing.depth > 0 -> {
+                                            val at = rows.indexOf(landing)
+                                            (at downTo 0).firstOrNull { rows[it].isGroup }?.let { rows[it].id } ?: 0L
+                                        }
+                                        else -> 0L
+                                    }
                                     session.moveLayerTo(
                                         id,
-                                        (layerCount - 1 - above).coerceIn(0, layerCount - 1)
+                                        (layerCount - 1 - above).coerceIn(0, layerCount - 1),
+                                        joinGroup
                                     )
                                 } else {
                                     // Not moved: spring back home from the finger.

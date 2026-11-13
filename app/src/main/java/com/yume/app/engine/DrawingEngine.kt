@@ -409,6 +409,14 @@ class DrawingEngine(val width: Int, val height: Int) {
         } else {
             TileStoreFactory.create(width, height, src.tiles.copyAll(), null)
         }
+        // The mask, clipping and group come along: a duplicate looks the same.
+        val maskCopy: TileStore? = src.maskTiles?.let { m ->
+            if (m.isSparse) {
+                TileStoreFactory.mask(width, height, null, null).also { TileOps.copyTiles(m, it) }
+            } else {
+                TileStoreFactory.mask(width, height, m.copyAll(), null)
+            }
+        }
         val copy = Layer(
             id = nextId++,
             name = src.name,
@@ -416,7 +424,11 @@ class DrawingEngine(val width: Int, val height: Int) {
             opacity = src.opacity,
             blend = src.blend,
             visible = src.visible,
-            alphaLock = src.alphaLock
+            alphaLock = src.alphaLock,
+            clipping = src.clipping,
+            maskTiles = maskCopy,
+            maskEnabled = src.maskEnabled,
+            groupId = src.groupId
         )
         layers.add(i + 1, copy)
         activeIndex = i + 1
@@ -510,6 +522,86 @@ class DrawingEngine(val width: Int, val height: Int) {
         layer.paintStore.fill(color)
         layer.touch()
         markDirtyAll()
+    }
+
+    /**
+     * Moves a layer and sets its group explicitly: [groupId] 0 leaves any
+     * group, an existing group id joins it (the caller drops it next to that
+     * group's members, so membership stays contiguous).
+     */
+    fun moveLayerInto(from: Int, to: Int, groupId: Long) {
+        if (from !in layers.indices) return
+        val target = to.coerceIn(0, layers.size - 1)
+        val layer = layers.removeAt(from)
+        layers.add(target, layer)
+        val g = groupById(groupId)
+        layer.groupId = g?.id ?: 0L
+        // A grouped layer's opacity belongs to its group.
+        if (g != null) layer.opacity = 1f
+        activeIndex = target
+        pruneGroups()
+        markDirtyAll()
+    }
+
+    /** Deletes a group and its layers (refused if it holds every layer). */
+    fun deleteGroup(id: Long): Boolean {
+        val members = layers.filter { it.groupId == id }
+        if (members.isEmpty() || members.size >= layers.size) return false
+        layers.removeAll { it.groupId == id }
+        groups.removeAll { it.id == id }
+        activeGroupId = 0L
+        activeIndex = activeIndex.coerceIn(0, layers.size - 1)
+        pruneGroups()
+        markDirtyAll()
+        return true
+    }
+
+    /** Copies a group and its layers; the copy sits just above the original. */
+    fun duplicateGroup(id: Long): Boolean {
+        val group = groupById(id) ?: return false
+        val members = layers.filter { it.groupId == id }
+        if (members.isEmpty()) return false
+        val top = layers.indexOfLast { it.groupId == id }
+        val copyGroup = LayerGroup(
+            nextId++, group.name + " copy", group.opacity, group.blend, group.visible, false, group.expanded
+        )
+        groups.add(copyGroup)
+        val copies = ArrayList<Layer>()
+        for (m in members) {
+            val c = duplicateLayer(m.id) ?: continue
+            layers.remove(c)
+            c.groupId = copyGroup.id
+            copies.add(c)
+        }
+        val at = (layers.indexOfLast { it.groupId == id } + 1).coerceAtLeast(top + 1).coerceAtMost(layers.size)
+        layers.addAll(at, copies)
+        activeGroupId = copyGroup.id
+        activeIndex = at + copies.size - 1
+        markDirtyAll()
+        return true
+    }
+
+    /**
+     * Flattens a group into one layer: its members merge bottom up, and the
+     * result takes the group's opacity and blend mode.
+     */
+    fun mergeGroup(id: Long): Boolean {
+        val group = groupById(id) ?: return false
+        while (true) {
+            val members = layers.filter { it.groupId == id }
+            if (members.size < 2) break
+            if (!mergeDown(members[1].id)) return false
+        }
+        val last = layers.firstOrNull { it.groupId == id } ?: return false
+        last.opacity = group.opacity
+        last.blend = group.blend
+        last.groupId = 0L
+        last.name = group.name
+        groups.remove(group)
+        activeGroupId = 0L
+        activeIndex = indexOf(last.id).coerceAtLeast(0)
+        markDirtyAll()
+        return true
     }
 
     fun moveLayer(from: Int, to: Int) {
