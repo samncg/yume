@@ -174,6 +174,7 @@ class SurfaceRenderer(
                 if (renderRequested) {
                     renderRequested = false
                     drawFrame()
+                    updateGlass()
                     // Safe point: nothing holds a writable tile between frames.
                     cache?.evictIfNeeded()
                 } else {
@@ -192,6 +193,50 @@ class SurfaceRenderer(
             session.wakeListener = null
             session.ownerThread = null
         }
+    }
+
+    private var lastGlass = 0L
+    private val glassCanvas = Canvas()
+    private val glassViewport = Rect()
+
+    /**
+     * Publishes a quarter-resolution copy of what the surface shows for the
+     * liquid-glass UI ([CanvasGlass]). Throttled, skipped while the UI is
+     * hidden, and drawn from the zoom-out mip when one exists, so it costs a
+     * fraction of a frame.
+     */
+    private fun updateGlass() {
+        if (!session.chromeVisible || surfaceW <= 0 || surfaceH <= 0) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastGlass < CanvasGlass.MIN_INTERVAL_MS) return
+        lastGlass = now
+        val s = CanvasGlass.SCALE
+        val bmp = CanvasGlass.obtain(
+            (surfaceW / s).coerceAtLeast(1), (surfaceH / s).coerceAtLeast(1)
+        )
+        val c = glassCanvas
+        c.setBitmap(bmp)
+        c.drawColor(0xFF0C0C0E.toInt())
+        c.save()
+        c.scale(1f / s, 1f / s)
+        val engine = session.engine
+        c.concat(session.view.matrix)
+        if (engine.compositeIsSparse) {
+            engine.enableMip()
+            if (engine.hasMipDirty) engine.updateMip()
+            if (engine.mipReady()) {
+                engine.drawMip(c)
+            } else {
+                glassViewport.set(documentViewport(session.view, engine.width, engine.height))
+                engine.drawComposite(c, glassViewport)
+            }
+        } else {
+            glassViewport.set(0, 0, engine.width, engine.height)
+            engine.drawComposite(c, glassViewport)
+        }
+        c.restore()
+        c.setBitmap(null)
+        CanvasGlass.publish(bmp)
     }
 
     private fun recordFrame() {

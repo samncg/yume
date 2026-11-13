@@ -143,7 +143,8 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                         onClick = { session.toggleAlphaLock(active.id) },
                         selected = active.alphaLock,
                         size = 30.dp,
-                        iconSize = 16.dp
+                        iconSize = 16.dp,
+                        label = "Alpha lock"
                     )
                 }
             }
@@ -223,16 +224,17 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
 
         DividerLine()
         Row(verticalAlignment = Alignment.CenterVertically) {
-            YumeIconButton(Glyph.Plus, { session.addLayer() }, size = 36.dp, iconSize = 18.dp)
-            YumeIconButton(Glyph.Copy, { session.duplicateLayer() }, size = 36.dp, iconSize = 17.dp)
-            YumeIconButton(Glyph.Merge, { session.mergeDown() }, size = 36.dp, iconSize = 17.dp)
-            YumeIconButton(Glyph.Clear, { session.clearLayer() }, size = 36.dp, iconSize = 17.dp)
+            YumeIconButton(Glyph.Plus, { session.addLayer() }, size = 36.dp, iconSize = 18.dp, label = "Add layer")
+            YumeIconButton(Glyph.Copy, { session.duplicateLayer() }, size = 36.dp, iconSize = 17.dp, label = "Duplicate")
+            YumeIconButton(Glyph.Merge, { session.mergeDown() }, size = 36.dp, iconSize = 17.dp, label = "Merge down")
+            YumeIconButton(Glyph.Clear, { session.clearLayer() }, size = 36.dp, iconSize = 17.dp, label = "Clear layer")
             YumeIconButton(
                 Glyph.Trash,
                 { session.deleteLayer() },
                 enabled = state.layers.count { !it.isGroup } > 1,
                 size = 36.dp,
-                iconSize = 17.dp
+                iconSize = 17.dp,
+                label = "Delete layer"
             )
             Spacer(Modifier.weight(1f))
             YumeIconButton(
@@ -240,7 +242,8 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                 { session.toggleSoloLayer() },
                 selected = soloActive,
                 size = 36.dp,
-                iconSize = 16.dp
+                iconSize = 16.dp,
+                label = "Show only this layer"
             )
         }
         Spacer(Modifier.height(2.dp))
@@ -262,7 +265,8 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                 selected = layerNode?.clipping == true,
                 enabled = layerNode != null,
                 size = 36.dp,
-                iconSize = 18.dp
+                iconSize = 18.dp,
+                label = "Clip to layer below"
             )
             val inGroup = active?.isGroup == true || (active?.depth ?: 0) > 0
             YumeIconButton(
@@ -271,14 +275,16 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                 selected = inGroup,
                 enabled = active != null,
                 size = 36.dp,
-                iconSize = 18.dp
+                iconSize = 18.dp,
+                label = "Group or ungroup"
             )
             YumeIconButton(
                 Glyph.More,
                 { renameTarget = active; renameText = active?.name ?: "" },
                 enabled = active != null,
                 size = 36.dp,
-                iconSize = 17.dp
+                iconSize = 17.dp,
+                label = "Rename"
             )
             Spacer(Modifier.weight(1f))
             val nodeId = active?.id ?: -1L
@@ -288,14 +294,16 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                 { session.nudgeLayer(nodeId, 1) },
                 enabled = isLayer,
                 size = 36.dp,
-                iconSize = 16.dp
+                iconSize = 16.dp,
+                label = "Move up"
             )
             YumeIconButton(
                 Glyph.ChevronDown,
                 { session.nudgeLayer(nodeId, -1) },
                 enabled = isLayer,
                 size = 36.dp,
-                iconSize = 16.dp
+                iconSize = 16.dp,
+                label = "Move down"
             )
         }
     }
@@ -381,7 +389,8 @@ private fun LayerRow(
             onClick = onToggleVisible,
             size = 28.dp,
             iconSize = 15.dp,
-            tint = if (layer.visible) YumeColors.text else YumeColors.textDim
+            tint = if (layer.visible) YumeColors.text else YumeColors.textDim,
+            label = "Show or hide"
         )
         LayerBadge(layer.thumb, highlighted = !layer.editingMask)
         if (layer.hasMask) {
@@ -417,7 +426,8 @@ private fun LayerRow(
             selected = layer.locked,
             size = 26.dp,
             iconSize = 13.dp,
-            tint = if (layer.locked) YumeColors.accent else YumeColors.textDim
+            tint = if (layer.locked) YumeColors.accent else YumeColors.textDim,
+            label = "Lock layer"
         )
     }
 }
@@ -445,14 +455,16 @@ private fun GroupRow(
             glyph = if (row.expanded) Glyph.ChevronDown else Glyph.ChevronUp,
             onClick = onToggleExpanded,
             size = 26.dp,
-            iconSize = 13.dp
+            iconSize = 13.dp,
+            label = "Expand or collapse"
         )
         YumeIconButton(
             glyph = if (row.visible) Glyph.Eye else Glyph.EyeOff,
             onClick = onToggleVisible,
             size = 28.dp,
             iconSize = 15.dp,
-            tint = if (row.visible) YumeColors.text else YumeColors.textDim
+            tint = if (row.visible) YumeColors.text else YumeColors.textDim,
+            label = "Show or hide"
         )
         Spacer(Modifier.width(4.dp))
         GlyphIcon(Glyph.Folder, YumeColors.accent, size = 16.dp)
@@ -478,7 +490,8 @@ private fun GroupRow(
             selected = row.locked,
             size = 26.dp,
             iconSize = 13.dp,
-            tint = if (row.locked) YumeColors.accent else YumeColors.textDim
+            tint = if (row.locked) YumeColors.accent else YumeColors.textDim,
+            label = "Lock group"
         )
     }
 }
@@ -1467,7 +1480,8 @@ private fun HistoryRow(entry: HistoryEntry, onJump: () -> Unit, onDelete: () -> 
             onClick = onDelete,
             size = 28.dp,
             iconSize = 14.dp,
-            tint = YumeColors.textDim
+            tint = YumeColors.textDim,
+            label = "Delete this step"
         )
     }
 }

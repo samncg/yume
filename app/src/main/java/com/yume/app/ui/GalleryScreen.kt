@@ -445,4 +445,4 @@ private fun NewCanvasDialog(
 }
 
 private fun formatDate(millis: Long): String =
-    SimpleDateFormat("d MMM yyyy · HH:mm", Locale.getDefault()).format(Date(millis))
+    SimpleDateFormat("MMM d, yyyy · HH:mm", Locale.getDefault()).format(Date(millis))

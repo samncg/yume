@@ -38,7 +38,24 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.window.Popup
+import kotlinx.coroutines.delay
 
+/**
+ * Toolbar button. [label] names it: shown in a small tooltip on long press and
+ * read by accessibility services, so an icon is never the only explanation.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun YumeIconButton(
     glyph: Glyph,
@@ -49,7 +66,8 @@ fun YumeIconButton(
     size: Dp = 42.dp,
     iconSize: Dp = 21.dp,
     tint: Color = YumeColors.text,
-    selectedTint: Color = YumeColors.accent
+    selectedTint: Color = YumeColors.accent,
+    label: String? = null
 ) {
     val bg = when {
         selected -> YumeColors.accentSoft
@@ -60,15 +78,48 @@ fun YumeIconButton(
         selected -> selectedTint
         else -> tint
     }
+    var hint by remember { mutableStateOf(false) }
     Box(
         modifier = modifier
             .size(size)
-            .clip(RoundedCornerShape(13.dp))
+            .clip(CircleShape)
             .background(bg)
-            .clickable(enabled = enabled, onClick = onClick),
+            .semantics { if (label != null) contentDescription = label }
+            .combinedClickable(
+                enabled = enabled,
+                onClick = onClick,
+                onLongClick = if (label != null) ({ hint = true }) else null
+            ),
         contentAlignment = Alignment.Center
     ) {
         GlyphIcon(glyph, fg, size = iconSize)
+        if (hint && label != null) {
+            Tooltip(label, offsetY = size)
+            LaunchedEffect(Unit) {
+                delay(1400)
+                hint = false
+            }
+        }
+    }
+}
+
+/** A small label under its anchor, used by long-press hints. */
+@Composable
+fun Tooltip(text: String, offsetY: Dp) {
+    val dy = with(androidx.compose.ui.platform.LocalDensity.current) { (offsetY + 6.dp).roundToPx() }
+    Popup(
+        alignment = Alignment.TopCenter,
+        offset = IntOffset(0, dy)
+    ) {
+        Text(
+            text = text,
+            style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+            color = YumeColors.text,
+            modifier = Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color(0xF0202026))
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+        )
     }
 }
 
@@ -78,10 +129,11 @@ fun PanelCard(
     scrollable: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    // Heavy glass: the painting shows through, frosted and veiled enough
+    // that text and controls on top stay readable.
     val base = modifier
-        .clip(RoundedCornerShape(22.dp))
-        .background(YumeColors.panel)
-        .border(1.dp, YumeColors.hairline, RoundedCornerShape(22.dp))
+        .glass(corner = 24f, weight = GlassWeight.Heavy)
+        .clip(RoundedCornerShape(24.dp))
     Column(
         modifier = if (scrollable) {
             base.padding(14.dp).verticalScroll(rememberScrollState())

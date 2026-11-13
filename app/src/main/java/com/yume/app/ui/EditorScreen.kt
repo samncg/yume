@@ -122,10 +122,14 @@ fun EditorScreen(
     // Leaving the transform tool by picking another tool commits the transform.
     BackHandler { onExit() }
 
+    // Where the canvas sits in the window: ColorDrop maps through it, and the
+    // glass backdrop aligns the canvas proxy with it.
+    val canvasOriginState = remember { mutableStateOf(Offset.Zero) }
+    var canvasOrigin by canvasOriginState
+    val glassVersion = com.yume.app.engine.CanvasGlass.version.collectAsStateWithLifecycle()
+    val glassBackdrop = remember { CanvasProxyBackdrop(glassVersion, canvasOriginState) }
+    androidx.compose.runtime.CompositionLocalProvider(LocalGlassBackdrop provides glassBackdrop) {
     Box(Modifier.fillMaxSize().background(YumeColors.bg)) {
-        // Where the canvas sits in the window, so a ColorDrop released over it
-        // can be turned into canvas view coordinates.
-        var canvasOrigin by remember { mutableStateOf(Offset.Zero) }
         AndroidView(
             factory = { context -> CanvasView(context, session) },
             modifier = Modifier
@@ -187,61 +191,41 @@ fun EditorScreen(
         }
 
         if (state.chromeVisible) {
-            Row(
+            // Side rail: brush size and opacity where the hand rests, with undo
+            // and redo right under them (as in Procreate), on one glass pill.
+            Column(
                 Modifier
-                    .align(Alignment.BottomStart)
-                    .navigationBarsPadding()
-                    .padding(start = 14.dp, bottom = 16.dp)
-                    .height(178.dp)
-                    .blockCanvasTouches(),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    .align(Alignment.CenterStart)
+                    .padding(start = 12.dp)
+                    .glass(corner = 28f)
+                    .blockCanvasTouches()
+                    .padding(horizontal = 6.dp, vertical = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                YumeVerticalSlider(
-                    value = state.brushSize,
-                    onChange = { session.setBrushSize(it) },
-                    label = "Size",
-                    valueLabel = state.brushSize.roundToInt().toString(),
-                    min = 1f,
-                    max = 300f
-                )
-                YumeVerticalSlider(
-                    value = state.brushOpacity,
-                    onChange = { session.setBrushOpacity(it) },
-                    label = "Opacity",
-                    valueLabel = formatPercent(state.brushOpacity),
-                    min = 0.02f
-                )
+                Row(
+                    Modifier.height(260.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    YumeVerticalSlider(
+                        value = state.brushSize,
+                        onChange = { session.setBrushSize(it) },
+                        label = "Size",
+                        valueLabel = state.brushSize.roundToInt().toString(),
+                        min = 1f,
+                        max = 300f
+                    )
+                    YumeVerticalSlider(
+                        value = state.brushOpacity,
+                        onChange = { session.setBrushOpacity(it) },
+                        label = "Opacity",
+                        valueLabel = formatPercent(state.brushOpacity),
+                        min = 0.02f
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                YumeIconButton(Glyph.Undo, { session.undo() }, enabled = state.canUndo, size = 44.dp, label = "Undo")
+                YumeIconButton(Glyph.Redo, { session.redo() }, enabled = state.canRedo, size = 44.dp, label = "Redo")
             }
-
-            QuickMenu(
-                open = quickMenuOpen,
-                onToggle = { quickMenuOpen = !quickMenuOpen },
-                items = listOf(
-                    QuickItem(Glyph.Undo) { session.undo() },
-                    QuickItem(Glyph.Redo) { session.redo() },
-                    QuickItem(Glyph.Layers) {
-                        quickMenuOpen = false
-                        panel = PanelId.Layers
-                    },
-                    QuickItem(Glyph.Brush) {
-                        quickMenuOpen = false
-                        session.chooseTool(Tool.Brush)
-                        panel = PanelId.Brush
-                    },
-                    QuickItem(Glyph.Wand) {
-                        quickMenuOpen = false
-                        panel = PanelId.Adjust
-                    },
-                    QuickItem(Glyph.ColorDot) {
-                        quickMenuOpen = false
-                        panel = PanelId.Color
-                    }
-                ),
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .navigationBarsPadding()
-                    .padding(end = 16.dp, bottom = 16.dp)
-            )
         }
 
         if (state.transforming) {
@@ -263,9 +247,7 @@ fun EditorScreen(
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
                     .padding(bottom = 96.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(YumeColors.panel)
-                    .border(1.dp, YumeColors.hairline, RoundedCornerShape(14.dp))
+                    .glass(corner = 20f, weight = GlassWeight.Heavy)
                     .padding(horizontal = 18.dp, vertical = 11.dp)
             ) {
                 Text(
@@ -279,6 +261,7 @@ fun EditorScreen(
                 controller.clearMessage()
             }
         }
+    }
     }
 }
 
@@ -337,115 +320,111 @@ private fun EditorTopBar(
     onPanel: (PanelId) -> Unit,
     onColorDrop: (Offset) -> Unit = {}
 ) {
-    Column(
+    // Floating glass capsules instead of a solid bar: the painting stays
+    // visible between and through them. Grouped the way people think about
+    // them: document + "change what is there" on the left, "put paint down"
+    // on the right, then layers and colour.
+    Row(
         Modifier
             .fillMaxWidth()
-            .background(YumeColors.bar)
             .statusBarsPadding()
-            .blockCanvasTouches()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .height(TOP_BAR_HEIGHT.dp)
-                .padding(horizontal = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            YumeIconButton(Glyph.Gallery, onExit, size = 42.dp, iconSize = 20.dp)
-            YumeIconButton(Glyph.Undo, onUndo, enabled = state.canUndo, size = 40.dp)
-            YumeIconButton(Glyph.Redo, onRedo, enabled = state.canRedo, size = 40.dp)
-            YumeIconButton(
-                Glyph.History,
-                { onPanel(PanelId.History) },
-                selected = activePanel == PanelId.History,
-                size = 40.dp
-            )
-            Spacer(Modifier.width(4.dp))
+        Capsule {
+            YumeIconButton(Glyph.Gallery, onExit, size = 44.dp, iconSize = 20.dp, label = "Gallery")
             Text(
                 text = state.title,
-                style = MaterialTheme.typography.bodySmall,
-                color = YumeColors.textDim,
+                style = MaterialTheme.typography.labelLarge,
+                color = YumeColors.text,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 150.dp)
+                modifier = Modifier
+                    .widthIn(max = 160.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onPanel(PanelId.History) }
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
             )
-            Spacer(Modifier.weight(1f))
-            Row(
-                Modifier
-                    .horizontalScroll(rememberScrollState()),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(1.dp)
-            ) {
-                YumeIconButton(
-                    Glyph.Wrench,
-                    { onPanel(PanelId.Actions) },
-                    selected = activePanel == PanelId.Actions,
-                    size = 40.dp
-                )
-                YumeIconButton(
-                    Glyph.Wand,
-                    { onPanel(PanelId.Adjust) },
-                    selected = activePanel == PanelId.Adjust,
-                    size = 40.dp
-                )
-                YumeIconButton(
-                    Glyph.Select,
-                    { onTool(Tool.Selection, PanelId.Selection) },
-                    selected = state.tool == Tool.Selection,
-                    size = 40.dp
-                )
-                YumeIconButton(
-                    Glyph.Transform,
-                    { onTool(Tool.Transform, null) },
-                    selected = state.tool == Tool.Transform,
-                    size = 40.dp
-                )
-                YumeIconButton(
-                    Glyph.Brush,
-                    { onTool(Tool.Brush, PanelId.Brush) },
-                    selected = state.tool == Tool.Brush,
-                    size = 40.dp
-                )
-                YumeIconButton(
-                    Glyph.Smudge,
-                    { onTool(Tool.Smudge, PanelId.Brush) },
-                    selected = state.tool == Tool.Smudge,
-                    size = 40.dp
-                )
-                YumeIconButton(
-                    Glyph.Eraser,
-                    { onTool(Tool.Eraser, PanelId.Brush) },
-                    selected = state.tool == Tool.Eraser,
-                    size = 40.dp
-                )
-                YumeIconButton(
-                    Glyph.Bucket,
-                    { onTool(Tool.Fill, PanelId.Fill) },
-                    selected = state.tool == Tool.Fill,
-                    size = 40.dp
-                )
-                YumeIconButton(
-                    Glyph.Gradient,
-                    { onTool(Tool.Gradient, PanelId.Gradient) },
-                    selected = state.tool == Tool.Gradient,
-                    size = 40.dp
-                )
-                YumeIconButton(
-                    Glyph.Layers,
-                    { onPanel(PanelId.Layers) },
-                    selected = activePanel == PanelId.Layers,
-                    size = 40.dp
-                )
-                ColorChip(
-                    color = state.color,
-                    selected = activePanel == PanelId.Color,
-                    onClick = { onPanel(PanelId.Color) },
-                    onDrop = onColorDrop
-                )
-            }
+            CapsuleDivider()
+            YumeIconButton(
+                Glyph.Wrench, { onPanel(PanelId.Actions) },
+                selected = activePanel == PanelId.Actions, size = 44.dp, label = "Actions"
+            )
+            YumeIconButton(
+                Glyph.Sliders, { onPanel(PanelId.Adjust) },
+                selected = activePanel == PanelId.Adjust, size = 44.dp, label = "Adjustments"
+            )
+            YumeIconButton(
+                Glyph.Select, { onTool(Tool.Selection, PanelId.Selection) },
+                selected = state.tool == Tool.Selection, size = 44.dp, label = "Select"
+            )
+            YumeIconButton(
+                Glyph.Transform, { onTool(Tool.Transform, null) },
+                selected = state.tool == Tool.Transform, size = 44.dp, label = "Transform"
+            )
         }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(YumeColors.hairline))
+        Spacer(Modifier.weight(1f))
+        Capsule {
+            YumeIconButton(
+                Glyph.Brush, { onTool(Tool.Brush, PanelId.Brush) },
+                selected = state.tool == Tool.Brush, size = 44.dp, label = "Paint"
+            )
+            YumeIconButton(
+                Glyph.Smudge, { onTool(Tool.Smudge, PanelId.Brush) },
+                selected = state.tool == Tool.Smudge, size = 44.dp, label = "Smudge"
+            )
+            YumeIconButton(
+                Glyph.Eraser, { onTool(Tool.Eraser, PanelId.Brush) },
+                selected = state.tool == Tool.Eraser, size = 44.dp, label = "Erase"
+            )
+            YumeIconButton(
+                Glyph.Bucket, { onTool(Tool.Fill, PanelId.Fill) },
+                selected = state.tool == Tool.Fill, size = 44.dp, label = "Fill"
+            )
+            YumeIconButton(
+                Glyph.Gradient, { onTool(Tool.Gradient, PanelId.Gradient) },
+                selected = state.tool == Tool.Gradient, size = 44.dp, label = "Gradient"
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Capsule {
+            YumeIconButton(
+                Glyph.Layers, { onPanel(PanelId.Layers) },
+                selected = activePanel == PanelId.Layers, size = 44.dp, label = "Layers"
+            )
+            ColorChip(
+                color = state.color,
+                selected = activePanel == PanelId.Color,
+                onClick = { onPanel(PanelId.Color) },
+                onDrop = onColorDrop
+            )
+        }
     }
+}
+
+/** A glass pill holding a group of toolbar buttons. Blocks canvas touches. */
+@Composable
+private fun Capsule(content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) {
+    Row(
+        Modifier
+            .glass(corner = 26f)
+            .blockCanvasTouches()
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        content = content
+    )
+}
+
+@Composable
+private fun CapsuleDivider() {
+    Box(
+        Modifier
+            .padding(horizontal = 4.dp)
+            .width(1.dp)
+            .height(22.dp)
+            .background(YumeColors.hairline)
+    )
 }
 
 @Composable
@@ -505,11 +484,9 @@ private fun TransformBar(
 ) {
     Row(
         modifier
-            .clip(RoundedCornerShape(18.dp))
-            .background(YumeColors.panel)
-            .border(1.dp, YumeColors.hairline, RoundedCornerShape(18.dp))
-            .padding(horizontal = 8.dp, vertical = 6.dp)
-            .blockCanvasTouches(),
+            .glass(corner = 26f, weight = GlassWeight.Heavy)
+            .blockCanvasTouches()
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp)
     ) {
@@ -524,65 +501,5 @@ private fun TransformBar(
         )
         Spacer(Modifier.width(6.dp))
         YumeIconButton(Glyph.Check, onCommit, size = 40.dp, tint = YumeColors.accent)
-    }
-}
-
-private data class QuickItem(val glyph: Glyph, val onClick: () -> Unit)
-
-@Composable
-private fun QuickMenu(
-    open: Boolean,
-    onToggle: () -> Unit,
-    items: List<QuickItem>,
-    modifier: Modifier = Modifier
-) {
-    val density = LocalDensity.current
-    val radiusPx = with(density) { 104.dp.toPx() }
-    Box(
-        modifier
-            .size(if (open) 230.dp else 54.dp)
-            .blockCanvasTouches()
-    ) {
-        if (open) {
-            items.forEachIndexed { index, item ->
-                val step = 90.0 / (items.size - 1).coerceAtLeast(1)
-                val theta = Math.toRadians(180.0 + index * step)
-                val dx = (cos(theta) * radiusPx).toFloat()
-                val dy = (sin(theta) * radiusPx).toFloat()
-                Box(
-                    Modifier
-                        .align(Alignment.BottomEnd)
-                        .offset { IntOffset(dx.roundToInt(), dy.roundToInt()) }
-                ) {
-                    Box(
-                        Modifier
-                            .size(46.dp)
-                            .clip(CircleShape)
-                            .background(YumeColors.panel)
-                            .border(1.dp, YumeColors.hairline, CircleShape)
-                            .clickable(onClick = item.onClick),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        GlyphIcon(item.glyph, YumeColors.text, size = 20.dp)
-                    }
-                }
-            }
-        }
-        Box(
-            Modifier
-                .align(Alignment.BottomEnd)
-                .size(54.dp)
-                .clip(CircleShape)
-                .background(if (open) YumeColors.accent else YumeColors.panel)
-                .border(1.dp, YumeColors.hairline, CircleShape)
-                .clickable(onClick = onToggle),
-            contentAlignment = Alignment.Center
-        ) {
-            GlyphIcon(
-                glyph = if (open) Glyph.Close else Glyph.More,
-                tint = if (open) Color(0xFF1A1206) else YumeColors.text,
-                size = 22.dp
-            )
-        }
     }
 }
