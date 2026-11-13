@@ -922,3 +922,18 @@ feature=79-motion-blur-undo L0=c37ad379 L1=d29e2f3e/e068eda2 L2=520ff77c L3=23ea
 #   javaHeapPeak 151 MB, nativeHeapPeak 1043 MB, painting p99 19.1 ms.
 # Result: sparse tiled layers become the live default; 6144^2 and 8192^2
 #   canvases are accepted.
+
+# --- Tone adjustments (curves, levels, colour balance, gradient map) ------
+# New feature phases 80-84, recorded dense; sparse 256 and 64 MATCH on both canvases.
+# features dense 2048x2048
+feature=80-curves L0=a47ca14a L1=2b65f507/26abd433 L2=1842a933 L3=4b4721c8 C=62e9fbff
+feature=81-levels L0=a47ca14a L1=2b65f507/26abd433 L2=36c6ced2 L3=4b4721c8 C=e9c3bbf6
+feature=82-color-balance L0=a47ca14a L1=50355559/26abd433 L2=36c6ced2 L3=4b4721c8 C=fabc738f
+feature=83-gradient-map L0=a47ca14a L1=ee0e7882/26abd433 L2=36c6ced2 L3=4b4721c8 C=24ba4695
+feature=84-tone-undo L0=a47ca14a L1=50355559/26abd433 L2=36c6ced2 L3=4b4721c8 C=fabc738f
+# features dense 2000x1333
+feature=80-curves L0=c37ad379 L1=d29e2f3e/e068eda2 L2=c2df0d85 L3=23eae7e1 C=05d8f2fa
+feature=81-levels L0=c37ad379 L1=d29e2f3e/e068eda2 L2=da25e9b1 L3=23eae7e1 C=59036be5
+feature=82-color-balance L0=c37ad379 L1=58d77751/e068eda2 L2=da25e9b1 L3=23eae7e1 C=50d425d0
+feature=83-gradient-map L0=c37ad379 L1=d15b5225/e068eda2 L2=da25e9b1 L3=23eae7e1 C=6370e154
+feature=84-tone-undo L0=c37ad379 L1=58d77751/e068eda2 L2=da25e9b1 L3=23eae7e1 C=50d425d0

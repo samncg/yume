@@ -192,6 +192,14 @@ object TileOps {
         }
     }
 
+    /** Tone mapping (curves, levels, colour balance, gradient map), tile by tile. */
+    fun tone(store: TileStore, bounds: Rect, lut: ToneLut) {
+        forEachTile(store, bounds, 0) { patch, pad, tile ->
+            lut.apply(patch)
+            writePart(store, patch, pad, tile)
+        }
+    }
+
     /** Fills [patch] (covering [rect]) from the captured pre-edit snapshot. */
     fun readSnapshot(capture: TileCapture, rect: Rect, patch: Bitmap) {
         val store = capture.store

@@ -3477,6 +3477,40 @@ object YumeHarness {
         phase("78-motion-blur-33deg")
         session.undo()
         phase("79-motion-blur-undo")
+
+        // Tone adjustments (curves, levels, colour balance, gradient map):
+        // one lookup table applied per tile, exact across stores.
+        fun bakeTone(kind: AdjustmentKind, lut: com.yume.app.engine.ToneLut) {
+            session.previewTone(kind, lut)
+            session.consumePendingPreview()
+            session.commitAdjustment()
+            session.runCommands()
+        }
+        val ident = listOf(0f to 0f, 1f to 1f)
+        engine.selectLayer(top.id)
+        bakeTone(
+            AdjustmentKind.Curves,
+            com.yume.app.engine.ToneLut.curves(
+                listOf(0f to 0f, 0.3f to 0.15f, 0.7f to 0.85f, 1f to 1f),
+                ident, listOf(0f to 0.1f, 1f to 0.9f), ident
+            )
+        )
+        phase("80-curves")
+        bakeTone(AdjustmentKind.Levels, com.yume.app.engine.ToneLut.levels(0.1f, 0.85f, 1.4f, 0.05f, 0.95f))
+        phase("81-levels")
+        engine.selectLayer(base.id)
+        bakeTone(
+            AdjustmentKind.ColorBalance,
+            com.yume.app.engine.ToneLut.colorBalance(floatArrayOf(0.3f, 0f, -0.2f, 0f, 0.25f, 0f, -0.2f, 0f, 0.3f))
+        )
+        phase("82-color-balance")
+        bakeTone(
+            AdjustmentKind.GradientMap,
+            com.yume.app.engine.ToneLut.gradientMap(com.yume.app.engine.GradientMaps.presets[2].second)
+        )
+        phase("83-gradient-map")
+        session.undo()
+        phase("84-tone-undo")
         return phases
     }
 

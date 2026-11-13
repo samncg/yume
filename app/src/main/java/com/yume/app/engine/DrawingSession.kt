@@ -30,7 +30,14 @@ enum class AdjustmentKind(val label: String) {
     Blur("Blur"),
     Noise("Noise"),
     Sharpen("Sharpen"),
-    MotionBlur("Motion blur")
+    MotionBlur("Motion blur"),
+    Curves("Curves"),
+    Levels("Levels"),
+    ColorBalance("Colour balance"),
+    GradientMap("Gradient map");
+
+    /** Driven by a lookup table built from the panel's editor, not the amount. */
+    val isTone: Boolean get() = this == Curves || this == Levels || this == ColorBalance || this == GradientMap
 }
 
 data class LayerSnapshotData(
@@ -2309,9 +2316,53 @@ class DrawingSession(
             // Neighbourhood filters are baked exactly on Apply (no proxy: a
             // quarter-resolution sharpen would only look blurry).
             AdjustmentKind.Noise, AdjustmentKind.Sharpen, AdjustmentKind.MotionBlur -> null
+            AdjustmentKind.Curves, AdjustmentKind.Levels, AdjustmentKind.ColorBalance,
+            AdjustmentKind.GradientMap -> {
+                val lut = toneLut ?: return
+                val proxy = toneProxy(store, snapshot, lut)
+                adjustProxy = proxy
+                LayerPreview(layer.id, null, proxy)
+            }
         }
         engine.applyPreview(preview)
         requestState()
+    }
+
+    /** The lookup table the tone adjustments (curves, levels, ...) preview and bake. */
+    @Volatile var toneLut: ToneLut? = null
+        private set
+
+    /** Live preview of a tone adjustment built by the panel's editor. */
+    fun previewTone(kind: AdjustmentKind, lut: ToneLut) {
+        toneLut = lut
+        previewAdjustment(kind, 1f)
+    }
+
+    /**
+     * Reduced-resolution copy of the layer with the tone table applied, for
+     * the live preview: at most 2048 px on its long edge, so an 8K layer never
+     * needs a full-size working copy while the user drags a curve.
+     */
+    private fun toneProxy(store: TileStore, snapshot: Bitmap?, lut: ToneLut): Bitmap {
+        val scale = minOf(1f, 2048f / maxOf(engine.width, engine.height))
+        val w = max(1, (engine.width * scale).toInt())
+        val h = max(1, (engine.height * scale).toInt())
+        val reuse = adjustProxy
+        val small = if (reuse != null && !reuse.isRecycled && reuse.width == w && reuse.height == h) reuse
+        else Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(small)
+        c.drawColor(0, BlendMode.CLEAR)
+        val p = Paint(Paint.FILTER_BITMAP_FLAG)
+        if (snapshot != null) {
+            c.drawBitmap(snapshot, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), p)
+        } else {
+            val save = c.save()
+            c.scale(w.toFloat() / engine.width, h.toFloat() / engine.height)
+            store.drawInto(c, p)
+            c.restoreToCount(save)
+        }
+        lut.apply(small)
+        return small
     }
 
     /**
@@ -2438,6 +2489,8 @@ class DrawingSession(
                     (amount.coerceIn(0f, 1f) * MOTION_MAX_RADIUS).toInt(), motionAngle,
                     Kernels.captureSource(capture)
                 ) { r, bmp -> store.writeRect(r, bmp, Rect(0, 0, r.width(), r.height())) }
+                AdjustmentKind.Curves, AdjustmentKind.Levels, AdjustmentKind.ColorBalance,
+                AdjustmentKind.GradientMap -> toneLut?.let { TileOps.tone(store, work, it) }
             }
             // The action covers the whole snapshot region: a blurred tile past
             // the work rect is unchanged, and copying it costs nothing extra.
@@ -2476,6 +2529,8 @@ class DrawingSession(
                         Paint().apply { blendMode = BlendMode.SRC }
                     )
                 }
+                AdjustmentKind.Curves, AdjustmentKind.Levels, AdjustmentKind.ColorBalance,
+                AdjustmentKind.GradientMap -> toneLut?.apply(target)
             }
             val full = Rect(0, 0, engine.width, engine.height)
             layer.tiles.writeRect(full, target)

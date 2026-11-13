@@ -1495,7 +1495,7 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
         }
     }
 
-    PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
+    PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
         PanelHeader("Adjustments", onClose)
         Text(
             text = if (state.adjustAllLayers) "Drag a slider to preview live on every visible layer." else "Drag a slider to preview live on “${state.activeLayer?.name ?: "-"}”.",
@@ -1540,6 +1540,12 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
             }
         )
         Spacer(Modifier.height(10.dp))
+        if (kind.isTone) {
+            ToneEditor(kind, state) { lut ->
+                amount = 1f
+                session.previewTone(kind, lut)
+            }
+        } else {
         val range = adjustRange(kind)
         YumeSlider(
             value = amount,
@@ -1552,6 +1558,7 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
             min = range.first,
             max = range.second
         )
+        }
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SmallButton("Apply") {
@@ -1600,6 +1607,7 @@ private fun adjustRange(kind: AdjustmentKind): Pair<Float, Float> = when (kind) 
     AdjustmentKind.Noise -> 0f to 1f
     AdjustmentKind.Sharpen -> 0f to 1f
     AdjustmentKind.MotionBlur -> 0f to 1f
+    else -> 0f to 1f
 }
 
 private fun adjustValueLabel(kind: AdjustmentKind, amount: Float): String = when (kind) {
@@ -1610,6 +1618,7 @@ private fun adjustValueLabel(kind: AdjustmentKind, amount: Float): String = when
     AdjustmentKind.Noise -> "${(amount * 100).roundToInt()}%"
     AdjustmentKind.Sharpen -> "${(amount * 200).roundToInt()}%"
     AdjustmentKind.MotionBlur -> "${(amount * 96).roundToInt()} px"
+    else -> ""
 }
 
 // ============================================================ canvas size
