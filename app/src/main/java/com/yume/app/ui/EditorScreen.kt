@@ -280,7 +280,13 @@ fun EditorScreen(
                     com.yume.app.input.PenGestures.Action.Off -> Unit
                 }
             }
-            onDispose { com.yume.app.input.PenGestures.listener = null }
+            com.yume.app.input.PenGestures.onMenuAt = { x, y ->
+                penMenuAt = Offset(x + canvasOrigin.x, y + canvasOrigin.y)
+            }
+            onDispose {
+                com.yume.app.input.PenGestures.listener = null
+                com.yume.app.input.PenGestures.onMenuAt = null
+            }
         }
         penMenuAt?.let { at ->
             PenShortcutMenu(

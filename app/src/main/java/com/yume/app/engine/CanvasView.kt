@@ -1,5 +1,6 @@
 package com.yume.app.engine
 
+import kotlin.math.abs
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.PixelFormat
@@ -19,6 +20,7 @@ import kotlin.math.max
  *  - stylus / finger paints (finger painting can be disabled)
  *  - two fingers pan, pinch-zoom and rotate
  *  - two-finger tap = undo, three = redo, four = toggle the interface
+ *  - two-finger long press (held still) = the shortcut ring menu
  *  - long press while starting a stroke = eyedropper
  *  - stylus barrel button paints with the eraser
  */
@@ -31,6 +33,14 @@ class CanvasView(
     private val handler = Handler(Looper.getMainLooper())
     private var longPressAction: Runnable? = null
     private var quickShapeAction: Runnable? = null
+    private var menuHoldAction: Runnable? = null
+    /** The two-finger hold opened the menu: the rest of this gesture is spent. */
+    private var menuHoldFired = false
+    /** Where the two fingers were when the hold started: drift is measured from here. */
+    private var holdFocusX = 0f
+    private var holdFocusY = 0f
+    private var holdSpan = 0f
+    private var holdAngle = 0f
 
     private var renderer: SurfaceRenderer? = null
 
@@ -209,13 +219,20 @@ class CanvasView(
         }
         twoFinger = true
         rebaseGesture(event, -1)
+        if (event.pointerCount == 2 && maxFingers == 2) scheduleMenuHold() else cancelMenuHold()
     }
 
     private fun onMove(event: MotionEvent) {
         accumulateMovement(event)
 
         if (twoFinger) {
-            if (event.pointerCount >= 2) sendGesture(event)
+            if (menuHoldFired) return
+            if (event.pointerCount >= 2) {
+                sendGesture(event)
+                // Panning, pinching or rotating cancels the hold. Measured from
+                // where it started, so resting fingers' jitter never adds up.
+                if (menuHoldAction != null && holdDrifted()) cancelMenuHold()
+            }
             return
         }
 
@@ -250,6 +267,7 @@ class CanvasView(
 
     private fun onPointerUp(event: MotionEvent) {
         if (stylusActive) return
+        cancelMenuHold()
         // Rebase the pinch maths on the fingers that are still down.
         if (twoFinger) {
             rebaseGesture(event, event.actionIndex)
@@ -259,10 +277,11 @@ class CanvasView(
     private fun onUp(event: MotionEvent) {
         cancelScheduledLongPress()
         cancelQuickShape()
+        cancelMenuHold()
 
         if (twoFinger) {
             val duration = event.eventTime - downTime
-            if (duration < 420L && moved < 26f * density) {
+            if (!menuHoldFired && duration < 420L && moved < 26f * density) {
                 session.pushInput(InputEvent.Tap(maxFingers))
             }
             twoFinger = false
@@ -278,11 +297,14 @@ class CanvasView(
         activePointerId = -1
         maxFingers = 1
         stylusActive = false
+        menuHoldFired = false
     }
 
     private fun cancelEverything() {
         cancelScheduledLongPress()
         cancelQuickShape()
+        cancelMenuHold()
+        menuHoldFired = false
         session.pushInput(InputEvent.CancelStroke)
         session.pushInput(InputEvent.PickEnd)
         mode = Mode.None
@@ -321,6 +343,44 @@ class CanvasView(
     private fun cancelScheduledLongPress() {
         longPressAction?.let { handler.removeCallbacks(it) }
         longPressAction = null
+    }
+
+    /**
+     * Two fingers held still open the shortcut ring between them. It waits
+     * longer than a two-finger tap (undo) and gives up as soon as the fingers
+     * pan, pinch or rotate, or a third finger lands.
+     */
+    private fun holdDrifted(): Boolean {
+        val slop = MENU_HOLD_SLOP_DP * density
+        var turn = Math.toDegrees((gestureAngle - holdAngle).toDouble())
+        if (turn > 180.0) turn -= 360.0
+        if (turn < -180.0) turn += 360.0
+        return hypot(gestureFocusX - holdFocusX, gestureFocusY - holdFocusY) > slop ||
+            abs(gestureSpan - holdSpan) > slop ||
+            abs(turn) > MENU_HOLD_TURN_DEG
+    }
+
+    private fun scheduleMenuHold() {
+        cancelMenuHold()
+        holdFocusX = gestureFocusX
+        holdFocusY = gestureFocusY
+        holdSpan = gestureSpan
+        holdAngle = gestureAngle
+        val action = Runnable {
+            menuHoldAction = null
+            if (twoFinger && maxFingers == 2 && !holdDrifted()) {
+                menuHoldFired = true
+                performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                com.yume.app.input.PenGestures.onMenuAt?.invoke(gestureFocusX, gestureFocusY)
+            }
+        }
+        menuHoldAction = action
+        handler.postDelayed(action, MENU_HOLD_MS)
+    }
+
+    private fun cancelMenuHold() {
+        menuHoldAction?.let { handler.removeCallbacks(it) }
+        menuHoldAction = null
     }
 
     private fun scheduleQuickShape() {
@@ -488,3 +548,8 @@ class CanvasView(
         }
     }
 }
+
+/** Two-finger hold before the shortcut ring opens, and how far fingers may drift. */
+private const val MENU_HOLD_MS = 520L
+private const val MENU_HOLD_SLOP_DP = 14f
+private const val MENU_HOLD_TURN_DEG = 6.0

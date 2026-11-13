@@ -81,6 +81,9 @@ object PenGestures {
     /** The open editor's handler; null outside the editor. */
     var listener: ((Gesture, Action) -> Unit)? = null
 
+    /** Opens the shortcut ring at canvas-view px (two-finger hold); null outside the editor. */
+    var onMenuAt: ((Float, Float) -> Unit)? = null
+
     fun init(context: Context) {
         if (prefs != null) return
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
