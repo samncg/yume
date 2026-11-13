@@ -75,23 +75,17 @@ private val TOOL_PANELS = setOf(PanelId.Brush, PanelId.Fill, PanelId.Gradient, P
 fun EditorScreen(
     controller: EditorController,
     onExit: () -> Unit,
-    onOpenProject: (String) -> Unit = {}
+    onOpenProject: (String) -> Unit = {},
+    /** False while the opening fade runs: the canvas surface would ignore its alpha. */
+    showCanvas: Boolean = true
 ) {
     val sessionState by controller.session.collectAsStateWithLifecycle()
     val session = sessionState
     val message by controller.message.collectAsStateWithLifecycle()
 
-    if (session == null) {
-        Box(
-            Modifier.fillMaxSize().background(YumeColors.bg),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "Opening canvas…",
-                style = MaterialTheme.typography.titleMedium,
-                color = YumeColors.textDim
-            )
-        }
+    if (session == null || !showCanvas) {
+        // The project curtain covers this; keep it plain.
+        Box(Modifier.fillMaxSize().background(YumeColors.bg))
         return
     }
 
@@ -102,6 +96,11 @@ fun EditorScreen(
     // their own button and return to it.
     var panelAnchorX by remember { mutableStateOf<Float?>(null) }
     var rootWidth by remember { mutableStateOf(1f) }
+    // Vertical geometry for the collapse point: the toolbar's centre line,
+    // relative to the panel area below it.
+    var barCenterY by remember { mutableStateOf(0f) }
+    var areaTop by remember { mutableStateOf(0f) }
+    var areaHeight by remember { mutableStateOf(1f) }
     // Each panel remembers the button it came from, so it closes back into that
     // button even when another button was tapped since.
     val panelAnchors = remember { androidx.compose.runtime.snapshots.SnapshotStateMap<PanelId, Float>() }
@@ -170,6 +169,9 @@ fun EditorScreen(
 
         Column(Modifier.fillMaxSize()) {
             if (state.chromeVisible) {
+                Box(Modifier.onGloballyPositioned {
+                    barCenterY = it.positionInRoot().y + it.size.height / 2f
+                }) {
                 EditorTopBar(
                     state = state,
                     activePanel = panel,
@@ -194,34 +196,55 @@ fun EditorScreen(
                         session.colorDropAt(window.x - canvasOrigin.x, window.y - canvasOrigin.y)
                     }
                 )
+                }
             }
             // weight(1f), not fillMaxSize(): a non-weighted child of a Column is
             // measured against the full column height, which let a tall panel card
             // overflow below the screen so its scroll range stayed at zero.
-            Box(Modifier.weight(1f).fillMaxWidth()) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .onGloballyPositioned {
+                        areaTop = it.positionInRoot().y
+                        areaHeight = it.size.height.toFloat().coerceAtLeast(1f)
+                    }
+            ) {
                 // Panels grow out of the button that opened them and return to
                 // it, on Apple's sheet spring (damping 0.8, response 0.3): a
                 // small overshoot, interruptible at any moment.
                 androidx.compose.animation.AnimatedContent(
                     targetState = if (state.chromeVisible) panel else null,
                     transitionSpec = {
+                        // The button's centre: x from the tapped button, y on the
+                        // toolbar line above the panel area (a negative fraction).
                         fun originOf(id: PanelId?) = androidx.compose.ui.graphics.TransformOrigin(
                             ((id?.let { panelAnchors[it] } ?: rootWidth) / rootWidth.coerceAtLeast(1f))
                                 .coerceIn(0f, 1f),
-                            0f
+                            ((barCenterY - areaTop) / areaHeight).coerceIn(-0.5f, 0f)
                         )
+                        // No size animation: by default the container shrinks toward
+                        // the empty state and clips the closing panel to that box,
+                        // which dragged every panel off to the side as it closed.
                         (
-                            androidx.compose.animation.scaleIn(AppleSpring.sheet(), 0.6f, originOf(targetState)) +
-                                androidx.compose.animation.fadeIn(AppleSpring.fade())
+                            androidx.compose.animation.scaleIn(AppleSpring.sheet(), 0.12f, originOf(targetState)) +
+                                androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(120))
                             ) togetherWith (
-                            androidx.compose.animation.scaleOut(AppleSpring.sheet(), 0.6f, originOf(initialState)) +
-                                androidx.compose.animation.fadeOut(AppleSpring.fade())
-                            )
+                            // Collapses all the way into the button, fading only
+                            // at the end so the motion stays readable.
+                            androidx.compose.animation.scaleOut(AppleSpring.fade(), 0.08f, originOf(initialState)) +
+                                androidx.compose.animation.fadeOut(
+                                    androidx.compose.animation.core.tween(140, delayMillis = 110)
+                                )
+                            ) using androidx.compose.animation.SizeTransform(clip = false)
                     },
                     modifier = Modifier.fillMaxSize(),
                     label = "panel"
                 ) { shown ->
-                    if (shown != null) {
+                    if (shown == null) {
+                        // Same size as a panel page, so nothing resizes on close.
+                        Box(Modifier.fillMaxSize())
+                    } else {
                         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
                             val margin = with(LocalDensity.current) { 12.dp.toPx() }
                             val areaW = constraints.maxWidth

@@ -91,6 +91,11 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
     var menuTarget by remember { mutableStateOf<ProjectMeta?>(null) }
     var renameTarget by remember { mutableStateOf<ProjectMeta?>(null) }
     val scope = rememberCoroutineScope()
+    val pinContext = androidx.compose.ui.platform.LocalContext.current
+    val pins = remember { com.yume.app.data.PinStore(pinContext) }
+    var pinTick by remember { mutableIntStateOf(0) }
+    // Pinned projects first; the rest keep the store's (most recent) order.
+    val shownProjects = remember(projects, pinTick) { pins.order(projects) { it.id } }
 
     LaunchedEffect(refresh) {
         val list = withContext(Dispatchers.IO) { store.listProjects() }
@@ -171,11 +176,14 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     verticalItemSpacing = 30.dp,
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    items(projects.size, key = { projects[it].id }) { idx ->
-                        val meta = projects[idx]
+                    items(shownProjects.size, key = { shownProjects[it].id }) { idx ->
+                        val meta = shownProjects[idx]
                         ProjectCard(
                             meta = meta,
                             thumb = thumbs[meta.id],
+                            pinned = pins.isPinned(meta.id).also { pinTick },
+                            // Pinning slides cards to their new places.
+                            modifier = Modifier.animateItem(),
                             onOpen = { onOpenProject(meta.id) },
                             onMenu = { menuTarget = meta }
                         )
@@ -205,6 +213,12 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
         Dialog(onDismissRequest = { menuTarget = null }) {
             PanelCard(Modifier.width(300.dp)) {
                 PanelHeader(meta.name, onClose = { menuTarget = null })
+                val isPinned = pins.isPinned(meta.id)
+                MenuRow(Glyph.Pin, if (isPinned) "Unpin" else "Pin to top") {
+                    menuTarget = null
+                    pins.setPinned(meta.id, !isPinned)
+                    pinTick++
+                }
                 MenuRow(Glyph.Sliders, "Rename") {
                     menuTarget = null
                     renameTarget = meta
@@ -218,6 +232,7 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                 }
                 MenuRow(Glyph.Trash, "Delete", danger = true) {
                     menuTarget = null
+                    pins.setPinned(meta.id, false)
                     scope.launch {
                         withContext(Dispatchers.IO) { store.deleteProject(meta.id) }
                         refresh++
@@ -298,13 +313,15 @@ private fun ProjectCard(
     meta: ProjectMeta,
     thumb: ImageBitmap?,
     onOpen: () -> Unit,
-    onMenu: () -> Unit
+    onMenu: () -> Unit,
+    pinned: Boolean = false,
+    modifier: Modifier = Modifier
 ) {
     val source = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     val scale = pressScale(source)
     // The card is the document's own shape (clamped so extreme strips stay usable).
     val ratio = (meta.width.toFloat() / meta.height.coerceAtLeast(1)).coerceIn(0.45f, 2.4f)
-    Column(Modifier.graphicsLayer { scaleX = scale; scaleY = scale }) {
+    Column(modifier.graphicsLayer { scaleX = scale; scaleY = scale }) {
         Box(
             Modifier
                 .fillMaxWidth()
@@ -333,6 +350,10 @@ private fun ProjectCard(
         }
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
+            if (pinned) {
+                GlyphIcon(Glyph.Pin, YumeColors.accent, size = 16.dp)
+                Spacer(Modifier.width(6.dp))
+            }
             Column(Modifier.weight(1f)) {
                 Text(
                     text = meta.name,

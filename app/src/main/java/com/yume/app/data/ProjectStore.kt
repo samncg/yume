@@ -931,10 +931,15 @@ class ProjectStore(private val context: Context) {
     }.getOrNull()
 
     private fun writeThumb(dir: File, thumb: Bitmap) {
+        // Written aside and renamed into place: the gallery and the project
+        // curtain read thumbnails while a save may be running, and must never
+        // decode a half-written file.
         runCatching {
-            FileOutputStream(File(dir, "thumb.png")).use { out ->
+            val tmp = File(dir, "thumb.png.tmp")
+            FileOutputStream(tmp).use { out ->
                 thumb.compress(Bitmap.CompressFormat.PNG, 92, out)
             }
+            if (!tmp.renameTo(File(dir, "thumb.png"))) tmp.delete()
         }
     }
 

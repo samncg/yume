@@ -29,7 +29,7 @@ enum class Glyph {
     Sliders, Share, Picture, Palette, FlipH, FlipV,
     Droplet, Info, ZoomIn, ZoomOut, Fit, Rotate, Sparkle,
     Grid, Home, Clear, Save, More, History,
-    Folder, Mask, Clip, Grip, Bucket, Gradient
+    Folder, Mask, Clip, Grip, Bucket, Gradient, Pin
 }
 
 @Composable
@@ -120,6 +120,16 @@ private fun DrawScope.drawGlyph(glyph: Glyph, tint: Color, strokeScale: Float) {
             line(12.4f, 11.6f, 4.5f, 19.5f, 2.6f)
         }
 
+        Glyph.Pin -> {
+            // A push pin: cap, tapered body flaring to a collar, then the needle.
+            line(8f, 4f, 16f, 4f)
+            path {
+                moveTo(9.6f, 4f); lineTo(9.6f, 9.6f)
+                lineTo(6.6f, 13.4f); lineTo(17.4f, 13.4f)
+                lineTo(14.4f, 9.6f); lineTo(14.4f, 4f)
+            }
+            line(12f, 13.4f, 12f, 20.5f)
+        }
         Glyph.Gradient -> {
             // A rounded square half filled, with a diagonal fade line.
             path {

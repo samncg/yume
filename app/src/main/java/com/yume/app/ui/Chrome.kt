@@ -1,5 +1,7 @@
 package com.yume.app.ui
 
+import androidx.compose.ui.layout.layout
+
 import androidx.compose.ui.layout.positionInRoot
 
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -118,19 +120,34 @@ fun GlassToolCapsule(
     val layer = rememberLayerBackdrop()
     val density = LocalDensity.current
     val step = with(density) { (BUTTON + GAP).toPx() }
+    val bw = with(density) { BUTTON.toPx() }
     val selected = items.indexOfFirst { it.selected }
-    val x = remember { Animatable(if (selected >= 0) selected * step else 0f) }
+    // The bubble's two edges spring separately: the leading edge races ahead on
+    // a snappy spring and the trailing edge follows on a softer one, so the
+    // glass stretches out across the buttons it passes and snaps back to a
+    // circle when it lands.
+    val start = if (selected >= 0) selected * step else 0f
+    val left = remember { Animatable(start) }
+    val right = remember { Animatable(start + bw) }
     val shown = remember { Animatable(if (selected >= 0) 1f else 0f) }
     LaunchedEffect(selected) {
         if (selected >= 0) {
-            if (shown.value < 0.05f) x.snapTo(selected * step)
+            val tl = selected * step
+            val tr = tl + bw
+            if (shown.value < 0.05f) {
+                left.snapTo(tl)
+                right.snapTo(tr)
+            }
             launch { shown.animateTo(1f, AppleSpring.sheet()) }
-            x.animateTo(selected * step, AppleSpring.move())
+            val movingRight = tl > left.value
+            val lead = androidx.compose.animation.core.spring<Float>(dampingRatio = 0.72f, stiffness = 900f)
+            val trail = androidx.compose.animation.core.spring<Float>(dampingRatio = 0.86f, stiffness = 170f)
+            launch { left.animateTo(tl, if (movingRight) trail else lead) }
+            right.animateTo(tr, if (movingRight) lead else trail)
         } else {
             shown.animateTo(0f, AppleSpring.fade())
         }
     }
-    val squishScale = with(density) { 1100.dp.toPx() }
     Box(modifier.blockCanvasTouches()) {
         Row(
             Modifier
@@ -160,20 +177,28 @@ fun GlassToolCapsule(
             trailing?.invoke(this)
         }
         if (shown.value > 0.01f) {
-            val squish = (abs(x.velocity) / squishScale).coerceAtMost(0.42f)
             Box(
                 Modifier
                     .padding(PAD)
-                    .offset { IntOffset(x.value.roundToInt(), 0) }
-                    .size(BUTTON)
+                    .offset { IntOffset(minOf(left.value, right.value - bw * 0.6f).roundToInt(), 0) }
+                    .layout { measurable, _ ->
+                        // Width follows the two edges; read in layout, so a
+                        // moving bubble relayouts without recomposing.
+                        val w = (right.value - left.value).coerceAtLeast(bw * 0.6f).roundToInt()
+                        val h = bw.roundToInt()
+                        val p = measurable.measure(androidx.compose.ui.unit.Constraints.fixed(w, h))
+                        layout(w, h) { p.place(0, 0) }
+                    }
                     .graphicsLayer {
                         val s = shown.value
-                        scaleX = s * (1f + squish)
-                        scaleY = s * (1f - squish * 0.85f)
+                        // A stretched bubble thins a little, like a drop pulled along.
+                        val stretch = ((right.value - left.value - bw) / step).coerceIn(0f, 1.6f)
+                        scaleX = s
+                        scaleY = s * (1f - 0.16f * stretch.coerceAtMost(1f))
                     }
                     .drawBackdrop(
                         backdrop = layer,
-                        shape = { CircleShape },
+                        shape = { androidx.compose.foundation.shape.RoundedCornerShape(50) },
                         effects = {
                             lens(
                                 16.dp.toPx(), 32.dp.toPx(),

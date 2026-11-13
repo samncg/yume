@@ -22,6 +22,17 @@ import com.yume.app.ui.EditorController
 import com.yume.app.ui.EditorScreen
 import com.yume.app.ui.GalleryScreen
 import com.yume.app.ui.YumeTheme
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import androidx.compose.ui.Modifier
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Box
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.togetherWith
 
 class MainActivity : ComponentActivity() {
 
@@ -86,38 +97,99 @@ private fun YumeRoot() {
     val app = remember { context.applicationContext as YumeApp }
     var projectId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    val openId = projectId
-    if (openId == null) {
-        GalleryScreen(store = app.projectStore, onOpenProject = { projectId = it })
-    } else {
-        key(openId) {
-            val controller = remember { EditorController(app.projectStore, app.presetStore, openId) }
-            LaunchedEffect(Unit) { controller.load() }
-            DisposableEffect(Unit) {
-                onDispose { controller.dispose() }
+    // Gallery and editor crossfade. The incoming screen always draws on top, so
+    // the gallery fades in over the editor's (opaque) curtain on the way out.
+    androidx.compose.animation.AnimatedContent(
+        targetState = projectId,
+        transitionSpec = {
+            val enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(260)) +
+                androidx.compose.animation.scaleIn(androidx.compose.animation.core.tween(320), initialScale = 0.985f)
+            // The editor leaves under the gallery without fading itself: its
+            // canvas surface cannot take alpha, and its curtain already hides it.
+            val exit = if (initialState != null) androidx.compose.animation.ExitTransition.KeepUntilTransitionsFinished
+            else androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(200))
+            (enter togetherWith exit).apply { targetContentZIndex = 1f }
+        },
+        label = "screen"
+    ) { openId ->
+        if (openId == null) {
+            GalleryScreen(store = app.projectStore, onOpenProject = { projectId = it })
+        } else {
+            key(openId) {
+                EditorHost(app, openId, onLeave = { next -> projectId = next })
             }
-            EditorScreen(
-                controller = controller,
-                // Keep the editor composed until the document is on disk: the
-                // render thread must still be alive when the final snapshot is
-                // taken, otherwise the last property change can be lost.
-                onExit = {
-                    controller.saveThen(
-                        onWarning = { message ->
-                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-                        },
-                        action = { projectId = null }
-                    )
-                },
-                // A cropped / resized copy was written: save this one, open it.
-                onOpenProject = { newId ->
-                    controller.saveThen(
-                        onWarning = { message ->
-                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-                        },
-                        action = { projectId = newId }
-                    )
+        }
+    }
+}
+
+/**
+ * One open project: the editor plus its curtain. Opening, the curtain stays up
+ * until the document is loaded and the canvas has drawn, then fades away.
+ * Leaving, it fades back in first, the document saves behind it, and only
+ * then does the gallery (or the next project) take over.
+ */
+@Composable
+private fun EditorHost(app: YumeApp, openId: String, onLeave: (String?) -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val controller = remember { EditorController(app.projectStore, app.presetStore, openId) }
+    LaunchedEffect(Unit) { controller.load() }
+    DisposableEffect(Unit) {
+        onDispose { controller.dispose() }
+    }
+    val curtain = remember { Animatable(1f) }
+    val curtainContent = com.yume.app.ui.rememberCurtainContent(app.projectStore, openId)
+    var showCanvas by remember { mutableStateOf(false) }
+    var leaving by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        // Let the screen fade finish before the canvas surface exists.
+        delay(280)
+        controller.session.first { it != null }
+        val before = com.yume.app.engine.CanvasGlass.version.value
+        showCanvas = true
+        // The renderer publishes a glass frame as soon as it has drawn.
+        withTimeoutOrNull(1500) {
+            com.yume.app.engine.CanvasGlass.version.first { it != before }
+        }
+        delay(60)
+        if (!leaving) curtain.animateTo(0f, androidx.compose.animation.core.tween(340))
+    }
+
+    fun leave(next: String?) {
+        if (leaving) return
+        leaving = true
+        val covered = scope.async {
+            curtain.animateTo(1f, androidx.compose.animation.core.tween(200))
+        }
+        // Keep the editor composed until the document is on disk: the render
+        // thread must still be alive when the final snapshot is taken,
+        // otherwise the last property change can be lost.
+        controller.saveThen(
+            onWarning = { message ->
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            },
+            action = {
+                scope.launch {
+                    covered.await()
+                    onLeave(next)
                 }
+            }
+        )
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        EditorScreen(
+            controller = controller,
+            onExit = { leave(null) },
+            // A cropped / resized copy was written: save this one, open it.
+            onOpenProject = { newId -> leave(newId) },
+            showCanvas = showCanvas
+        )
+        if (curtain.value > 0.003f) {
+            com.yume.app.ui.ProjectCurtain(
+                content = curtainContent,
+                label = if (leaving) "Saving…" else "Opening…",
+                alpha = curtain.value
             )
         }
     }
