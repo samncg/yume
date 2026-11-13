@@ -865,6 +865,18 @@ so documents written by either store open in the other and in the old build.
 - **A fully painted 30-layer 4096² document is 350-420 MB of layer pixels** on a
   512 MB heap, so Stage 3 eviction is still the structural fix for that shape of
   document.
+- **Solid-tile compression was implemented and reverted.** A tile that is one
+  flat colour was stored as the colour alone (no bitmap), with every read path
+  taught about it, flat tiles produced by `fill`/`putTile`/load and by a
+  stroke-end uniform scan. It cut a fully filled 8192² layer from 256 MB to 0 MB
+  and a 20 × 4096² flat-layer document from ~960 MB to 0 MB. The fuzz harness
+  then failed systematically on all 21 configurations (run, `readRect`,
+  `drawInto`, `drawRect`, `getPixel` and `copyAll` disagreed with the reference
+  by whole tiles), so it was reverted rather than shipped: a store whose read
+  paths can disagree with the reference is not acceptable regardless of the
+  memory win. Re-attempting it needs the fuzz to pass, which means auditing each
+  read path against a materialised tile pixel for pixel first. The measurements
+  and the reverted code are recorded in the Stage 3a notes.
 - **Memory scales with resolution.** A 2048² layer is about 16 MB; A4 at
   300 dpi is about 34 MB per layer. `largeHeap` is enabled and history is capped
   at roughly 320 MB, but many large layers can still exhaust memory on low-RAM

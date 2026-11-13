@@ -674,3 +674,60 @@ phase=55-ops-redo2 L0=75828c5b L1=a340a261/607ae157 L2=acb3259e/61a741de L3=051d
 phase=56-ops-delete L0=75828c5b L1=a340a261/607ae157 L2=acb3259e/61a741de L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=9a4bcbd7 L7=41452c9d L8=41452c9d L9=49e0688c C=3f74c013
 phase=57-edge-pen-1px L0=75828c5b L1=a340a261/607ae157 L2=acb3259e/61a741de L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=9a4bcbd7 L7=41452c9d L8=41452c9d L9=49e0688c L10=7ee8312a C=fd7808e9
 phase=58-edge-marker L0=75828c5b L1=a340a261/607ae157 L2=acb3259e/61a741de L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=9a4bcbd7 L7=41452c9d L8=41452c9d L9=49e0688c L10=3a824a70 C=986569e5
+
+# ============================================================================
+# Stage 3a: dirty sub-rect compositing and the tile pool (oracle unchanged)
+# ============================================================================
+# The v2 oracle above is unchanged: the dense oracle reproduced byte for byte
+# after both changes, and phases 00..42 stay hash-identical between dense and
+# sparse at tile 64/256 on both canvases (the same 16 downstream phases as
+# before: 43..56 plus 57/58 inheriting them).
+#
+# --- 3a-1: sub-rect compositing ---------------------------------------------
+#   * The no-mask/no-clip layer path drew the layer's whole store and relied on
+#     the canvas clip. That made per-frame cost scale with tiles-per-layer times
+#     layer count instead of with the dirty area. It now draws the dirty rect.
+#   * The sparse composite renders the intersection of the dirty rect and each
+#     touched tile into an exactly sized staging buffer, then blits it back as a
+#     whole bitmap at its integer document position (never a sub-rect of a wider
+#     buffer).
+#   * Occlusion culling and the stroke caches now work on sub-rects: the opacity
+#     flag is per tile so it still applies, and a tile-granular cache is only
+#     seeded by a whole-tile pass.
+#   * The composite prune check scans only the sub-rect just written.
+#   Painted-stack p99 at 4096^2 sparse (frame budget 8.33 ms):
+#     before: 10 layers 9.06 ms, 30 layers 12.49 ms
+#     after : 10 layers 2.80 ms, 30 layers 2.77 ms
+#   Slowest frame's composite vs the median frame's:
+#     10 layers 1.00 vs 0.63 ms (1.6x), 30 layers 0.80 vs 0.50 ms (1.6x).
+#   Both are inside the 2x target; the remaining tail is the paint burst (a
+#   frame that emits 25 dabs instead of 8), not compositing.
+#   2048^2 p99 stays under the 6 ms gate: 1.55 ms at 10 layers, 2.69 ms at 30.
+#   Area: a slow frame touches 262144 px of tiles and composites 12604 px.
+#
+# --- 3a-2: tile bitmap pool -------------------------------------------------
+#   Tile bitmaps and undo-capture copies come from and return to a byte-bounded
+#   pool (24 MB cap). Per 150-frame painted stroke at 4096^2 / 30 layers:
+#   61 fresh allocations and 282 pool hits (82% reuse); the same stroke
+#   allocated 340 tile bitmaps before the pool.
+#   Tile emptiness and opacity scans read a tile with one getPixels call instead
+#   of one per row: opacity time per stroke 63.3 -> 27.3 ms at 10 layers.
+#
+# --- 3a-3: solid-tile compression: IMPLEMENTED, FUZZ FAILED, REVERTED --------
+#   A tile that is one flat colour was stored as the colour alone, with every
+#   read path taught about it, flat tiles produced by fill/putTile/load and by a
+#   stroke-end uniform scan. Measured memory: 4096 x2 (half + full canvas)
+#   materialised 96 MB -> compressed 0 MB with 128 + 256 flat tiles; 20 flat
+#   4096^2 layers ~960 MB -> 0 MB; a fully filled 8192^2 layer 0 MB (1024 flat
+#   tiles, vs 256 MB materialised).
+#   The extended fuzz then failed on every configuration, for example:
+#     sparse-fuzz 2000x1333 tile=256 ops=60 solidTiles=48 FAIL
+#       [step=1 op=14 copyAll differs: diff=65536 bbox=(256,768-512,1024)]
+#     sparse-fuzz 1000x700 tile=256 mask ops=600 solidTiles=12 FAIL
+#       [step=11 op=6 readRect Rect(668, 618 - 903, 639)]
+#     sparse-fuzz 2048x2048 tile=16 ops=300 solidTiles=16384 FAIL
+#       [step=3 op=5 readRect Rect(1088, 1988 - 1266, 2024)]
+#   so it was reverted to the 3a-2 state: a store whose read paths can disagree
+#   with the reference by whole tiles is not shippable regardless of the memory
+#   win. Re-attempting it requires the fuzz to pass first, which means auditing
+#   each read path against a materialised tile pixel for pixel.
