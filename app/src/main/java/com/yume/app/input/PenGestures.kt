@@ -15,15 +15,21 @@ import androidx.compose.runtime.setValue
  * Squeeze and double-tap on a smart pen (Xiaomi Focus Pen Pro and similar).
  *
  * There is no public API for these gestures. The pen pairs as a Bluetooth
- * keyboard ("Xiaomi Focus Pen Pro Keyboard") and mouse, and its gestures reach
- * the app as key presses or mouse-button presses from those devices. Which key
- * a gesture sends depends on the pen firmware and HyperOS version, so:
- *  - a few known keys are mapped by default (squeeze = BUTTON_7 or F19), and
- *  - the user can teach Yume a gesture: tap Teach, then squeeze or double-tap.
+ * keyboard ("Xiaomi Focus Pen Pro Keyboard") and mouse. Measured on a Xiaomi
+ * pad (HyperOS, Nov 2026): pinch sends raw F19, which the pen's key map turns
+ * into KEYCODE_BUTTON_7; double-press sends KP_ENTER -> KEYCODE_BUTTON_8. The
+ * codes do not change with the HyperOS gesture setting.
+ *
+ * HyperOS only passes these keys to apps on its stylus whitelist
+ * (MiuiStylusShortcutManager, mAppWhiteSet); everywhere else it consumes them
+ * for its own shortcuts (pinch opens the Quick App Panel). Yume is not on that
+ * list, so on stock HyperOS nothing arrives here yet. The handling stays so it
+ * works the day the keys are delivered, and for other pens that send keys;
+ * Teach covers pens whose keys differ.
  */
 object PenGestures {
 
-    enum class Gesture(val label: String) { Squeeze("Squeeze"), DoubleTap("Double tap") }
+    enum class Gesture(val label: String) { Squeeze("Pinch"), DoubleTap("Double-press") }
 
     enum class Action(val label: String) {
         Menu("Menu"), Eraser("Eraser"), Undo("Undo"), Off("Off")
@@ -38,7 +44,9 @@ object PenGestures {
     private const val PREFS = "pen_gestures"
 
     private val DEFAULT_SQUEEZE = setOf(KeyEvent.KEYCODE_BUTTON_7, KeyEvent.KEYCODE_F19)
-    private val DEFAULT_DOUBLE_TAP = setOf(KeyEvent.KEYCODE_STYLUS_BUTTON_TAIL)
+    private val DEFAULT_DOUBLE_TAP = setOf(
+        KeyEvent.KEYCODE_BUTTON_8, KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_STYLUS_BUTTON_TAIL
+    )
 
     /** Keys a pen gesture must never take over. */
     private val SYSTEM_KEYS = setOf(
@@ -141,9 +149,7 @@ object PenGestures {
         val code = event.keyCode
         if (code in SYSTEM_KEYS) return false
         val fromPen = isPenDevice(event.device)
-        if (fromPen) {
-            Log.i(TAG, "key ${KeyEvent.keyCodeToString(code)} ($code) action=${event.action} repeat=${event.repeatCount} device=${event.device?.name}")
-        }
+        if (com.yume.app.BuildConfig.DEBUG) Log.i(TAG, "key ${KeyEvent.keyCodeToString(code)} ($code) action=${event.action} repeat=${event.repeatCount} scan=${event.scanCode} meta=${event.metaState} device=${event.device?.name} id=${event.deviceId} source=0x${Integer.toHexString(event.source)}")
         return dispatch(code, fromPen, event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0, haptic)
     }
 
@@ -152,7 +158,7 @@ object PenGestures {
         val action = event.actionMasked
         if (action != MotionEvent.ACTION_BUTTON_PRESS && action != MotionEvent.ACTION_BUTTON_RELEASE) return false
         if (!isPenDevice(event.device)) return false
-        Log.i(TAG, "button ${event.actionButton} action=$action device=${event.device?.name}")
+        if (com.yume.app.BuildConfig.DEBUG) Log.i(TAG, "button ${event.actionButton} action=$action device=${event.device?.name}")
         return dispatch(BUTTON_BASE + event.actionButton, true, action == MotionEvent.ACTION_BUTTON_PRESS, haptic)
     }
 
@@ -160,7 +166,6 @@ object PenGestures {
         val listening = listener ?: return false
         val teach = learning
         if (teach != null) {
-            if (!fromPen && resolve(code) == null) return false
             if (press) {
                 setKey(teach, code)
                 learning = null

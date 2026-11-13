@@ -133,8 +133,10 @@ fun PenGestureSettings() {
     SectionLabel("Pen gestures")
     Spacer(Modifier.height(4.dp))
     Text(
-        text = "For pens with squeeze or double-tap, like the Xiaomi Focus Pen Pro. " +
-            "If a gesture does nothing, tap Teach and then do the gesture once.",
+        text = "For pens with pinch or double-press, like the Xiaomi Focus Pen Pro. " +
+            "On Xiaomi tablets, HyperOS keeps these gestures for its own shortcuts in apps " +
+            "it hasn't approved, so they may not reach Yume yet. " +
+            "For other pens, tap Teach and then do the gesture once.",
         style = MaterialTheme.typography.bodySmall,
         color = YumeColors.textDim
     )
