@@ -567,3 +567,6 @@ fun Modifier.claimCanvasTouches(): Modifier = this.pointerInput(Unit) {
         }
     }
 }
+
+/** Claims touches inside a panel so they never reach the canvas. */
+fun Modifier.claimCanvasTouchesInside(): Modifier = claimCanvasTouches()

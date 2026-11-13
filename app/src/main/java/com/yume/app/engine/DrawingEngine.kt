@@ -880,7 +880,7 @@ class DrawingEngine(val width: Int, val height: Int) {
                 val l = layers[j]
                 if (l.groupId != 0L || l.clipping || l.blend != LayerBlend.Normal ||
                     (l.maskEnabled && l.hasMask) ||
-                    (preview != null && preview?.layerId == l.id)
+                    (preview?.covers(l.id) == true)
                 ) {
                     simple = false
                     break
@@ -1065,7 +1065,7 @@ class DrawingEngine(val width: Int, val height: Int) {
                     val l = layers[i]
                     if (l.visible && l.opacity >= 0.999f && l.blend == LayerBlend.Normal &&
                         !(l.maskEnabled && l.hasMask) && !l.clipping && l.groupId == 0L &&
-                        (preview == null || preview?.layerId != l.id) &&
+                        (preview?.covers(l.id) != true) &&
                         l.tiles.isTileOpaque(tx, ty)
                     ) {
                         start = i
@@ -1171,7 +1171,7 @@ class DrawingEngine(val width: Int, val height: Int) {
         val hasMask = layer.maskEnabled && layer.hasMask
         val clipped = layer.clipping && clipBase != null
         val pv = preview
-        val previewed = pv != null && pv.layerId == layer.id
+        val previewed = pv != null && pv.covers(layer.id)
         if (!hasMask && !clipped) {
             layerPaint.reset()
             layerPaint.isFilterBitmap = true

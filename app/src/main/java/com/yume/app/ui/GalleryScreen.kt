@@ -1,5 +1,6 @@
 package com.yume.app.ui
 
+import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.unit.sp
 
 import androidx.compose.ui.graphics.graphicsLayer
@@ -113,17 +114,15 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
             Spacer(Modifier.height(28.dp))
             Row(verticalAlignment = Alignment.Bottom) {
                 Column {
-                    Text(
-                        text = "Gallery",
-                        style = androidx.compose.ui.text.TextStyle(
-                            fontSize = 34.sp,
-                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                            letterSpacing = (-0.6).sp,
-                            lineHeight = 38.sp
-                        ),
-                        color = YumeColors.text
+                    androidx.compose.foundation.Image(
+                        bitmap = androidx.compose.ui.graphics.ImageBitmap.imageResource(com.yume.app.R.drawable.yume_banner),
+                        contentDescription = "Yume",
+                        // Pixel letters: scale without smoothing so the cells stay crisp.
+                        filterQuality = androidx.compose.ui.graphics.FilterQuality.None,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                        modifier = Modifier.height(40.dp)
                     )
-                    Spacer(Modifier.height(2.dp))
+                    Spacer(Modifier.height(10.dp))
                     Text(
                         text = when (projects.size) {
                             0 -> "No artworks yet"

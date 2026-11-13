@@ -1,5 +1,9 @@
 package com.yume.app.ui
 
+import androidx.compose.ui.layout.positionInRoot
+
+import androidx.compose.ui.layout.layout
+
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -94,6 +98,10 @@ fun EditorScreen(
     val state by session.uiState.collectAsStateWithLifecycle()
     var panel by remember { mutableStateOf<PanelId?>(null) }
     var renaming by remember { mutableStateOf(false) }
+    // Window x of the button that opened the current panel: panels grow out of
+    // their own button and return to it.
+    var panelAnchorX by remember { mutableStateOf<Float?>(null) }
+    var rootWidth by remember { mutableStateOf(1f) }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -133,13 +141,23 @@ fun EditorScreen(
     val glassVersion = com.yume.app.engine.CanvasGlass.version.collectAsStateWithLifecycle()
     val glassBackdrop = remember { CanvasProxyBackdrop(glassVersion, canvasOriginState) }
     androidx.compose.runtime.CompositionLocalProvider(LocalGlassBackdrop provides glassBackdrop) {
-    Box(Modifier.fillMaxSize().background(YumeColors.bg)) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(YumeColors.bg)
+            .onGloballyPositioned { rootWidth = it.size.width.toFloat() }
+    ) {
         AndroidView(
             factory = { context -> CanvasView(context, session) },
             modifier = Modifier
                 .fillMaxSize()
                 .onGloballyPositioned { canvasOrigin = it.positionInWindow() }
         )
+
+        // Under the toolbar and panels, so a panel (History) opens over it.
+        if (state.chromeVisible) {
+            SideRail(state, session)
+        }
 
         Column(Modifier.fillMaxSize()) {
             if (state.chromeVisible) {
@@ -160,6 +178,7 @@ fun EditorScreen(
                         }
                     },
                     onPanel = { id -> panel = if (panel == id) null else id },
+                    onAnchor = { x -> panelAnchorX = x },
                     onColorDrop = { window ->
                         session.colorDropAt(window.x - canvasOrigin.x, window.y - canvasOrigin.y)
                     }
@@ -175,8 +194,9 @@ fun EditorScreen(
                 androidx.compose.animation.AnimatedContent(
                     targetState = if (state.chromeVisible) panel else null,
                     transitionSpec = {
-                        val left = targetState == PanelId.History || initialState == PanelId.History
-                        val origin = androidx.compose.ui.graphics.TransformOrigin(if (left) 0f else 1f, 0f)
+                        val origin = androidx.compose.ui.graphics.TransformOrigin(
+                            ((panelAnchorX ?: rootWidth) / rootWidth.coerceAtLeast(1f)).coerceIn(0f, 1f), 0f
+                        )
                         (
                             androidx.compose.animation.scaleIn(AppleSpring.sheet(), 0.6f, origin) +
                                 androidx.compose.animation.fadeIn(AppleSpring.fade())
@@ -189,17 +209,21 @@ fun EditorScreen(
                     label = "panel"
                 ) { shown ->
                     if (shown != null) {
-                        val onLeft = shown == PanelId.History
-                        Box(Modifier.fillMaxSize()) {
+                        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+                            val margin = with(LocalDensity.current) { 12.dp.toPx() }
+                            val areaW = constraints.maxWidth
+                            val anchor = panelAnchorX ?: areaW.toFloat()
                             Box(
                                 Modifier
-                                    .align(if (onLeft) Alignment.TopStart else Alignment.TopEnd)
+                                    .layout { measurable, c ->
+                                        val p = measurable.measure(c.copy(minWidth = 0, minHeight = 0))
+                                        // Centred under its button, kept on screen.
+                                        val x = (anchor - p.width / 2f)
+                                            .coerceIn(margin, (areaW - p.width - margin).coerceAtLeast(margin))
+                                        layout(c.maxWidth, p.height) { p.place(x.roundToInt(), 0) }
+                                    }
                                     .padding(top = 8.dp)
-                                    .padding(
-                                        start = if (onLeft) 12.dp else 0.dp,
-                                        end = if (onLeft) 0.dp else 12.dp
-                                    )
-                                    .claimCanvasTouches()
+                                    .claimCanvasTouchesInside()
                             ) {
                                 PanelHost(
                                     panel = shown,
@@ -215,10 +239,6 @@ fun EditorScreen(
                     }
                 }
             }
-        }
-
-        if (state.chromeVisible) {
-            SideRail(state, session)
         }
 
         if (renaming) {
@@ -321,6 +341,7 @@ private fun EditorTopBar(
     onRename: () -> Unit,
     onTool: (Tool, PanelId?) -> Unit,
     onPanel: (PanelId) -> Unit,
+    onAnchor: (Float) -> Unit = {},
     onColorDrop: (Offset) -> Unit = {}
 ) {
     // Floating glass capsules, grouped by intent: the document, then tools
@@ -360,18 +381,20 @@ private fun EditorTopBar(
                 },
                 CapsuleItem(Glyph.Sliders, "Adjustments", active = activePanel == PanelId.Adjust) {
                     onPanel(PanelId.Adjust)
-                },
+                }
+            ),
+            onAnchor = onAnchor
+        )
+        Spacer(Modifier.weight(1f))
+        // Every tool in one pill, so the glass bubble can travel between all of them.
+        GlassToolCapsule(
+            listOf(
                 CapsuleItem(Glyph.Select, "Select", selected = state.tool == Tool.Selection) {
                     onTool(Tool.Selection, PanelId.Selection)
                 },
                 CapsuleItem(Glyph.Transform, "Transform", selected = state.tool == Tool.Transform) {
                     onTool(Tool.Transform, null)
-                }
-            )
-        )
-        Spacer(Modifier.weight(1f))
-        GlassToolCapsule(
-            listOf(
+                },
                 CapsuleItem(Glyph.Brush, "Paint", selected = state.tool == Tool.Brush) {
                     onTool(Tool.Brush, PanelId.Brush)
                 },
@@ -387,7 +410,8 @@ private fun EditorTopBar(
                 CapsuleItem(Glyph.Gradient, "Gradient", selected = state.tool == Tool.Gradient) {
                     onTool(Tool.Gradient, PanelId.Gradient)
                 }
-            )
+            ),
+            onAnchor = onAnchor
         )
         GlassToolCapsule(
             listOf(
@@ -395,13 +419,20 @@ private fun EditorTopBar(
                     onPanel(PanelId.Layers)
                 }
             ),
+            onAnchor = onAnchor,
             trailing = {
-                ColorChip(
-                    color = state.color,
-                    selected = activePanel == PanelId.Color,
-                    onClick = { onPanel(PanelId.Color) },
-                    onDrop = onColorDrop
-                )
+                var chipX by remember { mutableStateOf(0f) }
+                Box(Modifier.onGloballyPositioned { chipX = it.positionInRoot().x + it.size.width / 2f }) {
+                    ColorChip(
+                        color = state.color,
+                        selected = activePanel == PanelId.Color,
+                        onClick = {
+                            onAnchor(chipX)
+                            onPanel(PanelId.Color)
+                        },
+                        onDrop = onColorDrop
+                    )
+                }
             }
         )
     }

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="yume_bg">#FF121214</color>
-    <color name="yume_icon_bg">#FF1E1E22</color>
+    <color name="yume_icon_bg">#FF111111</color>
     <color name="yume_accent">#FFE9A13B</color>
 </resources>

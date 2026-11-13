@@ -213,6 +213,27 @@ class DrawingSession(
     /** True while a brush / eraser / smudge stroke is being painted. */
     val strokeInProgress: Boolean get() = painter.isActive
 
+    /**
+     * The brush cursor while a stroke is live: x, y and dab diameter in
+     * document px, following pressure, tilt and the start taper. Null when no
+     * stroke is in progress.
+     */
+    fun liveCursor(): FloatArray? {
+        if (!painter.isActive || painter.liveSize <= 0f) return null
+        return floatArrayOf(painter.liveX, painter.liveY, painter.liveSize)
+    }
+
+    /** Adjustments apply to every visible, unlocked layer instead of the active one. */
+    @Volatile var adjustAllLayers: Boolean = false
+
+    fun chooseAdjustAllLayers(all: Boolean) {
+        if (all == adjustAllLayers) return
+        // The live preview belongs to one scope: start over in the new one.
+        post { cancelAdjustmentInternal() }
+        adjustAllLayers = all
+        requestState()
+    }
+
     /** Renames the document (shown in the editor; written with the next save). */
     fun renameDocument(name: String) = post {
         title = name
@@ -1963,17 +1984,17 @@ class DrawingSession(
 
         val preview = when (kind) {
             AdjustmentKind.Hue -> LayerPreview(
-                layer.id,
+                previewTarget(layer),
                 ColorMatrixColorFilter(Adjustments.hsvMatrix(amount, 1f, 1f)),
                 null
             )
             AdjustmentKind.Saturation -> LayerPreview(
-                layer.id,
+                previewTarget(layer),
                 ColorMatrixColorFilter(Adjustments.hsvMatrix(0f, 1f + amount, 1f)),
                 null
             )
             AdjustmentKind.Brightness -> LayerPreview(
-                layer.id,
+                previewTarget(layer),
                 ColorMatrixColorFilter(Adjustments.hsvMatrix(0f, 1f, 1f + amount)),
                 null
             )
@@ -2026,6 +2047,9 @@ class DrawingSession(
         return small
     }
 
+    private fun previewTarget(layer: Layer): Long =
+        if (adjustAllLayers) LayerPreview.ALL_LAYERS else layer.id
+
     private fun commitAdjustmentInternal() {
         val layer = engine.activeLayer
         val dense = adjustSnapshot
@@ -2044,10 +2068,54 @@ class DrawingSession(
             requestState()
             return
         }
+        val work = if (adjustWork.isEmpty) bounds else Rect(adjustWork)
+        val actions = ArrayList<HistoryAction>()
+        bakeAdjustment(layer, capture, dense, bounds, work, kind, amount)?.let { actions.add(it) }
+        layer.touch()
+        if (adjustAllLayers) {
+            // Same adjustment on every other visible, unlocked layer, each from
+            // its own pre-edit snapshot; all of it is one undo step.
+            val full = Rect(0, 0, engine.width, engine.height)
+            val halo = haloOf(kind)
+            for (other in engine.layers) {
+                if (other === layer || !other.visible || !editable(other)) continue
+                val store = other.paintStore
+                val base = editBounds(store)
+                if (base.isEmpty) continue
+                val b = if (halo > 0) growBounds(base, halo * 2) else base
+                val w = if (halo > 0) growBounds(base, halo) else base
+                val cap = if (store.isSparse) TileOps.capture(store, b) else null
+                val snap = if (store.isSparse) null else store.readRect(full)
+                bakeAdjustment(other, cap, snap, b, w, kind, amount)?.let { actions.add(it) }
+                other.touch()
+            }
+        }
+        when (actions.size) {
+            0 -> Unit
+            1 -> history.push(actions[0])
+            else -> history.push(GroupAction(actions, "Adjust ${kind.label} · all layers", EditKind.Adjust))
+        }
+        layer.touch()
+        engine.markDirtyAll()
+        requestState()
+    }
+
+    /**
+     * Bakes one adjustment into [layer] from its pre-edit state ([capture] for
+     * sparse stores, [snapshot] for dense ones) and returns the undo entry.
+     */
+    private fun bakeAdjustment(
+        layer: Layer,
+        capture: TileCapture?,
+        snapshot0: Bitmap?,
+        bounds: Rect,
+        work: Rect,
+        kind: AdjustmentKind,
+        amount: Float
+    ): HistoryAction? {
         if (capture != null) {
             // Sparse: bake tile by tile from the pre-edit snapshot.
             val store = layer.paintStore
-            val work = if (adjustWork.isEmpty) bounds else Rect(adjustWork)
             when (kind) {
                 AdjustmentKind.Hue -> TileOps.applyFilter(
                     store, work, ColorMatrixColorFilter(Adjustments.hsvMatrix(amount, 1f, 1f))
@@ -2073,30 +2141,27 @@ class DrawingSession(
             }
             // The action covers the whole snapshot region: a blurred tile past
             // the work rect is unchanged, and copying it costs nothing extra.
-            engine.makeTilePatch(
+            return engine.makeTilePatch(
                 layer, capture, bounds, "Adjust ${kind.label}", EditKind.Adjust
-            )?.let { history.push(it) }
+            )
         } else {
-            val snapshot = dense
-            if (snapshot == null) {
-                requestState()
-                return
-            }
+            val snapshot = snapshot0
+            if (snapshot == null) return null
             // Bake from the untouched snapshot; both bitmaps become the entry.
-            val work = copyPixels(snapshot)
+            val target = copyPixels(snapshot)
             when (kind) {
-                AdjustmentKind.Hue -> Adjustments.hsb(work, amount, 1f, 1f)
-                AdjustmentKind.Saturation -> Adjustments.hsb(work, 0f, 1f + amount, 1f)
-                AdjustmentKind.Brightness -> Adjustments.hsb(work, 0f, 1f, 1f + amount)
+                AdjustmentKind.Hue -> Adjustments.hsb(target, amount, 1f, 1f)
+                AdjustmentKind.Saturation -> Adjustments.hsb(target, 0f, 1f + amount, 1f)
+                AdjustmentKind.Brightness -> Adjustments.hsb(target, 0f, 1f, 1f + amount)
                 AdjustmentKind.Blur ->
-                    Adjustments.blur(work, (amount * 24f).toInt().coerceIn(1, 24))
-                AdjustmentKind.Noise -> Adjustments.noise(work, amount.coerceIn(0f, 1f))
+                    Adjustments.blur(target, (amount * 24f).toInt().coerceIn(1, 24))
+                AdjustmentKind.Noise -> Adjustments.noise(target, amount.coerceIn(0f, 1f))
                 // Same chunked kernels as the sparse path, so both stores match.
                 AdjustmentKind.Sharpen -> Kernels.sharpen(
                     engine.width, engine.height, Rect(0, 0, engine.width, engine.height),
                     amount.coerceIn(0f, 1f) * 2f, Kernels.bitmapSource(snapshot)
                 ) { r, bmp ->
-                    android.graphics.Canvas(work).drawBitmap(
+                    android.graphics.Canvas(target).drawBitmap(
                         bmp, r.left.toFloat(), r.top.toFloat(),
                         Paint().apply { blendMode = BlendMode.SRC }
                     )
@@ -2106,24 +2171,20 @@ class DrawingSession(
                     (amount.coerceIn(0f, 1f) * MOTION_MAX_RADIUS).toInt(), motionAngle,
                     Kernels.bitmapSource(snapshot)
                 ) { r, bmp ->
-                    android.graphics.Canvas(work).drawBitmap(
+                    android.graphics.Canvas(target).drawBitmap(
                         bmp, r.left.toFloat(), r.top.toFloat(),
                         Paint().apply { blendMode = BlendMode.SRC }
                     )
                 }
             }
             val full = Rect(0, 0, engine.width, engine.height)
-            layer.tiles.writeRect(full, work)
-            history.push(
-                PixelAction(
-                    layer.id, full,
-                    snapshot, work, "Adjust ${kind.label}", EditKind.Adjust
-                )
+            layer.tiles.writeRect(full, target)
+            return PixelAction(
+                layer.id, full,
+                snapshot, target, "Adjust ${kind.label}", EditKind.Adjust
             )
         }
-        layer.touch()
-        engine.markDirtyAll()
-        requestState()
+        return null
     }
 
     private fun cancelAdjustmentInternal() {
@@ -2479,6 +2540,7 @@ class DrawingSession(
             gradientKind = gradientKind,
             gradientSecond = gradientSecond,
             motionAngle = motionAngle,
+            adjustAllLayers = adjustAllLayers,
             sparseLayers = TileStoreConfig.useSparseLayers,
             documentVersion = history.version + propertyVersion,
             backgroundColor = engine.backgroundColor,

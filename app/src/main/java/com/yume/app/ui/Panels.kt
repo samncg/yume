@@ -1,5 +1,9 @@
 package com.yume.app.ui
 
+import androidx.compose.ui.layout.onSizeChanged
+
+import androidx.compose.foundation.verticalScroll
+
 import androidx.compose.runtime.LaunchedEffect
 
 import kotlinx.coroutines.launch
@@ -187,53 +191,116 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
 
         val density = LocalDensity.current
         val rowPx = with(density) { LAYER_ROW_HEIGHT.toPx() }
+        val gapPx = with(density) { 3.dp.toPx() }
         val layerCount = state.layers.count { !it.isGroup }
+        val rows = state.layers
+        // Measured height of every row (group rows and layer rows differ), so
+        // slots and shifts line up with the real layout.
+        val heights = remember { androidx.compose.runtime.mutableStateMapOf<Long, Int>() }
+        fun stepOf(i: Int): Float = (heights[rows[i].id]?.toFloat() ?: rowPx) + gapPx
+        /** How many rows a drag of [offset] from row [from] has passed (signed). */
+        fun slotsFor(from: Int, offset: Float): Int {
+            var n = 0
+            var acc = 0f
+            if (offset > 0f) {
+                var k = from + 1
+                while (k < rows.size && offset > acc + stepOf(k) / 2f) { acc += stepOf(k); n++; k++ }
+            } else {
+                var k = from - 1
+                while (k >= 0 && -offset > acc + stepOf(k) / 2f) { acc += stepOf(k); n--; k-- }
+            }
+            return n
+        }
+        /** Distance the dragged row travels when it passes [slots] rows. */
+        fun distanceFor(from: Int, slots: Int): Float {
+            var d = 0f
+            if (slots > 0) for (k in from + 1..(from + slots).coerceAtMost(rows.size - 1)) d += stepOf(k)
+            if (slots < 0) for (k in (from + slots).coerceAtLeast(0) until from) d -= stepOf(k)
+            return d
+        }
+
         var dragId by remember { mutableStateOf(-1L) }
         var dragOffset by remember { mutableFloatStateOf(0f) }
         var dragFrom by remember { mutableStateOf(-1) }
-        // While a drop is waiting for the new order to arrive, the rows keep
-        // the positions they were shifted to, so nothing jumps.
-        var frozenSlots by remember { mutableStateOf(0) }
+        // After a drop, until the new order arrives from the engine, rows hold
+        // the positions they were pushed to and the dropped row stays where the
+        // finger left it, so nothing jumps back for a frame.
+        var frozenOrder by remember { mutableStateOf<List<Long>?>(null) }
         var frozenFrom by remember { mutableStateOf(-1) }
+        var frozenSlots by remember { mutableStateOf(0) }
+        var frozenStep by remember { mutableFloatStateOf(0f) }
+        var frozenDistance by remember { mutableFloatStateOf(0f) }
         val settle = remember { androidx.compose.animation.core.Animatable(0f) }
         var settleId by remember { mutableStateOf(-1L) }
         val scope = rememberCoroutineScope()
-        val order = state.layers.map { it.id }
+        val order = rows.map { it.id }
+        val holding = frozenOrder != null && frozenOrder == order
+        val reordered = frozenOrder != null && frozenOrder != order
         LaunchedEffect(order) {
-            // The reorder landed: drop the temporary shifts and let the moved
-            // row spring the rest of the way into its slot.
-            frozenFrom = -1
-            frozenSlots = 0
-            if (settleId != -1L) {
+            if (frozenOrder != null && frozenOrder != order) {
+                // The reorder landed. The dropped row is now laid out in its new
+                // slot: re-express its offset from there and spring it home.
+                settle.snapTo(settle.value - frozenDistance)
+                frozenOrder = null
+                frozenFrom = -1
+                frozenSlots = 0
                 settle.animateTo(0f, AppleSpring.move())
                 settleId = -1L
             }
         }
-        val liveSlots = if (dragId != -1L) (dragOffset / rowPx).roundToInt() else frozenSlots
-        val from = if (dragId != -1L) dragFrom else frozenFrom
+        val liveSlots = when {
+            dragId != -1L -> slotsFor(dragFrom, dragOffset)
+            holding -> frozenSlots
+            else -> 0
+        }
+        val from = when {
+            dragId != -1L -> dragFrom
+            holding -> frozenFrom
+            else -> -1
+        }
+        val moverStep = when {
+            dragId != -1L && dragFrom in rows.indices -> stepOf(dragFrom)
+            else -> frozenStep
+        }
 
-        LazyColumn(
-            Modifier.heightIn(max = 300.dp),
+        // A plain scrolling column: a lazy list re-anchors its scroll on the
+        // first visible key, which made the list jump when that row moved.
+        Column(
+            Modifier
+                .heightIn(max = 300.dp)
+                .verticalScroll(androidx.compose.foundation.rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
-            itemsIndexed(state.layers, key = { _, row -> row.id }) { index, row ->
+            rows.forEachIndexed { index, row ->
+              androidx.compose.runtime.key(row.id) {
                 // Rows the dragged layer has passed slide one slot out of its way.
                 val shiftTarget = when {
                     from < 0 || index == from -> 0f
-                    liveSlots > 0 && index in (from + 1)..(from + liveSlots) -> -rowPx
-                    liveSlots < 0 && index in (from + liveSlots) until from -> rowPx
+                    liveSlots > 0 && index in (from + 1)..(from + liveSlots) -> -moverStep
+                    liveSlots < 0 && index in (from + liveSlots) until from -> moverStep
                     else -> 0f
                 }
                 val shift by androidx.compose.animation.core.animateFloatAsState(
                     targetValue = shiftTarget,
-                    animationSpec = if (frozenFrom >= 0 && dragId == -1L && shiftTarget == 0f) {
+                    // When the new order lands, rows are already where they were
+                    // shifted to: drop the shift in the same frame.
+                    animationSpec = if (reordered) {
                         androidx.compose.animation.core.snap()
                     } else {
                         AppleSpring.move()
                     },
                     label = "layerShift"
                 )
-                Box(Modifier.graphicsLayer { translationY = shift }) {
+                val dragging = dragId == row.id
+                val settling = settleId == row.id
+                Box(
+                    Modifier
+                        // On the row container, so the lifted row draws above its
+                        // neighbours instead of sliding under them.
+                        .zIndex(if (dragging || settling) 1f else 0f)
+                        .onSizeChanged { heights[row.id] = it.height }
+                        .graphicsLayer { translationY = shift }
+                ) {
                     if (row.isGroup) {
                         GroupRow(
                             row = row,
@@ -244,7 +311,6 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                             onToggleLock = { session.toggleGroupLock(row.id) }
                         )
                     } else {
-                        val dragging = dragId == row.id
                         LayerRow(
                             layer = row,
                             active = row.id == state.activeLayerId,
@@ -253,45 +319,52 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                             onToggleLock = { session.toggleLayerLock(row.id) },
                             dragOffset = when {
                                 dragging -> dragOffset
-                                settleId == row.id -> settle.value
+                                settling && reordered -> settle.value - frozenDistance
+                                settling -> settle.value
                                 else -> 0f
                             },
                             lifted = dragging,
                             onDragStart = {
                                 scope.launch { settle.snapTo(0f) }
                                 settleId = -1L
+                                frozenOrder = null
                                 dragId = row.id
                                 dragFrom = index
                                 dragOffset = 0f
                             },
                             onDrag = { dragOffset += it },
                             onDragEnd = {
-                                val slots = (dragOffset / rowPx).roundToInt()
+                                val slots = slotsFor(dragFrom, dragOffset)
                                 val id = dragId
-                                val residual = dragOffset - slots * rowPx
+                                val offset = dragOffset
                                 dragId = -1L
+                                settleId = id
                                 if (slots != 0 && layerCount > 1) {
                                     frozenFrom = dragFrom
                                     frozenSlots = slots
-                                    settleId = id
+                                    frozenStep = stepOf(dragFrom)
+                                    frozenDistance = distanceFor(dragFrom, slots)
+                                    frozenOrder = order
+                                    val heldOrder = order
                                     scope.launch {
-                                        settle.snapTo(residual)
+                                        settle.snapTo(offset)
                                         // If the order does not change (a no-op move),
                                         // release the shifts instead of holding them.
                                         kotlinx.coroutines.delay(700)
-                                        if (frozenFrom >= 0) {
+                                        if (frozenOrder == heldOrder) {
+                                            frozenOrder = null
                                             frozenFrom = -1
                                             frozenSlots = 0
                                             settle.animateTo(0f, AppleSpring.move())
                                             settleId = -1L
                                         }
                                     }
-                                    val targetPanel = (index + slots).coerceIn(0, state.layers.size - 1)
+                                    val targetPanel = (index + slots).coerceIn(0, rows.size - 1)
                                     // Rows that end up above it: everything up to and
                                     // including the target row when moving down, or
                                     // strictly before it when moving up.
                                     val upTo = if (slots > 0) targetPanel + 1 else targetPanel
-                                    val above = state.layers.take(upTo)
+                                    val above = rows.take(upTo)
                                         .count { !it.isGroup && it.id != id }
                                     session.moveLayerTo(
                                         id,
@@ -299,9 +372,8 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                                     )
                                 } else {
                                     // Not moved: spring back home from the finger.
-                                    settleId = id
                                     scope.launch {
-                                        settle.snapTo(dragOffset)
+                                        settle.snapTo(offset)
                                         settle.animateTo(0f, AppleSpring.move())
                                         settleId = -1L
                                     }
@@ -311,6 +383,7 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                         )
                     }
                 }
+              }
             }
         }
 
@@ -460,7 +533,6 @@ private fun LayerRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .zIndex(if (lifted || dragOffset != 0f) 1f else 0f)
             .graphicsLayer {
                 translationY = dragOffset
                 scaleX = 1f + 0.035f * lift
@@ -1421,7 +1493,7 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
     PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
         PanelHeader("Adjustments", onClose)
         Text(
-            text = "Drag a slider to preview live on “${state.activeLayer?.name ?: "-"}”.",
+            text = if (state.adjustAllLayers) "Drag a slider to preview live on every visible layer." else "Drag a slider to preview live on “${state.activeLayer?.name ?: "-"}”.",
             style = MaterialTheme.typography.bodySmall,
             color = YumeColors.textDim
         )
@@ -1453,7 +1525,16 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                 }
             }
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
+        SegmentedRow(
+            options = listOf("This layer", "All layers"),
+            selectedIndex = if (state.adjustAllLayers) 1 else 0,
+            onSelect = {
+                session.chooseAdjustAllLayers(it == 1)
+                amount = 0f
+            }
+        )
+        Spacer(Modifier.height(10.dp))
         val range = adjustRange(kind)
         YumeSlider(
             value = amount,

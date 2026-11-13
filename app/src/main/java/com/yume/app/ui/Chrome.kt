@@ -1,5 +1,9 @@
 package com.yume.app.ui
 
+import androidx.compose.ui.layout.positionInRoot
+
+import androidx.compose.ui.layout.onGloballyPositioned
+
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
@@ -106,8 +110,11 @@ private val PAD = 4.dp
 fun GlassToolCapsule(
     items: List<CapsuleItem>,
     modifier: Modifier = Modifier,
+    /** Window x of the centre of a button the user just tapped (panel origin). */
+    onAnchor: (Float) -> Unit = {},
     trailing: (@Composable RowScope.() -> Unit)? = null
 ) {
+    val centers = remember(items.size) { FloatArray(items.size) }
     val layer = rememberLayerBackdrop()
     val density = LocalDensity.current
     val step = with(density) { (BUTTON + GAP).toPx() }
@@ -123,7 +130,7 @@ fun GlassToolCapsule(
             shown.animateTo(0f, AppleSpring.fade())
         }
     }
-    val squishScale = with(density) { 2400.dp.toPx() }
+    val squishScale = with(density) { 1100.dp.toPx() }
     Box(modifier.blockCanvasTouches()) {
         Row(
             Modifier
@@ -133,10 +140,16 @@ fun GlassToolCapsule(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(GAP)
         ) {
-            items.forEach { item ->
+            items.forEachIndexed { index, item ->
                 YumeIconButton(
                     item.glyph,
-                    item.onClick,
+                    {
+                        onAnchor(centers[index])
+                        item.onClick()
+                    },
+                    modifier = Modifier.onGloballyPositioned { c ->
+                        centers[index] = c.positionInRoot().x + c.size.width / 2f
+                    },
                     size = BUTTON,
                     selected = item.active,
                     selectedTint = YumeColors.text,
@@ -147,7 +160,7 @@ fun GlassToolCapsule(
             trailing?.invoke(this)
         }
         if (shown.value > 0.01f) {
-            val squish = (abs(x.velocity) / squishScale).coerceAtMost(0.24f)
+            val squish = (abs(x.velocity) / squishScale).coerceAtMost(0.42f)
             Box(
                 Modifier
                     .padding(PAD)
@@ -156,7 +169,7 @@ fun GlassToolCapsule(
                     .graphicsLayer {
                         val s = shown.value
                         scaleX = s * (1f + squish)
-                        scaleY = s * (1f - squish * 0.7f)
+                        scaleY = s * (1f - squish * 0.85f)
                     }
                     .drawBackdrop(
                         backdrop = layer,
@@ -190,14 +203,18 @@ fun SideRail(state: EditorUiState, session: DrawingSession) {
     val margin = with(density) { 12.dp.toPx() }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val maxW = constraints.maxWidth.toFloat()
-        val maxH = constraints.maxHeight.toFloat()
+        // Read through State: rotation does not recreate the activity, and the
+        // drag handler must see the current size, not the one it started with.
+        val maxWState = androidx.compose.runtime.rememberUpdatedState(constraints.maxWidth.toFloat())
+        val maxHState = androidx.compose.runtime.rememberUpdatedState(constraints.maxHeight.toFloat())
+        val maxW = maxWState.value
+        val maxH = maxHState.value
         var railSize by remember { mutableStateOf(IntSize.Zero) }
         val ox = remember { Animatable(margin) }
         val oy = remember { Animatable(Float.NaN) }
         fun bounds(): Pair<Float, Float> {
-            val maxX = (maxW - railSize.width - margin).coerceAtLeast(margin)
-            val maxY = (maxH - railSize.height - margin).coerceAtLeast(margin)
+            val maxX = (maxWState.value - railSize.width - margin).coerceAtLeast(margin)
+            val maxY = (maxHState.value - railSize.height - margin).coerceAtLeast(margin)
             return maxX to maxY
         }
         // Restore the saved side / height once the rail has been measured.
@@ -257,7 +274,7 @@ fun SideRail(state: EditorUiState, session: DrawingSession) {
                             // Throw: choose the side and height from where the
                             // flick is going, then hand the velocity to the spring.
                             val px = ox.value + AppleSpring.project(v.x)
-                            val tx = if (px + railSize.width / 2f < maxW / 2f) margin else maxX
+                            val tx = if (px + railSize.width / 2f < maxWState.value / 2f) margin else maxX
                             val ty = (oy.value + AppleSpring.project(v.y)).coerceIn(margin, maxY)
                             scope.launch { ox.animateTo(tx, AppleSpring.move(), v.x) }
                             scope.launch {

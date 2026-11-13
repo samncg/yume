@@ -471,10 +471,17 @@ class SurfaceRenderer(
     }
 
     private fun drawHover(canvas: Canvas, matrix: Matrix) {
-        if (!session.hoverVisible || session.transformActive) return
+        if (session.transformActive) return
+        // While the pen paints, the ring sits on the newest dab and has its
+        // size, so it follows pressure, tilt and the start taper live.
+        val live = session.liveCursor()
+        if (live == null && !session.hoverVisible) return
         val mapped = FloatArray(2)
-        matrix.mapPoints(mapped, floatArrayOf(session.hoverX, session.hoverY))
-        val radius = max(2.5f, session.brushSize * 0.5f * session.view.scale)
+        val docX = live?.get(0) ?: session.hoverX
+        val docY = live?.get(1) ?: session.hoverY
+        val docSize = live?.get(2) ?: session.brushSize
+        matrix.mapPoints(mapped, floatArrayOf(docX, docY))
+        val radius = max(2.5f, docSize * 0.5f * session.view.scale)
 
         overlay.style = Paint.Style.STROKE
         overlay.pathEffect = null

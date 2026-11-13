@@ -81,6 +81,8 @@ data class EditorUiState(
     val gradientSecond: Int = 0x00FFFFFF,
     /** Motion blur direction in degrees. */
     val motionAngle: Float = 0f,
+    /** Adjustments apply to all layers instead of the active one. */
+    val adjustAllLayers: Boolean = false,
     /**
      * Debug: whether documents opened from now on use sparse tile layers.
      * Only surfaced in debuggable builds (Actions panel).

@@ -342,8 +342,19 @@ class StrokePainter(private val engine: DrawingEngine) {
         return size * f.coerceIn(0.42f, 1f)
     }
 
+    /** Where the pen is painting and how big the dab is right now (cursor). */
+    @Volatile var liveX = 0f
+        private set
+    @Volatile var liveY = 0f
+        private set
+    @Volatile var liveSize = 0f
+        private set
+
     private fun stampAt(x: Float, y: Float, size: Float, alpha: Float) {
         val sized = taper(size)
+        liveX = x
+        liveY = y
+        liveSize = sized
         stampInternal(x, y, sized, alpha)
         if (engine.symmetryX) {
             stampInternal(engine.symmetryXPos * 2f - x, y, sized, alpha)

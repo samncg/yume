@@ -173,4 +173,12 @@ class LayerPreview(
     val layerId: Long,
     val filter: android.graphics.ColorFilter?,
     val proxy: Bitmap?
-)
+) {
+    /** True when this preview is drawn on layer [id]. */
+    fun covers(id: Long): Boolean = layerId == id || (layerId == ALL_LAYERS && proxy == null)
+
+    companion object {
+        /** A colour-filter preview applied to every layer (adjust all layers). */
+        const val ALL_LAYERS = -2L
+    }
+}

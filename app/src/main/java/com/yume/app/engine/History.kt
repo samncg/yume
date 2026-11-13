@@ -54,6 +54,21 @@ sealed class HistoryAction {
     }
 }
 
+/** Several edits applied together that undo and redo as one step. */
+class GroupAction(
+    val actions: List<HistoryAction>,
+    override val label: String,
+    override val kind: EditKind
+) : HistoryAction() {
+    override val bytes: Long get() = actions.sumOf { it.bytes }
+    override fun undo(engine: DrawingEngine) {
+        for (i in actions.indices.reversed()) actions[i].undo(engine)
+    }
+    override fun redo(engine: DrawingEngine) {
+        for (a in actions) a.redo(engine)
+    }
+}
+
 class PixelAction(
     override val layerId: Long,
     val rect: Rect,
@@ -184,6 +199,7 @@ class History(
 
     /** Brings [action]'s spilled crops back into memory. False if unreadable. */
     fun ensureLoaded(action: HistoryAction): Boolean {
+        if (action is GroupAction) return action.actions.all { ensureLoaded(it) }
         val t = action as? TilePixelAction ?: return true
         if (t.isResident) return true
         val s = spill ?: return false
@@ -430,6 +446,7 @@ class History(
                 after.recycle()
             }
             is TilePixelAction -> releaseTiles(spill)
+            is GroupAction -> actions.forEach { it.releaseBitmaps() }
             else -> Unit
         }
     }
