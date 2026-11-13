@@ -628,7 +628,25 @@ class SparseTileStore(
     /** Evicted tiles whose spill record could not be read back (CRC / IO). */
     private val lost = HashSet<Long>()
 
-    class EvictCandidate(val store: SparseTileStore, val key: Long, val lastUse: Long)
+    class EvictCandidate(
+        val store: SparseTileStore,
+        val key: Long,
+        val lastUse: Long,
+        /** Clean = its current pixels are already in the spill file (no write). */
+        val clean: Boolean
+    )
+
+    /** Accounting category in the tile cache: "layer", "mask" or "composite". */
+    var cacheRole: String = if (defaultPixel == 0) "layer" else "mask"
+
+    /** True when the tile exists, resident or evicted (no disk read). */
+    fun hasTile(tx: Int, ty: Int): Boolean {
+        val k = key(tx, ty)
+        return tiles.containsKey(k) || (evicted.isNotEmpty() && k in evicted)
+    }
+
+    /** True when the tile exists only on disk. */
+    fun isEvicted(tx: Int, ty: Int): Boolean = evicted.isNotEmpty() && key(tx, ty) in evicted
 
     val evictedCount: Int get() = evicted.size
     val lostTiles: Int get() = lost.size
@@ -660,7 +678,10 @@ class SparseTileStore(
     private fun tileAt(k: Long): Bitmap? {
         val t = tiles[k]
         if (t != null) {
-            if (cache != null) touch(k)
+            if (cache != null) {
+                touch(k)
+                cache?.markHot(this, k)
+            }
             return t
         }
         if (evicted.isEmpty() || k !in evicted) return null
@@ -693,6 +714,7 @@ class SparseTileStore(
         tiles[k] = bmp
         evicted.remove(k)
         lost.remove(k)
+        c.markHot(this, k)
         c.loads++
         c.syncLoads++
         if (!c.blockingLoads) c.syncLoadsRender++
@@ -717,7 +739,8 @@ class SparseTileStore(
         if (spillFile == null) return
         for (k in tiles.keys) {
             if (k in solids || k == lastWritable || pins.containsKey(k)) continue
-            out.add(EvictCandidate(this, k, lastUse[k] ?: 0L))
+            if (cache?.isHot(this, k) == true) continue
+            out.add(EvictCandidate(this, k, lastUse[k] ?: 0L, spillFile?.has(k) == true))
         }
     }
 
@@ -730,6 +753,7 @@ class SparseTileStore(
         val c = cache ?: return 0L
         val f = spillFile ?: return 0L
         if (k in solids || k == lastWritable || pins.containsKey(k)) return 0L
+        if (c.isHot(this, k)) return 0L
         val t = tiles[k] ?: return 0L
         val bytes = t.byteCount.toLong()
         val tx = (k ushr 32).toInt()
@@ -759,7 +783,11 @@ class SparseTileStore(
         lastUse.remove(k)
         evicted.add(k)
         c.evictions++
-        // Not pooled: a caller may still hold this bitmap for a read.
+        // Not pooled yet: a caller inside the current operation may still hold
+        // this bitmap for a read. It is returned to the pool at the next safe
+        // point; leaving it to the collector let native pixels pile up (the
+        // Java heap is small, so GC rarely ran: 894 MB native at 8K).
+        c.bury(t)
         return bytes
     }
 
@@ -792,6 +820,12 @@ class SparseTileStore(
     }
 
     /** True when a tile inside [rect] is evicted (it would need a disk read). */
+    fun hasEvictedIn(rect: Rect, prefetch: Boolean): Boolean {
+        val any = hasEvictedIn(rect)
+        if (any && prefetch) prefetchIn(rect)
+        return any
+    }
+
     fun hasEvictedIn(rect: Rect): Boolean {
         if (evicted.isEmpty()) return false
         for (ty in tyRange(rect)) for (tx in txRange(rect)) {

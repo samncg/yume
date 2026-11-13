@@ -336,8 +336,9 @@ private fun NewCanvasDialog(
     val width = widthText.toIntOrNull()?.coerceIn(64, 8192) ?: 2048
     val height = heightText.toIntOrNull()?.coerceIn(64, 8192) ?: 2048
     val mbPerLayer = (width.toLong() * height * 4L) / (1024L * 1024L)
-    val maxLayers = MemoryBudget.maxLayers(width, height)
-    val fits = MemoryBudget.fits(width, height, 1)
+    val maxLayers = MemoryBudget.maxLayersFor(width, height)
+    val fits = MemoryBudget.fitsDocument(width, height, 1)
+    val sparseTiles = com.yume.app.engine.TileStoreConfig.useSparseLayers
 
     Dialog(onDismissRequest = onDismiss) {
         PanelCard(Modifier.width(380.dp)) {
@@ -377,7 +378,10 @@ private fun NewCanvasDialog(
             Spacer(Modifier.height(2.dp))
             Text(
                 text = if (!fits) {
-                    MemoryBudget.canvasRefusal(width, height)
+                    if (sparseTiles) MemoryBudget.documentRefusal(width, height, 1)
+                    else MemoryBudget.canvasRefusal(width, height)
+                } else if (sparseTiles) {
+                    "Sparse tiles: memory follows the painted area, layers are limited by storage"
                 } else if (maxLayers <= 4) {
                     "Tight fit: about $maxLayers layer${if (maxLayers == 1) "" else "s"} at this size"
                 } else {

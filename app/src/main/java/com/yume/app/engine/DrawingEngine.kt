@@ -140,13 +140,16 @@ class DrawingEngine(val width: Int, val height: Int) {
      * was evicted and frames must not block on disk. They stay dirty (their
      * composite pixels are stale) until the prefetched tiles are adopted.
      */
-    private val deferred = Rect()
+    private val pending = ArrayList<Rect>()
+    /** Start of the current flush, for the per-frame composite time budget. */
+    private var frameStart = 0L
+    /** Cold composite tiles the current flush may still queue for prefetch. */
+    private var prefetchLeft = 0
 
     init {
         TileCache.active?.let { c ->
             c.externalBytes = {
                 mapOf(
-                    "composite" to (compositeTiles?.residentBytes() ?: 0L),
                     "mip" to (mipTiles?.residentBytes() ?: 0L),
                     "strokeCache" to strokeCacheBytes(),
                     "captures" to TileCapture.liveBytes
@@ -159,7 +162,7 @@ class DrawingEngine(val width: Int, val height: Int) {
      * True when compositing [r] would read an evicted tile of a layer other than
      * the active one. Schedules those tiles for prefetch.
      */
-    private fun needsDisk(r: Rect): Boolean {
+    private fun needsDisk(r: Rect, prefetch: Boolean = true): Boolean {
         val active = activeLayer
         var found = false
         // Layers the stroke caches already cover for this tile are not read by
@@ -177,21 +180,24 @@ class DrawingEngine(val width: Int, val height: Int) {
             if (belowCovered && i < belowFrom) continue
             if (aboveCovered && i >= aboveFrom) continue
             val st = l.tiles as? SparseTileStore
-            if (st != null && st.hasEvictedIn(r)) {
-                st.prefetchIn(r)
-                found = true
-            }
+            if (st != null && st.hasEvictedIn(r, prefetch)) found = true
             val m = l.maskTiles as? SparseTileStore
-            if (m != null && l.maskEnabled && m.hasEvictedIn(r)) {
-                m.prefetchIn(r)
-                found = true
-            }
+            if (m != null && l.maskEnabled && m.hasEvictedIn(r, prefetch)) found = true
         }
         return found
     }
 
+    /**
+     * The sparse composite. Stage 3c: it is registered with the tile cache too,
+     * because an 8192^2 document with an opaque background would otherwise pin
+     * a full 256 MB composite. Its viewport tiles are touched every frame, so
+     * LRU evicts layer tiles and off-screen composite tiles first.
+     */
     private fun newCompositeStore(bg: Int): SparseTileStore =
-        SparseTileStore(width, height, TileStoreConfig.tileSize, null, null, bg)
+        SparseTileStore(
+            width, height, TileStoreConfig.tileSize, null, null, bg,
+            cache = TileCache.active
+        ).also { it.cacheRole = "composite" }
 
     val activeLayer: Layer? get() = layers.getOrNull(activeIndex)
     val isTransparentBackground: Boolean get() = Color.alpha(backgroundColor) < 255
@@ -490,23 +496,46 @@ class DrawingEngine(val width: Int, val height: Int) {
         dirty.set(0, 0, width, height)
     }
 
-    fun hasDirty(): Boolean = !dirty.isEmpty
+    fun hasDirty(): Boolean = !dirty.isEmpty || pending.isNotEmpty()
 
-    /** Rebuilds the dirty part of the composite. Returns true if anything changed. */
+    /**
+     * Rebuilds the dirty part of the composite. Returns true if anything changed.
+     *
+     * Composite tiles a non-blocking frame could not finish (time budget, or an
+     * evicted tile still loading) are kept as their own per-tile rects, never
+     * merged into one bounding box: a box would re-include tiles already done
+     * and, at 8K, never converge.
+     */
     fun flush(): Boolean {
-        if (dirty.isEmpty) return false
-        deferred.setEmpty()
-        compositeRegion(dirty)
-        if (sparseMode) mipDirtyUnion(dirty)
-        dirty.set(deferred)
+        if (dirty.isEmpty && pending.isEmpty()) return false
+        frameStart = System.nanoTime()
+        prefetchLeft = 4
+        val retry = ArrayList(pending)
+        pending.clear()
+        if (!dirty.isEmpty) {
+            // New damage first: it is what the user is looking at right now.
+            val d = Rect(dirty)
+            dirty.setEmpty()
+            compositeRegion(d)
+            if (sparseMode) mipDirtyUnion(d)
+        }
+        for (r in retry) {
+            compositeRegion(r)
+            if (sparseMode) mipDirtyUnion(r)
+        }
         TileCache.active?.let { if (it.evictEveryOp) it.evictTo() }
         return true
     }
 
     /** Composite area still waiting for prefetched tiles (stale on screen). */
-    fun deferredRect(): Rect = Rect(dirty)
+    fun deferredRect(): Rect {
+        val out = Rect(dirty)
+        for (r in pending) if (out.isEmpty) out.set(r) else out.union(r)
+        return out
+    }
 
     fun compositeAll() {
+        pending.clear()
         compositeRegion(Rect(0, 0, width, height))
         if (sparseMode) mipDirtyUnion(Rect(0, 0, width, height))
         dirty.setEmpty()
@@ -543,7 +572,11 @@ class DrawingEngine(val width: Int, val height: Int) {
         stagePool.trim()
         val cache = TileCache.active
         val nonBlocking = cache != null && !cache.blockingLoads
-        val passStart = System.nanoTime()
+        val passStart = if (nonBlocking) frameStart else System.nanoTime()
+        // Only the next few cold tiles (in scan order) are prefetched: queueing
+        // every deferred tile of a whole-canvas recomposite loads tiles in an
+        // order the compositor does not consume them in, and they are evicted
+        // again before use.
         for (ty in ty0..ty1) {
             for (tx in tx0..tx1) {
                 r.set(
@@ -555,7 +588,8 @@ class DrawingEngine(val width: Int, val height: Int) {
                     CompositeProfile.tileVisits++
                     CompositeProfile.compositePx += r.width().toLong() * r.height().toLong()
                 }
-                val existed = st.getTile(tx, ty) != null
+                // No disk read just to learn whether the tile exists.
+                val existed = st.hasTile(tx, ty)
                 sub.set(rect)
                 sub.intersect(r)
                 if (sub.isEmpty) continue
@@ -571,12 +605,20 @@ class DrawingEngine(val width: Int, val height: Int) {
                 ) {
                     sub.set(r)
                 }
+                if (sub == r && st.isEvicted(tx, ty)) {
+                    // Fully re-rendered below: its old pixels are not needed.
+                    st.clearTile(tx, ty)
+                }
                 val overTime = nonBlocking &&
                     System.nanoTime() - passStart > cache!!.frameCompositeBudgetNs
                 if (overTime) cache!!.deferredTime++
-                if (nonBlocking && (overTime || needsDisk(sub))) {
+                val compositeCold = nonBlocking && sub != r && st.isEvicted(tx, ty)
+                val mayPrefetch = !overTime && prefetchLeft > 0
+                if (compositeCold && mayPrefetch) st.prefetchIn(r)
+                if (nonBlocking && (overTime || compositeCold || needsDisk(sub, mayPrefetch))) {
+                    if (mayPrefetch) prefetchLeft--
                     // Keep the stale composite pixels; retry once the tiles land.
-                    if (deferred.isEmpty) deferred.set(sub) else deferred.union(sub)
+                    pending.add(Rect(sub))
                     cache.deferredTiles++
                     continue
                 }
@@ -1647,6 +1689,12 @@ class DrawingEngine(val width: Int, val height: Int) {
     /** False when decoding [extra] more full-canvas surfaces would exceed the budget. */
     fun canAfford(extra: Int): Boolean {
         if (!sparseMode) return MemoryBudget.fitsBitmaps(width, height, visibleBitmapNeed() + extra)
+        // Stage 3c: with the tile cache, resident memory is held to the cache
+        // budget by eviction, so what can run out is storage for the spill.
+        if (TileCache.active != null) {
+            return MemoryBudget.freeDisk() >= MemoryBudget.layerBytes(width, height) / 8 * extra +
+                MemoryBudget.DISK_HEADROOM
+        }
         // Sparse documents only pay for the tiles they hold: painted layers are
         // counted from resident bytes, and a layer that is not decoded yet is
         // budgeted at an eighth of a canvas.
@@ -1660,7 +1708,7 @@ class DrawingEngine(val width: Int, val height: Int) {
 
     /** False when restoring [state] would exceed the bitmap budget. */
     fun canAffordState(state: DocumentState): Boolean =
-        MemoryBudget.fitsBitmaps(width, height, stateBitmapNeed(state))
+        sparseMode || MemoryBudget.fitsBitmaps(width, height, stateBitmapNeed(state))
 
     /** Extra bitmaps [mergeDown] needs at its peak (sources + merged copy). */
     fun mergeCost(id: Long): Int {

@@ -299,11 +299,26 @@ class ProjectStore(private val context: Context) {
     ): LoadedProject {
         val id = UUID.randomUUID().toString()
         val dir = projectDir(id).apply { mkdirs() }
-        val blank = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val layer = LayerSnapshotData("Layer 1", blank, 1f, LayerBlend.Normal, true, false)
-
-        writeLayer(dir, 0, blank)
-        val thumb = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        // Stage 3c: no canvas-sized bitmap at creation. The blank layer PNG is
+        // band-encoded from zeros; a sparse document opens it lazily, a dense
+        // one still gets its full surface (the dense engine needs it anyway).
+        val sparse = com.yume.app.engine.TileStoreConfig.useSparseLayers
+        val file0 = File(dir, "layer_0.png")
+        java.io.BufferedOutputStream(FileOutputStream(file0), 1 shl 16).use { out ->
+            com.yume.app.engine.BandedPng.encode(out, width, height, ENCODE_BAND) { _, rows, px ->
+                java.util.Arrays.fill(px, 0, rows * width, 0)
+            }
+        }
+        val blank = if (sparse) null else Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val layer = LayerSnapshotData(
+            "Layer 1", blank, 1f, LayerBlend.Normal, true, false,
+            file = if (sparse) file0 else null
+        )
+        val scale = 512f / maxOf(width, height)
+        val thumb = Bitmap.createBitmap(
+            (width * scale).toInt().coerceAtLeast(1), (height * scale).toInt().coerceAtLeast(1),
+            Bitmap.Config.ARGB_8888
+        )
         val c = android.graphics.Canvas(thumb)
         c.drawColor(background)
         writeThumb(dir, thumb)

@@ -18,6 +18,7 @@ import com.yume.app.YumeApp
 import com.yume.app.data.ProjectStore
 import com.yume.app.engine.AdjustmentKind
 import com.yume.app.engine.AllocTracker
+import com.yume.app.engine.MemoryBudget
 import com.yume.app.engine.BrushCategory
 import com.yume.app.engine.BrushDab
 import com.yume.app.engine.BrushPreset
@@ -147,6 +148,8 @@ object YumeHarness {
                     out.append(scoreCacheFailures(app))
                     out.append(scoreGoldenEvict(app))
                     out.append(scoreCacheBig(app))
+                } else if (only == "accept8k") {
+                    out.append(scoreAcceptance8k(app))
                 } else if (only == "journal") {
                     out.append(scoreJournal(app))
                     out.append(line(scoreHistorySpill(app)))
@@ -220,6 +223,7 @@ object YumeHarness {
                 out.append(scoreCacheFailures(app))
                 out.append(scoreGoldenEvict(app))
                 out.append(scoreCacheBig(app))
+                out.append(scoreAcceptance8k(app))
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "harness failed", t)
@@ -3049,6 +3053,245 @@ object YumeHarness {
             TileStoreConfig.useSparseLayers = oldS
             TileStoreConfig.tileSize = oldT
         }
+    }
+
+
+    /** CRC of a store's pixels read band by band (no canvas-sized bitmap). */
+    private fun bandHash(store: com.yume.app.engine.TileStore): String {
+        val w = store.width
+        val h = store.height
+        val rows = 256
+        val band = Bitmap.createBitmap(w, min(rows, h), Bitmap.Config.ARGB_8888)
+        val px = IntArray(w)
+        val crc = java.util.zip.CRC32()
+        val bytes = ByteArray(w * 4)
+        var y = 0
+        while (y < h) {
+            val n = min(rows, h - y)
+            store.readRectInto(Rect(0, y, w, y + n), band)
+            for (r in 0 until n) {
+                band.getPixels(px, 0, w, 0, r, w, 1)
+                var o = 0
+                for (c in px) {
+                    bytes[o] = (c ushr 24).toByte(); bytes[o + 1] = (c ushr 16).toByte()
+                    bytes[o + 2] = (c ushr 8).toByte(); bytes[o + 3] = c.toByte()
+                    o += 4
+                }
+                crc.update(bytes, 0, w * 4)
+            }
+            y += n
+        }
+        band.recycle()
+        return "%08x".format(crc.value)
+    }
+
+    /**
+     * Stage 3c acceptance on the device: an 8192^2 document with 30 painted
+     * layers through paint, transform, blur, merge, undo/redo, save, close and
+     * reopen. The allocation counter runs for the whole sequence and must stay
+     * empty; the flattened hash before saving must match after reopening.
+     */
+    private fun scoreAcceptance8k(app: YumeApp): String {
+        val out = StringBuilder()
+        val size = 8192
+        val layers = 30
+        val ps = app.projectStore
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = 256
+        val am = app.getSystemService(android.app.ActivityManager::class.java)
+        val budget = TileCache.defaultBudget(am)
+        var cache: TileCache? = null
+        val rt = Runtime.getRuntime()
+        var javaPeak = 0L
+        var nativePeak = 0L
+        fun sample() {
+            javaPeak = max(javaPeak, rt.totalMemory() - rt.freeMemory())
+            nativePeak = max(nativePeak, android.os.Debug.getNativeHeapAllocatedSize())
+        }
+        fun ms(t0: Long) = "%.0f".format((System.nanoTime() - t0) / 1e6)
+        AllocTracker.reset(size, size)
+        AllocTracker.enabled = true
+        val fits = MemoryBudget.fitsDocument(size, size, 1)
+        val project = ps.createProject("harness-8k", size, size, BG)
+        try {
+            cache = TileCache.open(app.cacheDir, project.id, budget)
+            val c0 = cache!!
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("8k", "8K", engine, History())
+            session.history.spill = com.yume.app.engine.HistorySpill(File(c0.dir, "history.spill"))
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            val noise = (0 until 4).map { noiseTile(800 + it, 256, opaque = true) }
+            var t0 = System.nanoTime()
+            var noiseTiles = 0
+            for (i in 0 until layers) {
+                val l = engine.newLayer("L$i")
+                l.opacity = if (i % 4 == 0) 0.85f else 1f
+                l.blend = if (i % 5 == 3) LayerBlend.Multiply else LayerBlend.Normal
+                // A flat region (shared solids), a few noise tiles, three strokes.
+                val top = (i * 211) % (size / 2)
+                l.tiles.fillRect(Rect(i * 64, top, size - i * 32, top + size / 3), 0xFF000000.toInt() or (i * 0x070B0D and 0xFFFFFF))
+                val rnd = Random(9000L + i)
+                for (k in 0 until 80) {
+                    val tx = rnd.nextInt(32)
+                    val ty = rnd.nextInt(32)
+                    l.tiles.writeRect(Rect(tx * 256, ty * 256, tx * 256 + 256, ty * 256 + 256), noise[k % 4], Rect(0, 0, 256, 256))
+                    noiseTiles++
+                }
+                engine.selectLayer(l.id)
+                session.color = 0xFF000000.toInt() or ((i * 0x135791) and 0xFFFFFF)
+                for (s in 0 until 3) {
+                    val y = 400f + ((i * 3 + s) * 251) % (size - 800)
+                    session.stroke(listOf(P(200f, y), P(size * 0.5f, y + 900f), P(size - 200f, y)))
+                }
+                l.touch()
+                c0.safePoint()
+                sample()
+            }
+            engine.markDirtyAll()
+            engine.flush()
+            c0.safePoint()
+            sample()
+            out.append("accept-8k create ${size}x$size x$layers noiseTiles=$noiseTiles budget=${budget shr 20}MB")
+                .append(" guardAllows=$fits time=${ms(t0)}ms\n")
+
+            // Painting frames on the top layer (renderer-style frames).
+            engine.selectLayer(engine.layers.last().id)
+            c0.resetCounters()
+            fun frame(block: () -> Unit): Long {
+                val f0 = System.nanoTime()
+                c0.adoptPrefetched()
+                block()
+                c0.blockingLoads = false
+                try { engine.flush() } finally { c0.blockingLoads = true }
+                c0.evictIfNeeded()
+                sample()
+                return System.nanoTime() - f0
+            }
+            val paint = ArrayList<Long>()
+            session.pushInput(InputEvent.Down(0, 3000f, 3000f, 1f, 0f, true, false))
+            session.runInput()
+            val steps = 960
+            var i = 1
+            while (i <= steps) {
+                val end = min(i + 8, steps + 1)
+                paint.add(frame {
+                    while (i < end) {
+                        val t = i / steps.toFloat()
+                        // A hand-speed stroke: ~2000 px over 120 frames (1 s).
+                        session.pushInput(
+                            InputEvent.Move(
+                                0, floatArrayOf(3000f + t * 2000f),
+                                floatArrayOf(3000f + sin(t * 6f) * 600f), floatArrayOf(1f), 0f
+                            )
+                        )
+                        session.runInput()
+                        i++
+                    }
+                })
+            }
+            session.pushInput(InputEvent.Up(0))
+            session.runInput()
+            run { var g = 0; while (engine.hasDirty() && g++ < 20000) frame { } }
+            out.append(frameLine("accept-8k painting", paint))
+                .append(" syncRender=${c0.syncLoadsRender} deferred=${c0.deferredTiles} evict=${c0.evictions}\n")
+
+            // One-shot operations.
+            fun op(name: String, block: () -> Unit) {
+                val s0 = System.nanoTime()
+                block()
+                run { var g = 0; while (engine.hasDirty() && g++ < 20000) frame { } }
+                c0.safePoint()
+                sample()
+                out.append("accept-8k op $name: ${ms(s0)}ms\n")
+            }
+            op("transform") {
+                session.chooseTool(Tool.Transform)
+                session.runCommands()
+                session.pushInput(InputEvent.Gesture(size * 0.5f, size * 0.5f, 1f, 37f, -21f, 0f))
+                session.runInput()
+                session.commitTransform()
+                session.runCommands()
+                session.chooseTool(Tool.Brush)
+                session.runCommands()
+            }
+            op("blur") {
+                session.previewAdjustment(AdjustmentKind.Blur, 0.3f)
+                session.consumePendingPreview()
+                session.commitAdjustment()
+                session.runCommands()
+            }
+            op("merge") { session.mergeDown(); session.runCommands() }
+            op("undo x3") { repeat(3) { session.undo(); session.runCommands() } }
+            op("redo x3") { repeat(3) { session.redo(); session.runCommands() } }
+
+            engine.compositeAll()
+            c0.safePoint()
+            val hashBefore = bandHash(engine.compositeTiles!!)
+            t0 = System.nanoTime()
+            ps.saveProject(project.id, session.snapshotNow())
+            val saveMs = ms(t0)
+            val complete = ps.lastSaveComplete
+            sample()
+            val stats = c0.stats()
+            val acc = c0.accounting().entries.joinToString(" ") { "${it.key}=${it.value shr 20}MB" }
+            val peak = c0.peakResident
+            val hist = session.history
+            val histNote = "historySpilled=${hist.spilledActions} historyDisk=${(hist.spill?.diskBytes ?: 0) shr 20}MB"
+            hist.spill?.close()
+            c0.close()
+            cache = null
+            noise.forEach { it.recycle() }
+            Runtime.getRuntime().gc()
+            out.append("accept-8k save: ${saveMs}ms complete=$complete warning=${ps.saveWarning ?: "none"} | $stats\n")
+            out.append("accept-8k accounting at close: $acc peakResident=${peak shr 20}MB $histNote\n")
+            ps.saveWarning = null
+
+            t0 = System.nanoTime()
+            val c1 = TileCache.open(app.cacheDir, project.id, budget)
+            cache = c1
+            val loaded = ps.loadProject(project.id) ?: error("reload failed")
+            val re = DrawingEngine(size, size)
+            re.backgroundColor = loaded.background
+            for (d in loaded.layers) {
+                val l = re.newLayer(name = d.name, bitmap = d.bitmap, backingFile = d.file)
+                l.adoptMask(d.mask, d.maskFile)
+                l.opacity = d.opacity
+                l.blend = d.blend
+                l.visible = d.visible
+            }
+            re.compositeAll()
+            c1.safePoint()
+            sample()
+            val openMs = ms(t0)
+            val hashAfter = bandHash(re.compositeTiles!!)
+            AllocTracker.enabled = false
+            val alloc = AllocTracker.table()
+            val allocOk = AllocTracker.sites().isEmpty()
+            val verdict = if (hashAfter == hashBefore && allocOk && complete) "PASS" else "FAIL"
+            out.append("accept-8k reopen: $verdict before=$hashBefore after=$hashAfter open=${openMs}ms")
+                .append(" alloc=[${alloc.ifEmpty { "none" }}] | ${c1.stats()}\n")
+            out.append("accept-8k memory: javaHeapPeak=${javaPeak shr 20}MB nativeHeapPeak=${nativePeak shr 20}MB")
+                .append(" largeHeap=${(am?.largeMemoryClass ?: 0)}MB\n")
+        } catch (t: Throwable) {
+            Log.e(TAG, "8k acceptance failed", t)
+            out.append("accept-8k: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            AllocTracker.enabled = false
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
+            Runtime.getRuntime().gc()
+        }
+        return out.toString()
     }
 
     private fun pct(sorted: LongArray, q: Double): String {

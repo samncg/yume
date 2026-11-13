@@ -1073,9 +1073,9 @@ class DrawingSession(
     }
 
     fun addLayer() = post {
-        if (!MemoryBudget.fits(engine.width, engine.height, engine.layers.size + 1)) {
+        if (!MemoryBudget.fitsDocument(engine.width, engine.height, engine.layers.size + 1)) {
             onMessage?.invoke(
-                MemoryBudget.layerRefusal(engine.width, engine.height, engine.layers.size + 1)
+                MemoryBudget.documentRefusal(engine.width, engine.height, engine.layers.size + 1)
             )
             return@post
         }
@@ -1086,9 +1086,9 @@ class DrawingSession(
 
     /** Adds an imported bitmap as a new layer, scaled to fit the canvas. */
     fun addImageLayer(source: Bitmap, name: String) = post {
-        if (!MemoryBudget.fits(engine.width, engine.height, engine.layers.size + 1)) {
+        if (!MemoryBudget.fitsDocument(engine.width, engine.height, engine.layers.size + 1)) {
             onMessage?.invoke(
-                MemoryBudget.layerRefusal(engine.width, engine.height, engine.layers.size + 1)
+                MemoryBudget.documentRefusal(engine.width, engine.height, engine.layers.size + 1)
             )
             return@post
         }
@@ -1568,6 +1568,8 @@ class DrawingSession(
 
     /** Conservative check for jump/delete, which may visit many states. */
     private fun historyFits(): Boolean {
+        // Sparse states hold tiles, not full-canvas bitmaps.
+        if (engine.compositeIsSparse) return true
         val need = history.maxStateBitmapNeed(engine)
         if (MemoryBudget.fitsBitmaps(engine.width, engine.height, need)) return true
         val extra = (need - engine.visibleBitmapNeed()).coerceAtLeast(1)

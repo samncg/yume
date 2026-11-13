@@ -98,4 +98,52 @@ object MemoryBudget {
     }
 
     fun formatMb(bytes: Long): String = "${bytes / MB} MB"
+
+    // ------------------------------------------------------ sparse (Stage 3c)
+
+    /** Largest canvas edge the sparse engine accepts. */
+    const val MAX_SPARSE_EDGE = 8192
+
+    /** Free storage always kept back for saves, journal and spill growth. */
+    const val DISK_HEADROOM = 512L * 1024L * 1024L
+
+    /** Where spills live (the app cache); set at start-up. */
+    @Volatile var diskRoot: java.io.File? = null
+
+    fun freeDisk(): Long = runCatching {
+        android.os.StatFs((diskRoot ?: return Long.MAX_VALUE).path).availableBytes
+    }.getOrDefault(Long.MAX_VALUE)
+
+    private val sparse: Boolean get() = TileStoreConfig.useSparseLayers
+
+    /**
+     * Storage a sparse document should have free: one fully painted layer's
+     * raw spill (the worst single-layer burst) plus headroom. Memory is held to
+     * the tile cache budget by eviction, so it is not the limit any more.
+     */
+    fun sparseDiskNeed(width: Int, height: Int): Long = layerBytes(width, height) + DISK_HEADROOM
+
+    /** Sparse-aware canvas / layer check (dense keeps the bitmap estimate). */
+    fun fitsDocument(width: Int, height: Int, layers: Int): Boolean =
+        if (sparse) {
+            width <= MAX_SPARSE_EDGE && height <= MAX_SPARSE_EDGE &&
+                freeDisk() >= sparseDiskNeed(width, height)
+        } else {
+            fits(width, height, layers)
+        }
+
+    fun documentRefusal(width: Int, height: Int, layers: Int): String =
+        if (sparse) {
+            if (width > MAX_SPARSE_EDGE || height > MAX_SPARSE_EDGE) {
+                "Canvases are limited to $MAX_SPARSE_EDGE px per side"
+            } else {
+                "Not enough free storage for a $width × $height document " +
+                    "(needs ≈ ${formatMb(sparseDiskNeed(width, height))} free for its tile cache)"
+            }
+        } else {
+            layerRefusal(width, height, layers)
+        }
+
+    /** Layers a new document can be expected to hold (sparse: storage bound). */
+    fun maxLayersFor(width: Int, height: Int): Int = if (sparse) 512 else maxLayers(width, height)
 }

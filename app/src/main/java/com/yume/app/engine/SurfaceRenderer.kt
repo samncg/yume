@@ -290,6 +290,9 @@ class SurfaceRenderer(
                             (l.tiles as? SparseTileStore)?.prefetchIn(prefetchRect)
                             (l.maskTiles as? SparseTileStore)?.prefetchIn(prefetchRect)
                         }
+                        // The composite is what is on screen: keep the tiles
+                        // around the viewport warm so panning rarely reads disk.
+                        engine.compositeTiles?.prefetchIn(prefetchRect)
                     }
                 }
             } else {

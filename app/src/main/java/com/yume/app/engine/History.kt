@@ -147,7 +147,8 @@ data class HistoryEntry(
 )
 
 class History(
-    private val maxBytes: Long = 320L * 1024L * 1024L
+    /** In-memory cap; lowered to [SPILL_MEM_CAP] once a disk tier is attached. */
+    var maxBytes: Long = 320L * 1024L * 1024L
 ) {
     private val undoStack = ArrayDeque<HistoryAction>()
     private val redoStack = ArrayDeque<HistoryAction>()
@@ -159,7 +160,16 @@ class History(
      * history depth is then bounded by [diskCap].
      */
     var spill: HistorySpill? = null
+        set(value) {
+            field = value
+            // With a disk tier, older steps cost storage, not memory.
+            if (value != null) maxBytes = minOf(maxBytes, SPILL_MEM_CAP)
+        }
     var diskCap: Long = 1024L * 1024L * 1024L
+
+    companion object {
+        const val SPILL_MEM_CAP = 64L * 1024L * 1024L
+    }
     var spilledActions: Long = 0L; private set
     var loadedActions: Long = 0L; private set
     /** Set when a spilled step could not be read back (that step is skipped). */

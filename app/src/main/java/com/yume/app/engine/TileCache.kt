@@ -109,11 +109,17 @@ class TileCache(
         val m = LinkedHashMap<String, Long>()
         var layers = 0L
         var masks = 0L
+        var composite = 0L
         for (s in liveStores()) {
-            if (s.defaultPixel == 0) layers += s.residentBytes() else masks += s.residentBytes()
+            when (s.cacheRole) {
+                "composite" -> composite += s.residentBytes()
+                "mask" -> masks += s.residentBytes()
+                else -> layers += s.residentBytes()
+            }
         }
         m["layers"] = layers
         m["masks"] = masks
+        m["composite"] = composite
         for ((k, v) in externalBytes()) m[k] = v
         m["pool"] = TilePool.heldBytes
         m["solids"] = SolidTiles.stats().second
@@ -129,7 +135,51 @@ class TileCache(
      * [target] (default: the budget). Dirty tiles are written first; a tile
      * whose write fails stays resident. Returns the number evicted.
      */
-    fun evictTo(target: Long = budgetBytes): Int {
+    // Hot ring: the last [HOT] tiles handed out by any registered store. Code
+    // holds at most a couple of tile references across a load (merge reads a
+    // source and a destination tile; history reads before and after), so a
+    // tile in the ring is never evicted and an evicted bitmap can go straight
+    // back to the pool instead of piling up native memory until a GC.
+    private val hotStore = arrayOfNulls<SparseTileStore>(HOT)
+    private val hotKey = LongArray(HOT)
+    private var hotNext = 0
+
+    fun markHot(store: SparseTileStore, key: Long) {
+        hotStore[hotNext] = store
+        hotKey[hotNext] = key
+        hotNext = (hotNext + 1) % HOT
+    }
+
+    fun isHot(store: SparseTileStore, key: Long): Boolean {
+        for (i in 0 until HOT) if (hotStore[i] === store && hotKey[i] == key) return true
+        return false
+    }
+
+    /** An evicted private bitmap: nothing outside the hot ring can hold it. */
+    fun bury(bmp: Bitmap) {
+        TilePool.release(bmp)
+    }
+
+    fun releaseBuried() = Unit
+
+    /**
+     * Evicts least recently used tiles until the accounted total is at most
+     * [target]. At most [maxDirtyWrites] dirty tiles are written (the render
+     * thread passes a small number so a frame never deflates many tiles); clean
+     * ones are free to drop. If that leaves the cache far over budget, dirty
+     * tiles are flushed regardless.
+     */
+    fun evictTo(target: Long = budgetBytes, maxDirtyWrites: Int): Int {
+        val n = evictLimited(target, maxDirtyWrites)
+        if (maxDirtyWrites != Int.MAX_VALUE && residentBytes() > target + target / 2) {
+            return n + evictLimited(target, Int.MAX_VALUE)
+        }
+        return n
+    }
+
+    fun evictTo(target: Long = budgetBytes): Int = evictLimited(target, Int.MAX_VALUE)
+
+    private fun evictLimited(target: Long, maxDirtyWrites: Int): Int {
         var total = residentBytes()
         if (total > peakResident) peakResident = total
         if (total <= target) return 0
@@ -143,8 +193,13 @@ class TileCache(
         for (s in liveStores()) s.collectEvictable(cands)
         cands.sortBy { it.lastUse }
         var n = 0
+        var dirty = 0
         for (c in cands) {
             if (total <= target) break
+            if (!c.clean) {
+                if (dirty >= maxDirtyWrites) continue
+                dirty++
+            }
             val freed = c.store.evictTile(c.key)
             if (freed > 0) {
                 total -= freed
@@ -170,6 +225,7 @@ class TileCache(
      * since the last check, because nothing can then have grown.
      */
     fun evictIfNeeded(): Int {
+        releaseBuried()
         val acq = TilePool.acquisitions
         if (acq == lastAcq) return 0
         // Upper bound on growth since the last exact count: every acquisition a
@@ -178,8 +234,10 @@ class TileCache(
         val grown = (acq - lastAcq).coerceAtLeast(0L) * 256L * 256L * 4L
         if (lastAcq >= 0 && lastTotal + grown <= budgetBytes) return 0
         lastAcq = acq
-        val n = evictTo()
+        // A frame safe point: write at most a few dirty tiles.
+        val n = evictTo(budgetBytes, FRAME_DIRTY_WRITES)
         lastTotal = residentBytes()
+        releaseBuried()
         return n
     }
 
@@ -190,13 +248,17 @@ class TileCache(
         var n = 0
         for (s in liveStores()) n += s.evictAllUnpinned()
         maybeCompact()
+        releaseBuried()
         return n
     }
 
     /** Safe point between operations / frames: adopt prefetched tiles, enforce the budget. */
     fun safePoint() {
+        releaseBuried()
         adoptPrefetched()
-        evictIfNeeded()
+        evictTo()
+        lastTotal = residentBytes()
+        releaseBuried()
     }
 
     private fun maybeCompact() {
@@ -368,6 +430,11 @@ class TileCache(
 
     companion object {
         private val FAILED: Bitmap by lazy { Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888) }
+
+        private const val HOT = 16
+
+        /** Dirty tiles a render-frame safe point may write (deflate) at most. */
+        const val FRAME_DIRTY_WRITES = 1
 
         /** The cache new layer / mask stores register with (null = no eviction). */
         @Volatile var active: TileCache? = null
