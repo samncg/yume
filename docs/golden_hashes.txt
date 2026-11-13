@@ -882,3 +882,21 @@ feature=72-gradient-selection L0=c37ad379 L1=d29e2f3e/e068eda2 L2=f5a33c80 L3=23
 feature=73-gradient-alpha-lock L0=c37ad379 L1=d29e2f3e/e068eda2 L2=cd613969 L3=23eae7e1 C=340c2091
 feature=74-gradient-mask L0=c37ad379 L1=d29e2f3e/af2bf5d0 L2=cd613969 L3=23eae7e1 C=94f12025
 feature=75-gradient-undo L0=c37ad379 L1=d29e2f3e/e068eda2 L2=cd613969 L3=23eae7e1 C=340c2091
+
+# ============================================================================
+# Stage 4.1 feature oracle: sharpen and motion blur (NEW entries, 76..79)
+# ============================================================================
+# Integer kernels on premultiplied pixels at absolute document positions
+# (canvas-edge clamp), run in 256 px chunks from the pre-edit snapshot with a
+# halo >= the kernel radius, through the same code on both stores: exact
+# (21 feature phases, 0 bad, sparse 256/64 vs dense, both canvases).
+# features dense 2048x2048
+feature=76-sharpen L0=a47ca14a L1=2b65f507/26abd433 L2=06f53d75 L3=4b4721c8 C=4ba9e532
+feature=77-motion-blur-h L0=a47ca14a L1=2b65f507/26abd433 L2=4ec576c2 L3=4b4721c8 C=c3f62afa
+feature=78-motion-blur-33deg L0=a47ca14a L1=8b813dce/26abd433 L2=4ec576c2 L3=4b4721c8 C=c9ef18d3
+feature=79-motion-blur-undo L0=a47ca14a L1=2b65f507/26abd433 L2=4ec576c2 L3=4b4721c8 C=c3f62afa
+# features dense 2000x1333
+feature=76-sharpen L0=c37ad379 L1=d29e2f3e/e068eda2 L2=a10526b2 L3=23eae7e1 C=0aeac130
+feature=77-motion-blur-h L0=c37ad379 L1=d29e2f3e/e068eda2 L2=520ff77c L3=23eae7e1 C=2f3b15e4
+feature=78-motion-blur-33deg L0=c37ad379 L1=0a7e7801/e068eda2 L2=520ff77c L3=23eae7e1 C=32b08edb
+feature=79-motion-blur-undo L0=c37ad379 L1=d29e2f3e/e068eda2 L2=520ff77c L3=23eae7e1 C=2f3b15e4

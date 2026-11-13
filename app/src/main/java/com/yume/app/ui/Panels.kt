@@ -1246,10 +1246,23 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
             SmallButton("Invert") { session.invertColors() }
             SmallButton("Grayscale") { session.grayscale() }
         }
-        if (kind == AdjustmentKind.Noise) {
+        if (kind == AdjustmentKind.MotionBlur) {
+            Spacer(Modifier.height(4.dp))
+            YumeSlider(
+                value = (state.motionAngle + 90f) / 180f,
+                onChange = { session.chooseMotionAngle(it * 180f - 90f) },
+                label = "Direction",
+                valueLabel = "${state.motionAngle.roundToInt()}°",
+                min = 0f,
+                max = 1f
+            )
+        }
+        if (kind == AdjustmentKind.Noise || kind == AdjustmentKind.Sharpen ||
+            kind == AdjustmentKind.MotionBlur
+        ) {
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "Noise is applied when you press Apply.",
+                text = "${kind.label} is applied when you press Apply.",
                 style = MaterialTheme.typography.bodySmall,
                 color = YumeColors.textDim
             )
@@ -1263,6 +1276,8 @@ private fun adjustRange(kind: AdjustmentKind): Pair<Float, Float> = when (kind) 
     AdjustmentKind.Brightness -> -0.9f to 0.9f
     AdjustmentKind.Blur -> 0f to 1f
     AdjustmentKind.Noise -> 0f to 1f
+    AdjustmentKind.Sharpen -> 0f to 1f
+    AdjustmentKind.MotionBlur -> 0f to 1f
 }
 
 private fun adjustValueLabel(kind: AdjustmentKind, amount: Float): String = when (kind) {
@@ -1271,6 +1286,8 @@ private fun adjustValueLabel(kind: AdjustmentKind, amount: Float): String = when
     AdjustmentKind.Brightness -> "${(amount * 100).roundToInt()}%"
     AdjustmentKind.Blur -> "${(amount * 24).roundToInt()} px"
     AdjustmentKind.Noise -> "${(amount * 100).roundToInt()}%"
+    AdjustmentKind.Sharpen -> "${(amount * 200).roundToInt()}%"
+    AdjustmentKind.MotionBlur -> "${(amount * 96).roundToInt()} px"
 }
 
 // =================================================================== history

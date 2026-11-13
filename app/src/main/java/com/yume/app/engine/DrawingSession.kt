@@ -28,7 +28,9 @@ enum class AdjustmentKind(val label: String) {
     Saturation("Saturation"),
     Brightness("Brightness"),
     Blur("Blur"),
-    Noise("Noise")
+    Noise("Noise"),
+    Sharpen("Sharpen"),
+    MotionBlur("Motion blur")
 }
 
 data class LayerSnapshotData(
@@ -167,6 +169,22 @@ class DrawingSession(
     @Volatile var fillLayerOnly: Boolean = false
     @Volatile var fillSelection: Boolean = true
     @Volatile var fillExpand: Int = 1
+
+    /** Direction of the motion blur adjustment, in degrees. */
+    @Volatile var motionAngle: Float = 0f
+
+    fun chooseMotionAngle(deg: Float) {
+        motionAngle = deg
+        requestState()
+    }
+
+    /** Pixels an adjustment reads beyond what it writes (0 = per pixel). */
+    private fun haloOf(kind: AdjustmentKind): Int = when (kind) {
+        AdjustmentKind.Blur -> blurHalo
+        AdjustmentKind.Sharpen -> 2
+        AdjustmentKind.MotionBlur -> MOTION_MAX_RADIUS + 1
+        else -> 0
+    }
 
     // Gradient tool (Stage 4.1).
     @Volatile var gradientKind: Gradients.Kind = Gradients.Kind.Linear
@@ -1853,6 +1871,7 @@ class DrawingSession(
 
     /** Largest blur halo a preview or a bake can reach (3 passes x 24 px). */
     private val blurHalo = 3 * 24 + 2
+    private val MOTION_MAX_RADIUS = 48
 
     private fun growBounds(r: Rect, by: Int): Rect {
         val out = Rect(r)
@@ -1915,12 +1934,9 @@ class DrawingSession(
             // which is correct there because the content really is empty.
             val base = editBounds(store)
             if (base.isEmpty) return
-            adjustWork = if (kind == AdjustmentKind.Blur) growBounds(base, blurHalo) else base
-            adjustBounds = if (kind == AdjustmentKind.Blur) {
-                growBounds(base, blurHalo * 2)
-            } else {
-                base
-            }
+            val halo = haloOf(kind)
+            adjustWork = if (halo > 0) growBounds(base, halo) else base
+            adjustBounds = if (halo > 0) growBounds(base, halo * 2) else base
             if (adjustCapture == null && store.isSparse) {
                 adjustCapture = TileOps.capture(store, adjustBounds)
             } else if (adjustSnapshot == null && !store.isSparse) {
@@ -1957,7 +1973,9 @@ class DrawingSession(
                 adjustProxy = proxy
                 LayerPreview(layer.id, null, proxy)
             }
-            AdjustmentKind.Noise -> null
+            // Neighbourhood filters are baked exactly on Apply (no proxy: a
+            // quarter-resolution sharpen would only look blurry).
+            AdjustmentKind.Noise, AdjustmentKind.Sharpen, AdjustmentKind.MotionBlur -> null
         }
         engine.applyPreview(preview)
         requestState()
@@ -2031,6 +2049,15 @@ class DrawingSession(
                 AdjustmentKind.Blur ->
                     TileOps.blur(store, capture, work, (amount * 24f).toInt().coerceIn(1, 24))
                 AdjustmentKind.Noise -> TileOps.noise(store, work, amount.coerceIn(0f, 1f))
+                AdjustmentKind.Sharpen -> Kernels.sharpen(
+                    engine.width, engine.height, work, amount.coerceIn(0f, 1f) * 2f,
+                    Kernels.captureSource(capture)
+                ) { r, bmp -> store.writeRect(r, bmp, Rect(0, 0, r.width(), r.height())) }
+                AdjustmentKind.MotionBlur -> Kernels.motionBlur(
+                    engine.width, engine.height, work,
+                    (amount.coerceIn(0f, 1f) * MOTION_MAX_RADIUS).toInt(), motionAngle,
+                    Kernels.captureSource(capture)
+                ) { r, bmp -> store.writeRect(r, bmp, Rect(0, 0, r.width(), r.height())) }
             }
             // The action covers the whole snapshot region: a blurred tile past
             // the work rect is unchanged, and copying it costs nothing extra.
@@ -2052,6 +2079,26 @@ class DrawingSession(
                 AdjustmentKind.Blur ->
                     Adjustments.blur(work, (amount * 24f).toInt().coerceIn(1, 24))
                 AdjustmentKind.Noise -> Adjustments.noise(work, amount.coerceIn(0f, 1f))
+                // Same chunked kernels as the sparse path, so both stores match.
+                AdjustmentKind.Sharpen -> Kernels.sharpen(
+                    engine.width, engine.height, Rect(0, 0, engine.width, engine.height),
+                    amount.coerceIn(0f, 1f) * 2f, Kernels.bitmapSource(snapshot)
+                ) { r, bmp ->
+                    android.graphics.Canvas(work).drawBitmap(
+                        bmp, r.left.toFloat(), r.top.toFloat(),
+                        Paint().apply { blendMode = BlendMode.SRC }
+                    )
+                }
+                AdjustmentKind.MotionBlur -> Kernels.motionBlur(
+                    engine.width, engine.height, Rect(0, 0, engine.width, engine.height),
+                    (amount.coerceIn(0f, 1f) * MOTION_MAX_RADIUS).toInt(), motionAngle,
+                    Kernels.bitmapSource(snapshot)
+                ) { r, bmp ->
+                    android.graphics.Canvas(work).drawBitmap(
+                        bmp, r.left.toFloat(), r.top.toFloat(),
+                        Paint().apply { blendMode = BlendMode.SRC }
+                    )
+                }
             }
             val full = Rect(0, 0, engine.width, engine.height)
             layer.tiles.writeRect(full, work)
@@ -2417,6 +2464,7 @@ class DrawingSession(
             fillExpand = fillExpand,
             gradientKind = gradientKind,
             gradientSecond = gradientSecond,
+            motionAngle = motionAngle,
             sparseLayers = TileStoreConfig.useSparseLayers,
             documentVersion = history.version + propertyVersion,
             backgroundColor = engine.backgroundColor,

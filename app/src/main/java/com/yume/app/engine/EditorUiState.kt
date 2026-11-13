@@ -79,6 +79,8 @@ data class EditorUiState(
     /** Gradient tool: linear or radial, from the current colour to [gradientSecond]. */
     val gradientKind: Gradients.Kind = Gradients.Kind.Linear,
     val gradientSecond: Int = 0x00FFFFFF,
+    /** Motion blur direction in degrees. */
+    val motionAngle: Float = 0f,
     /**
      * Debug: whether documents opened from now on use sparse tile layers.
      * Only surfaced in debuggable builds (Actions panel).

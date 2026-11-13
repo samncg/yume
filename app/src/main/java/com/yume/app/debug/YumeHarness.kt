@@ -3453,6 +3453,26 @@ object YumeHarness {
         session.undo()
         phase("75-gradient-undo")
         session.chooseTool(Tool.Brush)
+
+        // Sharpen and motion blur (Stage 4.1), exact per tile.
+        engine.selectLayer(top.id)
+        fun bake(kind: AdjustmentKind, amount: Float) {
+            session.previewAdjustment(kind, amount)
+            session.consumePendingPreview()
+            session.commitAdjustment()
+            session.runCommands()
+        }
+        bake(AdjustmentKind.Sharpen, 0.7f)
+        phase("76-sharpen")
+        session.motionAngle = 0f
+        bake(AdjustmentKind.MotionBlur, 0.4f)
+        phase("77-motion-blur-h")
+        engine.selectLayer(base.id)
+        session.motionAngle = 33f
+        bake(AdjustmentKind.MotionBlur, 0.25f)
+        phase("78-motion-blur-33deg")
+        session.undo()
+        phase("79-motion-blur-undo")
         return phases
     }
 
