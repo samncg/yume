@@ -8,7 +8,9 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
+import com.yume.app.BuildConfig
 import java.io.File
+import java.nio.IntBuffer
 import kotlin.math.max
 import kotlin.math.min
 
@@ -176,6 +178,24 @@ interface TileStore : PixelSource {
      */
     fun verifyOpaqueFlags(all: Boolean = true): Int = 0
 
+    /**
+     * Replaces tiles inside [rect] whose pixels are all identical with a shared
+     * immutable solid (or drops them when they equal the default). Called at
+     * stroke end, after one-shot ops, undo/redo and load, never per dab.
+     * Returns the number of tiles that are solid afterwards. Dense stores: 0.
+     */
+    fun compactSolids(rect: Rect): Int = 0
+
+    /** Tiles currently backed by a shared solid. */
+    fun solidTileCount(): Int = 0
+
+    /**
+     * Debug verifier for solid tiles: every tile marked solid must be a shared
+     * immutable bitmap whose pixels are uniform and equal its recorded colour,
+     * and every other tile must be a private mutable bitmap. Returns violations.
+     */
+    fun verifySolids(): Int = 0
+
     /** Full copy of the pixels. */
     fun copyAll(): Bitmap
 
@@ -226,6 +246,12 @@ object TileStoreConfig {
     /** Tile size used when [useSparseLayers] is on. */
     @Volatile var tileSize: Int = TileStore.TILE_SIZE
 
+    /**
+     * Layer and mask stores replace uniform tiles with shared immutable solids
+     * (see [SolidTiles]). Composite, mip and cache stores never do.
+     */
+    @Volatile var solidTiles: Boolean = true
+
     const val DEFAULT_TILE_SIZE: Int = TileStore.TILE_SIZE
 }
 
@@ -239,7 +265,10 @@ object TileStoreFactory {
         defaultPixel: Int = 0
     ): TileStore =
         if (TileStoreConfig.useSparseLayers) {
-            SparseTileStore(width, height, TileStoreConfig.tileSize, pixels, backing, defaultPixel)
+            SparseTileStore(
+                width, height, TileStoreConfig.tileSize, pixels, backing, defaultPixel,
+                solidTiles = TileStoreConfig.solidTiles
+            )
         } else {
             SingleTileStore(width, height, pixels, backing)
         }
@@ -249,7 +278,10 @@ object TileStoreFactory {
             // A blank sparse layer holds no tiles at all: allocating (and then
             // splitting) a full-canvas bitmap here used to cost one canvas per
             // layer creation.
-            SparseTileStore(width, height, TileStoreConfig.tileSize)
+            SparseTileStore(
+                width, height, TileStoreConfig.tileSize,
+                solidTiles = TileStoreConfig.solidTiles
+            )
         } else {
             SingleTileStore(
                 width, height,
@@ -262,7 +294,8 @@ object TileStoreFactory {
     fun opaque(width: Int, height: Int, color: Int): TileStore {
         if (TileStoreConfig.useSparseLayers) {
             return SparseTileStore(
-                width, height, TileStoreConfig.tileSize, null, null, color
+                width, height, TileStoreConfig.tileSize, null, null, color,
+                solidTiles = TileStoreConfig.solidTiles
             )
         }
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -277,7 +310,8 @@ object TileStoreFactory {
     fun mask(width: Int, height: Int, pixels: Bitmap?, backing: File?): TileStore =
         if (TileStoreConfig.useSparseLayers) {
             SparseTileStore(
-                width, height, TileStoreConfig.tileSize, pixels, backing, Color.WHITE
+                width, height, TileStoreConfig.tileSize, pixels, backing, Color.WHITE,
+                solidTiles = TileStoreConfig.solidTiles
             )
         } else if (pixels != null) {
             SingleTileStore(width, height, pixels, backing)
@@ -561,13 +595,24 @@ class SparseTileStore(
     override val tileSize: Int = TileStore.TILE_SIZE,
     pixels: Bitmap? = null,
     backing: File? = null,
-    override val defaultPixel: Int = 0
+    override val defaultPixel: Int = 0,
+    /** Replace uniform tiles with shared immutable solids ([SolidTiles]). */
+    val solidTiles: Boolean = false
 ) : TileStore {
 
     override val isSparse: Boolean = true
 
     private val tiles = HashMap<Long, Bitmap>()
     private val canvases = HashMap<Long, Canvas>()
+    /**
+     * Tiles backed by a shared immutable solid, with its unpremultiplied colour.
+     * Invariant: `tiles[k]` is a shared solid iff `k in solids`. Every write goes
+     * through [writableTile], which swaps a solid for a private copy first.
+     */
+    private val solids = HashMap<Long, Int>()
+    /** Solid -> private copies made because something wrote into a solid. */
+    var unshares: Long = 0L
+        private set
     private var backing: File? = if (pixels != null) null else backing
     private var materialized = pixels != null || backing == null
     private val dirty = Rect()
@@ -609,8 +654,18 @@ class SparseTileStore(
         return if (b < a) IntRange.EMPTY else a..b
     }
 
-    private fun canvasFor(k: Long, tile: Bitmap): Canvas =
-        canvases.getOrPut(k) { Canvas(tile) }
+    private fun canvasFor(k: Long, tile: Bitmap): Canvas {
+        if (BuildConfig.DEBUG && (k in solids || !tile.isMutable)) {
+            throw IllegalStateException("write canvas requested for shared solid tile $k")
+        }
+        return canvases.getOrPut(k) { Canvas(tile) }
+    }
+
+    /** Returns a private bitmap (never pooled or shared) to the pool. */
+    private fun releaseOwned(k: Long, b: Bitmap) {
+        if (solids.remove(k) != null) return
+        TilePool.release(b)
+    }
 
     private fun removeTile(k: Long) {
         val b = tiles.remove(k)
@@ -618,8 +673,172 @@ class SparseTileStore(
         // A removed tile reads as missing, so any cached opacity is stale.
         opaqueTiles.remove(k)
         opaqueVerified.remove(k)
-        // The store owns the bitmap exclusively, so it can go back to the pool.
-        if (b != null) TilePool.release(b)
+        // A private tile goes back to the pool; a shared solid is just dropped.
+        if (b != null) releaseOwned(k, b) else solids.remove(k)
+    }
+
+    private fun releaseAll() {
+        for ((k, b) in tiles) if (k !in solids) TilePool.release(b)
+        tiles.clear()
+        solids.clear()
+        canvases.clear()
+        opaqueTiles.clear()
+        opaqueVerified.clear()
+    }
+
+    /**
+     * THE write entry point for a tile: returns a private, mutable bitmap for
+     * (tx, ty), allocating it at the default pixel when missing and replacing a
+     * shared solid with a byte copy of itself. Pixels are unchanged by this call,
+     * so cached opacity stays valid until the caller's write marks it dirty.
+     */
+    private fun writableTile(k: Long, tx: Int, ty: Int): Bitmap {
+        val cur = tiles[k]
+        if (cur != null) {
+            if (solids.isEmpty() || k !in solids) return cur
+            val fresh = TilePool.acquire(cur.width, cur.height)
+            copyCanvas.setBitmap(fresh)
+            copyCanvas.drawBitmap(cur, 0f, 0f, srcPaint)
+            copyCanvas.setBitmap(null)
+            solids.remove(k)
+            canvases.remove(k)
+            tiles[k] = fresh
+            unshares++
+            return fresh
+        }
+        if (CompositeProfile.enabled) CompositeProfile.tilesAllocated++
+        val t = TilePool.acquire(tileW(tx), tileH(ty), defaultPixel)
+        tiles[k] = t
+        return t
+    }
+
+    private val copyCanvas = Canvas()
+
+    /** Raw-pixel scratch for uniformity checks. */
+    private var rawFull: IntArray? = null
+
+    /**
+     * The raw premultiplied pixel value when every pixel of [tile] has the same
+     * bytes, as a non-negative Long; -1 when the tile is not uniform.
+     */
+    private fun uniformRaw(tile: Bitmap): Long {
+        val n = tile.width * tile.height
+        if (n == 0 || tile.rowBytes != tile.width * 4) return -1L
+        var buf = rawFull
+        if (buf == null || buf.size < n) {
+            buf = IntArray(n)
+            rawFull = buf
+        }
+        tile.copyPixelsToBuffer(IntBuffer.wrap(buf, 0, n))
+        val v = buf[0]
+        var i = 1
+        while (i < n) {
+            if (buf[i] != v) return -1L
+            i++
+        }
+        return v.toLong() and 0xFFFFFFFFL
+    }
+
+    /**
+     * Turns the private tile at [k] into a shared solid when it is uniform, or
+     * drops it when it is uniformly the default. Returns true if it is solid.
+     */
+    private fun compactTile(k: Long): Boolean {
+        if (k in solids) return true
+        val t = tiles[k] ?: return false
+        val raw = uniformRaw(t)
+        if (raw < 0L) return false
+        val colour = t.getPixel(0, 0)
+        if (colour == defaultPixel) {
+            removeTile(k)
+            return false
+        }
+        val shared = SolidTiles.obtain(t, raw.toInt(), colour) ?: return false
+        canvases.remove(k)
+        tiles[k] = shared
+        solids[k] = colour
+        TilePool.release(t)
+        return true
+    }
+
+    /**
+     * Installs the shared solid [shared] (colour [colour]) at [k], releasing
+     * whatever private tile was there. Pixels change, so the caller marks dirty.
+     */
+    private fun assignSolid(k: Long, shared: Bitmap, colour: Int) {
+        val old = tiles[k]
+        if (old != null && old !== shared) releaseOwned(k, old)
+        canvases.remove(k)
+        tiles[k] = shared
+        solids[k] = colour
+        opaqueTiles.remove(k)
+        opaqueVerified.remove(k)
+    }
+
+    /**
+     * Shared solid of size [w] x [h] holding exactly the bytes [produce] writes
+     * into a fresh tile, or null when that result is not uniform / is default.
+     */
+    private fun solidFrom(w: Int, h: Int, produce: (Bitmap) -> Unit): Pair<Bitmap, Int>? {
+        val sample = TilePool.acquire(w, h, defaultPixel)
+        produce(sample)
+        val raw = uniformRaw(sample)
+        val colour = sample.getPixel(0, 0)
+        val shared = if (raw < 0L || colour == defaultPixel) null
+        else SolidTiles.obtain(sample, raw.toInt(), colour)
+        TilePool.release(sample)
+        return shared?.let { it to colour }
+    }
+
+    override fun compactSolids(rect: Rect): Int {
+        if (!solidTiles || !materialized) return 0
+        val r = Rect(rect)
+        if (!r.intersect(0, 0, width, height)) return 0
+        var n = 0
+        for (ty in tyRange(r)) {
+            for (tx in txRange(r)) {
+                val k = key(tx, ty)
+                if (tiles.containsKey(k) && compactTile(k)) n++
+            }
+        }
+        return n
+    }
+
+    override fun solidTileCount(): Int = solids.size
+
+    override fun verifySolids(): Int {
+        var bad = 0
+        for ((k, t) in tiles) {
+            val colour = solids[k]
+            if (colour == null) {
+                if (!t.isMutable || SolidTiles.isShared(t)) bad++
+                continue
+            }
+            if (t.isMutable || !SolidTiles.isShared(t)) {
+                bad++
+                continue
+            }
+            if (SolidTiles.colourOf(t) != colour || canvases.containsKey(k)) {
+                bad++
+                continue
+            }
+            val n = t.width * t.height
+            val buf = scanBuf(n)
+            t.getPixels(buf, 0, t.width, 0, 0, t.width, t.height)
+            var i = 0
+            while (i < n) {
+                if (buf[i] != colour) {
+                    bad++
+                    break
+                }
+                i++
+            }
+            val tx = (k ushr 32).toInt()
+            val ty = k.toInt()
+            if (t.width != tileW(tx) || t.height != tileH(ty)) bad++
+        }
+        for (k in solids.keys) if (!tiles.containsKey(k)) bad++
+        return bad
     }
 
     private fun splitInto(source: Bitmap) {
@@ -651,7 +870,9 @@ class SparseTileStore(
                     RectF(0f, 0f, tw.toFloat(), th.toFloat()),
                     srcPaint
                 )
-                tiles[key(tx, ty)] = tile
+                val k = key(tx, ty)
+                tiles[k] = tile
+                if (solidTiles) compactTile(k)
             }
         }
     }
@@ -687,17 +908,13 @@ class SparseTileStore(
 
     override fun residentBytes(): Long {
         var total = 0L
-        for (tile in tiles.values) total += tile.byteCount.toLong()
+        for ((k, tile) in tiles) if (k !in solids) total += tile.byteCount.toLong()
         return total
     }
 
     override fun releaseToDisk(file: File) {
-        for (b in tiles.values) TilePool.release(b)
+        releaseAll()
         backing = file
-        tiles.clear()
-        canvases.clear()
-        opaqueTiles.clear()
-        opaqueVerified.clear()
         materialized = false
     }
 
@@ -711,11 +928,7 @@ class SparseTileStore(
         if (tx !in 0 until tileCountX || ty !in 0 until tileCountY) {
             throw IndexOutOfBoundsException("tile ($tx, $ty) outside ${tileCountX}x$tileCountY")
         }
-        val k = key(tx, ty)
-        return tiles.getOrPut(k) {
-            if (CompositeProfile.enabled) CompositeProfile.tilesAllocated++
-            TilePool.acquire(tileW(tx), tileH(ty), defaultPixel)
-        }
+        return writableTile(key(tx, ty), tx, ty)
     }
 
     override fun forEachTileIn(rect: Rect, action: (tx: Int, ty: Int, tile: Bitmap) -> Unit) {
@@ -729,7 +942,9 @@ class SparseTileStore(
 
     override fun isTileEmpty(tx: Int, ty: Int): Boolean {
         if (tx !in 0 until tileCountX || ty !in 0 until tileCountY) return true
-        val tile = tiles[key(tx, ty)] ?: return true
+        val k = key(tx, ty)
+        val tile = tiles[k] ?: return true
+        solids[k]?.let { return it == defaultPixel }
         val w = tile.width
         val n = w * tile.height
         val buf = scanBuf(n)
@@ -854,7 +1069,7 @@ class SparseTileStore(
                 if (covers) {
                     remove.add(k)
                 } else {
-                    val c = canvasFor(k, tile)
+                    val c = canvasFor(k, writableTile(k, tx, ty))
                     val save = c.save()
                     c.clipRect(r.left - x0, r.top - y0, r.right - x0, r.bottom - y0)
                     c.drawColor(defaultPixel, BlendMode.SRC)
@@ -876,10 +1091,27 @@ class SparseTileStore(
         val r = Rect(rect)
         r.intersect(0, 0, width, height)
         if (r.isEmpty) return
+        // Tiles the rect covers completely become one shared solid each: the
+        // solid is the byte result of this same drawColor on a fresh tile, and
+        // SRC does not depend on what was there before.
+        var shapes: HashMap<Long, Pair<Bitmap, Int>?>? = null
         for (ty in tyRange(r)) {
             for (tx in txRange(r)) {
                 val x0 = tx * tileSize
                 val y0 = ty * tileSize
+                if (solidTiles && r.left <= x0 && r.top <= y0 &&
+                    r.right >= x0 + tileW(tx) && r.bottom >= y0 + tileH(ty)
+                ) {
+                    val m = shapes ?: HashMap<Long, Pair<Bitmap, Int>?>().also { shapes = it }
+                    val wh = key(tileW(tx), tileH(ty))
+                    val solid = if (m.containsKey(wh)) m[wh] else solidFrom(tileW(tx), tileH(ty)) {
+                        Canvas(it).drawColor(color, BlendMode.SRC)
+                    }.also { m[wh] = it }
+                    if (solid != null) {
+                        assignSolid(key(tx, ty), solid.first, solid.second)
+                        continue
+                    }
+                }
                 val tile = obtainTileForWrite(tx, ty)
                 val c = Canvas(tile)
                 val save = c.save()
@@ -957,8 +1189,8 @@ class SparseTileStore(
         ensureResident()
         val k = key(tx, ty)
         if (source == null) {
-            val tile = tiles[k] ?: return
-            val c = canvasFor(k, tile)
+            if (!tiles.containsKey(k)) return
+            val c = canvasFor(k, writableTile(k, tx, ty))
             val save = c.save()
             c.clipRect(r.left - tx0, r.top - ty0, r.right - tx0, r.bottom - ty0)
             c.drawColor(defaultPixel, BlendMode.SRC)
@@ -1111,10 +1343,13 @@ class SparseTileStore(
     }
 
     /** Scans one tile for full opacity; the raw truth behind [isTileOpaque]. */
-    private fun computeOpaque(k: Long): Boolean {
+    private fun computeOpaque(k: Long, trustSolid: Boolean = true): Boolean {
         val t = tiles[k]
         // A missing tile is the store default, which is opaque for a mask.
         if (t == null || t.isRecycled) return (defaultPixel ushr 24) == 255
+        // A solid's colour is its every pixel. The verifier passes false so it
+        // re-derives the answer from the pixels instead of from metadata.
+        if (trustSolid) solids[k]?.let { return (it ushr 24) == 255 }
         val n = t.width * t.height
         val buf = scanBuf(n)
         // One bulk read instead of one JNI call per row: the scan runs on the
@@ -1184,7 +1419,7 @@ class SparseTileStore(
         else opaqueTiles.keys.filter { it !in opaqueVerified }
         for (k in keys) {
             val cached = opaqueTiles[k] ?: continue
-            val truth = computeOpaque(k)
+            val truth = computeOpaque(k, trustSolid = false)
             opaqueVerified.add(k)
             if (truth != cached) {
                 bad++
@@ -1263,6 +1498,16 @@ class SparseTileStore(
         ensureResident()
         val tw = tileW(tx)
         val th = tileH(ty)
+        val k = key(tx, ty)
+        // A shared solid of the right size is immutable, so the tile can simply
+        // reference it: the source's other users can never see a write.
+        if (solidTiles && !source.isMutable && source.width == tw && source.height == th) {
+            val colour = SolidTiles.colourOf(source)
+            if (colour != null) {
+                if (colour == defaultPixel) removeTile(k) else assignSolid(k, source, colour)
+                return
+            }
+        }
         var any = false
         for (y in 0 until min(th, source.height)) {
             source.getPixels(scanRow, 0, min(tw, source.width), 0, y, min(tw, source.width), 1)
@@ -1276,7 +1521,6 @@ class SparseTileStore(
             }
             if (any) break
         }
-        val k = key(tx, ty)
         if (!any) {
             removeTile(k)
             return
@@ -1288,10 +1532,14 @@ class SparseTileStore(
             Rect(0, 0, tw, th),
             srcPaint
         )
+        val old = tiles[k]
+        if (old != null && old !== source) releaseOwned(k, old)
+        solids.remove(k)
         canvases.remove(k)
         opaqueTiles.remove(k)
         opaqueVerified.remove(k)
         tiles[k] = tile
+        if (solidTiles) compactTile(k)
     }
 
     override fun pruneEmptyTiles(rect: Rect) {
@@ -1328,28 +1576,37 @@ class SparseTileStore(
     }
 
     override fun clear() {
-        for (b in tiles.values) TilePool.release(b)
-        tiles.clear()
-        canvases.clear()
-        opaqueTiles.clear()
-        opaqueVerified.clear()
+        releaseAll()
         backing = null
         materialized = true
         markDirty(Rect(0, 0, width, height))
     }
 
     override fun fill(color: Int) {
-        for (b in tiles.values) TilePool.release(b)
-        tiles.clear()
-        canvases.clear()
-        opaqueTiles.clear()
-        opaqueVerified.clear()
+        releaseAll()
         backing = null
         materialized = true
         if (color != defaultPixel) {
+            // O(tiles) metadata: at most four tile shapes (full, right edge,
+            // bottom edge, corner), each one shared solid. The solid holds the
+            // same bytes the per-tile eraseColor below would have produced.
+            val shapes = HashMap<Long, Pair<Bitmap, Int>?>()
             for (ty in 0 until tileCountY) {
                 for (tx in 0 until tileCountX) {
-                    tiles[key(tx, ty)] = TilePool.acquire(tileW(tx), tileH(ty), color)
+                    val k = key(tx, ty)
+                    val tw = tileW(tx)
+                    val th = tileH(ty)
+                    if (solidTiles) {
+                        val wh = key(tw, th)
+                        val solid = if (shapes.containsKey(wh)) shapes[wh]
+                        else solidFrom(tw, th) { it.eraseColor(color) }.also { shapes[wh] = it }
+                        if (solid != null) {
+                            tiles[k] = solid.first
+                            solids[k] = solid.second
+                            continue
+                        }
+                    }
+                    tiles[k] = TilePool.acquire(tw, th, color)
                 }
             }
         }

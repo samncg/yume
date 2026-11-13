@@ -76,6 +76,8 @@ object TilePool {
     @Synchronized
     fun release(bmp: Bitmap) {
         if (bmp.isRecycled) return
+        // A shared solid is never exclusively owned: other tiles still read it.
+        if (!bmp.isMutable || SolidTiles.isShared(bmp)) return
         val n = bmp.allocationByteCount.toLong()
         if (bytes + n > maxBytes) {
             dropped++

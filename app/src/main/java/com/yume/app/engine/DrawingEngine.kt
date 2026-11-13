@@ -341,6 +341,7 @@ class DrawingEngine(val width: Int, val height: Int) {
             val all = Rect(0, 0, width, height)
             TileOps.mergeInto(store, upper.tiles, all, p)
             store.pruneEmptyTiles(all)
+            store.compactSolids(all)
             merged = store
         } else {
             val bmp = lower.tiles.copyAll()
@@ -1255,6 +1256,9 @@ class DrawingEngine(val width: Int, val height: Int) {
         }
         // The crops are copies, so the copy-on-touch snapshot is no longer needed.
         capture.release()
+        // Stroke / one-shot op end: tiles that ended up one flat colour become
+        // shared solids. Bulk scan per touched tile, never per dab.
+        store.compactSolids(r)
         if (changes.isEmpty()) return null
         return TilePixelAction(
             layerId = layer.id,
@@ -1324,6 +1328,7 @@ class DrawingEngine(val width: Int, val height: Int) {
             val tile = if (before) c.before else c.after
             store.putTileRegion(c.tx, c.ty, c.clip, tile)
         }
+        store.compactSolids(bounds)
         layer.touch()
         markDirty(bounds)
     }

@@ -33,6 +33,7 @@ import com.yume.app.engine.LayerBlend
 import com.yume.app.engine.LayerSnapshotData
 import com.yume.app.engine.SelectionOp
 import com.yume.app.engine.SelectionUtil
+import com.yume.app.engine.SolidTiles
 import com.yume.app.engine.SparseTileStore
 import com.yume.app.engine.StrokePainter
 import com.yume.app.engine.TilePool
@@ -127,6 +128,22 @@ object YumeHarness {
                     // Debug shortcut: only the golden/v1-vs-v2 pass. Keeps an
                     // iteration over the stamping path at a few minutes.
                     out.append(scoreGolden(app))
+                } else if (only == "golden-nosolids") {
+                    // Same golden pass with shared solid tiles disabled, so the
+                    // sparse lines (including tolerance phases) can be diffed
+                    // against a solids-on run.
+                    val old = TileStoreConfig.solidTiles
+                    TileStoreConfig.solidTiles = false
+                    try {
+                        out.append(scoreGolden(app))
+                    } finally {
+                        TileStoreConfig.solidTiles = old
+                    }
+                } else if (only == "fuzz") {
+                    out.append(scoreSparseStore())
+                } else if (only == "solids") {
+                    out.append(scoreSparseStore())
+                    out.append(scoreSolidMemory())
                 } else if (only == "dab") {
                     out.append(line(scoreDabScratch()))
                 } else if (only == "paint") {
@@ -172,6 +189,7 @@ object YumeHarness {
                 out.append(line(scoreSparsePersistence(app)))
                 out.append(scoreSparseStore())
                 out.append(line(scoreMemory()))
+                out.append(scoreSolidMemory())
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "harness failed", t)
@@ -1292,7 +1310,8 @@ object YumeHarness {
             val ops: Int,
             val every: Int,
             val seed: Long,
-            val default: Int = 0
+            val default: Int = 0,
+            val solids: Boolean = true
         )
         val white = 0xFFFFFFFF.toInt()
         val combos = listOf(
@@ -1320,7 +1339,16 @@ object YumeHarness {
             Combo(1000, 700, 64, 600, 100, 4012L, white),
             Combo(1000, 700, 256, 600, 100, 4013L, white),
             Combo(2000, 1333, 64, 2000, 250, 4021L, white),
-            Combo(2000, 1333, 256, 2000, 250, 4022L, white)
+            Combo(2000, 1333, 256, 2000, 250, 4022L, white),
+            // Odd canvases at every tile size, compared after every op.
+            Combo(1001, 777, 16, 300, 1, 5011L),
+            Combo(1001, 777, 64, 300, 1, 5012L),
+            Combo(1001, 777, 256, 300, 1, 5013L),
+            Combo(301, 999, 64, 300, 1, 5021L, white),
+            // Control: the same op mix with solid tiles disabled.
+            Combo(2000, 1333, 256, 60, 1, 2013L, solids = false),
+            Combo(1001, 777, 64, 300, 1, 5012L, solids = false),
+            Combo(1000, 700, 64, 600, 100, 4012L, white, solids = false)
         )
         val out = StringBuilder()
         out.append(diagSurface())
@@ -1329,13 +1357,14 @@ object YumeHarness {
         out.append(diagStroke())
         for (c in combos) {
             val res = try {
-                fuzzStore(c.w, c.h, c.tile, c.ops, c.every, c.seed, c.default)
+                fuzzStore(c.w, c.h, c.tile, c.ops, c.every, c.seed, c.default, c.solids)
             } catch (t: Throwable) {
                 "FAIL ${t.javaClass.simpleName}: ${t.message}"
             }
             out.append("sparse-fuzz ").append(c.w).append('x').append(c.h)
                 .append(" tile=").append(c.tile)
                 .append(if (c.default != 0) " mask" else "")
+                .append(if (c.solids) " solids" else " nosolids")
                 .append(' ').append(res).append('\n')
             Runtime.getRuntime().gc()
         }
@@ -1635,10 +1664,25 @@ object YumeHarness {
         ops: Int,
         every: Int,
         seed: Long,
-        defaultPixel: Int = 0
+        defaultPixel: Int = 0,
+        solids: Boolean = true
     ): String {
         val rnd = Random(seed)
-        val store = SparseTileStore(w, h, tile, defaultPixel = defaultPixel)
+        val store = SparseTileStore(w, h, tile, defaultPixel = defaultPixel, solidTiles = solids)
+        // Colours shared with a second store, so the two hold the SAME shared
+        // solid bitmaps. Writes to [store] must never show up in [twin].
+        val palette = intArrayOf(
+            rnd.nextInt() or 0xFF000000.toInt(),
+            (rnd.nextInt() and 0x00FFFFFF) or 0x7F000000,
+            0x80FF0000.toInt()
+        )
+        val twin = SparseTileStore(w, h, tile, defaultPixel = defaultPixel, solidTiles = solids)
+        twin.fill(palette[0])
+        twin.fillRect(Rect(0, 0, w / 2, h / 2), palette[1])
+        twin.fillRect(Rect(w / 3, h / 3, w, h), palette[2])
+        val twinRef = twin.copyAll()
+        var solidPeak = 0
+        var unshareSeen = 0L
         val ref = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val refCanvas = Canvas(ref)
         if (defaultPixel != 0) refCanvas.drawColor(defaultPixel, BlendMode.SRC)
@@ -1710,12 +1754,232 @@ object YumeHarness {
             val ok = all.sameAs(ref)
             if (!ok) fail(step, "copyAll differs: " + diffNote(all, ref))
             all.recycle()
+            val staleAll = store.verifyOpaqueFlags(true)
+            if (staleAll != 0) fail(step, "opaque cache (all) stale=$staleAll")
+            val tw = twin.copyAll()
+            if (!tw.sameAs(twinRef)) fail(step, "twin changed: " + diffNote(tw, twinRef))
+            tw.recycle()
+            if (twin.verifySolids() != 0) fail(step, "twin verifySolids")
+        }
+
+        fun refTile(tx: Int, ty: Int): Rect {
+            val x0 = tx * tile
+            val y0 = ty * tile
+            return Rect(x0, y0, min(w, x0 + tile), min(h, y0 + tile))
+        }
+
+        fun refIsDefault(r: Rect): Boolean {
+            val row = IntArray(r.width())
+            for (yy in r.top until r.bottom) {
+                ref.getPixels(row, 0, r.width(), r.left, yy, r.width(), 1)
+                for (v in row) if (v != defaultPixel) return false
+            }
+            return true
+        }
+
+        fun refCrop(r: Rect): Bitmap {
+            val want = Bitmap.createBitmap(r.width(), r.height(), Bitmap.Config.ARGB_8888)
+            Canvas(want).drawBitmap(ref, r, Rect(0, 0, r.width(), r.height()), srcPaint)
+            return want
+        }
+
+        fun randomProbeRect(): Rect {
+            val x = rnd.nextInt(probeW)
+            val y = rnd.nextInt(probeH)
+            return Rect(x, y, x + 1 + rnd.nextInt(probeW - x), y + 1 + rnd.nextInt(probeH - y))
+        }
+
+        // A rect snapped to whole tiles half of the time, so fills hit full tiles.
+        fun bigRect(): Rect {
+            if (rnd.nextBoolean()) return randomRect()
+            val tx0 = rnd.nextInt(tileCountX)
+            val ty0 = rnd.nextInt(tileCountY)
+            val tx1 = tx0 + 1 + rnd.nextInt(tileCountX - tx0)
+            val ty1 = ty0 + 1 + rnd.nextInt(tileCountY - ty0)
+            return Rect(tx0 * tile, ty0 * tile, min(w, tx1 * tile), min(h, ty1 * tile))
+        }
+
+        fun pickColour(): Int = when (rnd.nextInt(4)) {
+            0 -> rnd.nextInt()
+            else -> palette[rnd.nextInt(palette.size)]
         }
 
         for (step in 1..ops) {
-            val op = rnd.nextInt(14)
+            val op = rnd.nextInt(20)
             currentOp = op
             when (op) {
+                14 -> {
+                    // Large fill: whole tiles become shared solids directly.
+                    val r = bigRect()
+                    val color = pickColour()
+                    store.fillRect(r, color)
+                    val p = Paint().apply {
+                        blendMode = BlendMode.SRC
+                        this.color = color
+                    }
+                    refCanvas.drawRect(RectF(r), p)
+                }
+                15 -> {
+                    // Solid detection (stroke end / op end) over a random area.
+                    store.compactSolids(if (rnd.nextBoolean()) full else randomRect())
+                }
+                16 -> {
+                    if (rnd.nextInt(3) == 0) {
+                        val color = pickColour()
+                        store.fill(color)
+                        refCanvas.drawColor(color, BlendMode.SRC)
+                    } else {
+                        store.clear()
+                        refCanvas.drawColor(defaultPixel, BlendMode.SRC)
+                    }
+                }
+                17 -> {
+                    // Install the twin's tile: a shared solid is referenced, not
+                    // copied, so the two stores now share one bitmap.
+                    val tx = rnd.nextInt(tileCountX)
+                    val ty = rnd.nextInt(tileCountY)
+                    val src = twin.getTile(tx, ty)
+                    val tr = refTile(tx, ty)
+                    if (src != null && src.width == tr.width() && src.height == tr.height()) {
+                        store.putTile(tx, ty, src)
+                        refCanvas.drawBitmap(twinRef, tr, tr, srcPaint)
+                    }
+                }
+                18 -> {
+                    // Every remaining public read path against the reference.
+                    when (rnd.nextInt(8)) {
+                        0 -> {
+                            val r = randomRect()
+                            val got = Bitmap.createBitmap(r.width(), r.height(), Bitmap.Config.ARGB_8888)
+                            got.eraseColor(0x12345678)
+                            store.readRectInto(r, got)
+                            val want = refCrop(r)
+                            if (!got.sameAs(want)) fail(step, "readRectInto $r")
+                            got.recycle()
+                            want.recycle()
+                        }
+                        1, 2 -> {
+                            val r = randomProbeRect()
+                            val p = Paint().apply {
+                                blendMode = blendModes[rnd.nextInt(blendModes.size)]
+                                alpha = rnd.nextInt(256)
+                                isFilterBitmap = false
+                            }
+                            val got = Bitmap.createBitmap(probeW, probeH, Bitmap.Config.ARGB_8888)
+                            val gc = Canvas(got)
+                            val pre = rnd.nextBoolean()
+                            if (pre) {
+                                gc.clipRect(r)
+                                store.drawIntoRectPreClipped(gc, r, p)
+                            } else {
+                                store.drawIntoRect(gc, r, p)
+                            }
+                            val want = Bitmap.createBitmap(probeW, probeH, Bitmap.Config.ARGB_8888)
+                            val wc = Canvas(want)
+                            wc.clipRect(r)
+                            wc.drawBitmap(ref, 0f, 0f, p)
+                            if (!got.sameAs(want)) {
+                                fail(step, "drawIntoRect pre=$pre $r blend=${p.blendMode}")
+                            }
+                            got.recycle()
+                            want.recycle()
+                        }
+                        3 -> {
+                            val tx = rnd.nextInt(tileCountX)
+                            val ty = rnd.nextInt(tileCountY)
+                            val tr = refTile(tx, ty)
+                            val copy = store.readTileCopy(tx, ty)
+                            if (copy == null) {
+                                if (!refIsDefault(tr)) fail(step, "readTileCopy($tx,$ty) null")
+                            } else {
+                                val want = refCrop(tr)
+                                if (!copy.isMutable) fail(step, "readTileCopy returned a shared bitmap")
+                                if (!copy.sameAs(want)) fail(step, "readTileCopy($tx,$ty)")
+                                want.recycle()
+                                // History round trip: putting the copy back is a no-op.
+                                store.putTile(tx, ty, copy)
+                                TilePool.release(copy)
+                            }
+                        }
+                        4 -> {
+                            val tx = rnd.nextInt(tileCountX)
+                            val ty = rnd.nextInt(tileCountY)
+                            if (store.isTileEmpty(tx, ty) != refIsDefault(refTile(tx, ty))) {
+                                fail(step, "isTileEmpty($tx,$ty)")
+                            }
+                        }
+                        5 -> {
+                            val r = randomRect()
+                            if (store.isRectEmpty(r) != refIsDefault(r)) fail(step, "isRectEmpty $r")
+                        }
+                        6 -> {
+                            val tx = rnd.nextInt(tileCountX)
+                            val ty = rnd.nextInt(tileCountY)
+                            val tr = refTile(tx, ty)
+                            val t = store.getTile(tx, ty)
+                            if (t == null) {
+                                if (!refIsDefault(tr)) fail(step, "getTile($tx,$ty) null")
+                            } else {
+                                val want = refCrop(tr)
+                                if (!t.sameAs(want)) fail(step, "getTile($tx,$ty) pixels")
+                                want.recycle()
+                            }
+                        }
+                        else -> {
+                            // nonEmptyBounds must cover every non-default pixel.
+                            store.pruneEmptyTiles(full)
+                            val b = store.nonEmptyBounds()
+                            for (ty in 0 until tileCountY) for (tx in 0 until tileCountX) {
+                                val tr = refTile(tx, ty)
+                                if (!refIsDefault(tr) && !b.contains(tr)) {
+                                    fail(step, "nonEmptyBounds $b misses tile ($tx,$ty)")
+                                }
+                            }
+                        }
+                    }
+                }
+                19 -> {
+                    // Write INTO a shared solid (stamp, putTileRegion or
+                    // withWriteCanvas). The unshare must leave every other user
+                    // of the bitmap (other tiles, the twin) untouched.
+                    var pick: Pair<Int, Int>? = null
+                    store.forEachTileIn(full) { tx, ty, t ->
+                        if (pick == null && !t.isMutable && rnd.nextInt(3) == 0) pick = tx to ty
+                    }
+                    val (tx, ty) = pick ?: (rnd.nextInt(tileCountX) to rnd.nextInt(tileCountY))
+                    val tr = refTile(tx, ty)
+                    val cx = tr.left + rnd.nextInt(tr.width())
+                    val cy = tr.top + rnd.nextInt(tr.height())
+                    val clip = Rect(
+                        cx, cy,
+                        cx + 1 + rnd.nextInt(tr.right - cx),
+                        cy + 1 + rnd.nextInt(tr.bottom - cy)
+                    )
+                    when (rnd.nextInt(3)) {
+                        0 -> {
+                            val color = pickColour()
+                            store.withWriteCanvas(clip) { it.drawColor(color, BlendMode.SRC_OVER) }
+                            val save = refCanvas.save()
+                            refCanvas.clipRect(clip)
+                            refCanvas.drawColor(color, BlendMode.SRC_OVER)
+                            refCanvas.restoreToCount(save)
+                        }
+                        1 -> {
+                            val tmp = Bitmap.createBitmap(clip.width(), clip.height(), Bitmap.Config.ARGB_8888)
+                            tmp.eraseColor(pickColour())
+                            store.putTileRegion(tx, ty, clip, tmp)
+                            refCanvas.drawBitmap(tmp, null, RectF(clip), srcPaint)
+                            tmp.recycle()
+                        }
+                        else -> {
+                            store.putTileRegion(tx, ty, clip, null)
+                            val save = refCanvas.save()
+                            refCanvas.clipRect(clip)
+                            refCanvas.drawColor(defaultPixel, BlendMode.SRC)
+                            refCanvas.restoreToCount(save)
+                        }
+                    }
+                }
                 0, 1 -> {
                     val patch = randomPatch()
                     val pw = patch.width
@@ -1916,6 +2180,11 @@ object YumeHarness {
             // Any op must keep the opaque cache consistent with the pixels.
             val stale = store.verifyOpaqueFlags(false)
             if (stale != 0) fail(step, "opaque cache stale=$stale")
+            val badSolids = store.verifySolids()
+            if (badSolids != 0) fail(step, "verifySolids=$badSolids")
+            if (!solids && store.solidTileCount() != 0) fail(step, "solids while disabled")
+            solidPeak = max(solidPeak, store.solidTileCount())
+            unshareSeen = store.unshares
             if (step % every == 0) compare(step)
         }
         if (ops % every != 0) compare(ops)
@@ -1931,9 +2200,12 @@ object YumeHarness {
         if (!store.nonEmptyBounds().isEmpty) fail(ops, "clear left non-empty bounds")
 
         ref.recycle()
+        twinRef.recycle()
+        twin.clear()
         val verdict = if (mismatches == 0) "PASS" else "FAIL"
         val detail = if (note.isEmpty()) "" else " [$note]"
-        return "ops=$ops comparisons=$comparisons mismatches=$mismatches $verdict$detail"
+        return "ops=$ops comparisons=$comparisons mismatches=$mismatches" +
+            " solidPeak=$solidPeak unshares=$unshareSeen $verdict$detail"
     }
 
     // --------------------------------------------------------------- benchmark
@@ -1986,6 +2258,111 @@ object YumeHarness {
         out.append(build(4096, false, 1)).append('\n')
         out.append(build(4096, false, 20)).append('\n')
         out.append(build(2048, true, 20))
+        return out.toString()
+    }
+
+    /**
+     * Stage 3b-1a memory table: layers with large flat regions, solid tiles on
+     * vs the materialised equivalent (every tile a private bitmap). Layers are
+     * built through the factory, flat regions through fillRect / fill (the paths
+     * that assign solids directly) and a brush stroke is painted over each so a
+     * few solids are unshared again. The "materialised" figure is computed from
+     * the tile count, because 20 x 4096^2 materialised does not fit the heap.
+     */
+    private fun scoreSolidMemory(): String {
+        val out = StringBuilder()
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        val oldSolid = TileStoreConfig.solidTiles
+        fun tileCount(st: com.yume.app.engine.TileStore): Int {
+            var n = 0
+            st.forEachTileIn(Rect(0, 0, st.width, st.height)) { _, _, _ -> n++ }
+            return n
+        }
+        fun mb(b: Long) = "%.1f".format(b / 1048576.0)
+        try {
+            TileStoreConfig.useSparseLayers = true
+            TileStoreConfig.tileSize = 256
+            TileStoreConfig.solidTiles = true
+            for (flat in listOf(50, 75, 100)) {
+                Runtime.getRuntime().gc()
+                SolidTiles.resetCounters()
+                val size = 4096
+                val engine = DrawingEngine(size, size)
+                engine.backgroundColor = BG
+                val session = DrawingSession("solidmem", "SolidMem", engine, History())
+                identityView(session, size, size)
+                session.presets = presets
+                session.activePresetId = hard.id
+                session.assist = 0f
+                session.quickShapeEnabled = false
+                session.category = BrushCategory.Brush
+                val layers = 20
+                for (i in 1 until layers) engine.newLayer(name = "L$i")
+                for (i in 0 until layers) {
+                    val layer = engine.layers[i]
+                    val colour = 0xFF000000.toInt() or ((i * 37 + 11) * 0x010203 and 0xFFFFFF)
+                    if (flat == 100) {
+                        layer.tiles.fill(colour)
+                    } else {
+                        // Flat band of the given share of the canvas, offset per
+                        // layer, not tile aligned (edge tiles stay private).
+                        val hgt = size * flat / 100
+                        val top = (i * 97) % (size - hgt + 1)
+                        layer.tiles.fillRect(Rect(13, top, size - 7, top + hgt), colour)
+                    }
+                    engine.selectLayer(layer.id)
+                    session.color = 0xFF000000.toInt() or (i * 0x0B0B0B and 0xFFFFFF)
+                    val y = 300f + i * 170f
+                    session.stroke(listOf(P(100f, y), P(1800f, y + 60f), P(3600f, y)))
+                }
+                engine.flush()
+                var privateBytes = 0L
+                var tiles = 0
+                var solid = 0
+                for (l in engine.layers) {
+                    privateBytes += l.tiles.residentBytes()
+                    tiles += tileCount(l.tiles)
+                    solid += l.tiles.solidTileCount()
+                }
+                val (shared, sharedBytes) = SolidTiles.stats()
+                val materialised = tiles.toLong() * 256L * 256L * 4L
+                out.append("solid-mem 4096x4096 x$layers flat=$flat% tiles=$tiles solid=$solid")
+                    .append(" private=").append(mb(privateBytes)).append("MB")
+                    .append(" sharedSolids=").append(shared).append('/').append(mb(sharedBytes)).append("MB")
+                    .append(" total=").append(mb(privateBytes + sharedBytes)).append("MB")
+                    .append(" materialised=").append(mb(materialised)).append("MB")
+                    .append(" created=").append(SolidTiles.created)
+                    .append(" reused=").append(SolidTiles.reused)
+                    .append('\n')
+                engine.layers.forEach { it.tiles.clear() }
+            }
+            // One fully filled 8192^2 layer. Store level: the UI memory guard
+            // still refuses 8192^2 documents, the harness only measures.
+            Runtime.getRuntime().gc()
+            SolidTiles.resetCounters()
+            val big = com.yume.app.engine.TileStoreFactory.blank(8192, 8192)
+            val t0 = System.nanoTime()
+            big.fill(0xFF336699.toInt())
+            val fillMs = (System.nanoTime() - t0) / 1e6
+            val (shared, sharedBytes) = SolidTiles.stats()
+            out.append("solid-mem 8192x8192 x1 flat=100% tiles=").append(tileCount(big))
+                .append(" solid=").append(big.solidTileCount())
+                .append(" private=").append(mb(big.residentBytes())).append("MB")
+                .append(" sharedSolids=").append(shared).append('/').append(mb(sharedBytes)).append("MB")
+                .append(" materialised=").append(mb(8192L * 8192L * 4L)).append("MB")
+                .append(" fill=").append("%.2f".format(fillMs)).append("ms")
+                .append(" verifySolids=").append(big.verifySolids())
+                .append('\n')
+            big.clear()
+        } catch (t: Throwable) {
+            out.append("solid-mem FAIL ").append(t).append('\n')
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
+            TileStoreConfig.solidTiles = oldSolid
+            Runtime.getRuntime().gc()
+        }
         return out.toString()
     }
 

@@ -731,3 +731,46 @@ phase=58-edge-marker L0=75828c5b L1=a340a261/607ae157 L2=acb3259e/61a741de L3=05
 #   with the reference by whole tiles is not shippable regardless of the memory
 #   win. Re-attempting it requires the fuzz to pass first, which means auditing
 #   each read path against a materialised tile pixel for pixel.
+
+# ============================================================================
+# Stage 3b-1a: shared immutable solid tiles (oracle unchanged)
+# ============================================================================
+# A uniform tile is now a reference to ONE immutable bitmap shared by every tile
+# (any store) with the same raw premultiplied bytes and size (SolidTiles). The
+# solid is a byte copy of a tile the normal write path produced, so no colour
+# conversion is involved. Every write goes through SparseTileStore.writableTile,
+# which swaps a solid for a pooled private copy first; Android refuses a Canvas
+# on an immutable bitmap and debug builds also assert in canvasFor, so a missed
+# write path throws instead of leaking into other tiles. Solids are detected
+# with one bulk copyPixelsToBuffer per tile at stroke / one-shot-op end
+# (makeTilePatch), undo/redo (applyTileChanges), merge, load and putTile;
+# fill / large fillRect assign solids directly. Only layer and mask stores
+# (factory) use solids; composite, mip and cache stores do not.
+#
+# Goldens: every phase line, dense and sparse at tile 64/256 on 2048x2048 and
+# 2000x1333, is byte-identical with solids ON and OFF (including the sparse
+# lines and diff/class lines of the tolerance phases 43..58), and identical
+# across three fresh-process runs. Phases 00..42: dense == sparse, unchanged.
+#
+# Fuzz (extended): ops 14-19 add large / tile-aligned fills, compactSolids,
+# fill/clear, putTile of a twin store's shared solids, writes INTO solids
+# (stamp, putTileRegion, withWriteCanvas) and every remaining read path
+# (readRectInto, drawIntoRect, drawIntoRectPreClipped, readTileCopy,
+# isTileEmpty, isRectEmpty, getTile, nonEmptyBounds). verifySolids and the
+# opaque verifier run after every op; the twin store sharing the same solids
+# is compared at every checkpoint and must never change.
+#   28 solids-on configs (tiles 16/64/256; 2048^2, 2000x1333, 37x53, 1001x777,
+#   1000x700 / 2000x1333 / 301x999 masks) and 3 solids-off controls: all PASS,
+#   0 mismatches. Peak solid tiles 16384 (2048^2 tile 16), up to 65550 unshares.
+#
+# Memory (debug, Xiaomi Pad 25091RP04C, tile 256, one brush stroke per layer
+# on top of the flat region; "materialised" = every tile a private bitmap):
+#   4096^2 x20 flat=50%:  316.8 MB (311.8 private + 5.0 shared) vs  716 MB
+#   4096^2 x20 flat=75%:  356.8 MB (351.8 private + 5.0 shared) vs 1036 MB
+#   4096^2 x20 flat=100%:  99.3 MB ( 94.3 private + 5.0 shared) vs 1280 MB
+#   8192^2 x1  filled:      0.3 MB (1 shared solid, 1024 tiles)  vs  256 MB,
+#     fill() 1.9 ms. Store level only: the UI guard still refuses 8192^2.
+#   The private bytes in the 50/75% rows are the band's edge tiles (bands are
+#   deliberately not tile aligned) and the tiles each stroke unshared.
+# Frame/paint tables are within noise of Stage 3a (4096^2 sparse x30 p99 2.70
+# ms, x10 3.18 ms; 2048^2 gate PASS everywhere); alloc-per-op unchanged.
