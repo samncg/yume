@@ -91,6 +91,13 @@ class DrawingEngine(val width: Int, val height: Int) {
 
     private val blitPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     private val bgPaint = Paint()
+    /** Whole-bitmap staging blit: no filtering, no AA, no dither. */
+    private val stagePaint = Paint().apply {
+        blendMode = BlendMode.SRC
+        isFilterBitmap = false
+        isAntiAlias = false
+        isDither = false
+    }
 
     private var strokeBaseBitmap: Bitmap? = null
 
@@ -111,9 +118,11 @@ class DrawingEngine(val width: Int, val height: Int) {
     /** Scratch surfaces for groups, masks and clipping; allocated on demand. */
     private var groupBuffer: Bitmap? = null
     private var layerBuffer: Bitmap? = null
-    /** Sparse-mode tile-sized scratch, one per distinct rect size. */
-    private val groupBuffers = HashMap<Long, Bitmap>()
-    private val layerBuffers = HashMap<Long, Bitmap>()
+    /** Sparse-mode scratch, pooled by exact size (dense keeps one canvas each). */
+    private val groupPool = ScratchPool("engine.groupBuffer")
+    private val layerPool = ScratchPool("engine.layerBuffer")
+    /** Staging surface for one dirty sub-rect of a composite tile. */
+    private val stagePool = ScratchPool("engine.compositeStage")
     private var nextId = 1L
 
     init {
@@ -449,17 +458,28 @@ class DrawingEngine(val width: Int, val height: Int) {
             renderInto(c, rect)
             return
         }
-        // Sparse composite: composite only the tiles the dirty rect touches, and
-        // each tile in full. A tile is a separate surface whose missing pixels
-        // read as the background. Whole tiles keep the scratch buffers pinned to
-        // the (at most four) tile geometries, so a blit is never a resample.
+        // Sparse composite: composite only the part of each touched tile that is
+        // actually dirty. A tile is a separate surface whose missing pixels read
+        // as the background, and the work is proportional to the dirty area
+        // instead of to the whole tiles it happens to touch.
+        //
+        // The dirty part is rendered into a staging surface of exactly that size
+        // and then blitted as a *whole bitmap* at its integer document position,
+        // never as a sub-rect of a wider buffer: a sub-rect source blit is not
+        // byte-identical (Stage 2b-2 notes).
         val ts = st.tileSize
         val tx0 = rect.left / ts
         val tx1 = (rect.right - 1) / ts
         val ty0 = rect.top / ts
         val ty1 = (rect.bottom - 1) / ts
         val r = Rect()
+        val sub = Rect()
         if (CompositeProfile.enabled) CompositeProfile.frames++
+        // Nothing is in use between frames, so this is the safe point to shrink
+        // the pools to their caps.
+        groupPool.trim()
+        layerPool.trim()
+        stagePool.trim()
         for (ty in ty0..ty1) {
             for (tx in tx0..tx1) {
                 r.set(
@@ -467,14 +487,36 @@ class DrawingEngine(val width: Int, val height: Int) {
                     min(width, (tx + 1) * ts), min(height, (ty + 1) * ts)
                 )
                 if (r.isEmpty) continue
-                if (CompositeProfile.enabled) CompositeProfile.tileVisits++
-                val existed = st.getTile(tx, ty) != null
                 if (CompositeProfile.enabled) {
-                    val t0 = System.nanoTime()
+                    CompositeProfile.tileVisits++
+                    CompositeProfile.compositePx += r.width().toLong() * r.height().toLong()
+                }
+                val existed = st.getTile(tx, ty) != null
+                sub.set(rect)
+                sub.intersect(r)
+                if (sub.isEmpty) continue
+                if (CompositeProfile.enabled) {
+                    CompositeProfile.compositeDirtyPx += sub.width().toLong() * sub.height().toLong()
+                }
+                val t0 = if (CompositeProfile.enabled) System.nanoTime() else 0L
+                if (sub == r) {
+                    // The whole tile is dirty: render straight into it so the
+                    // tile-granular stroke caches can still be seeded.
                     st.editTile(tx, ty) { c -> renderInto(c, r) }
-                    CompositeProfile.compositeNanos += System.nanoTime() - t0
                 } else {
-                    st.editTile(tx, ty) { c -> renderInto(c, r) }
+                    val buf = stagePool.get(sub.width(), sub.height())
+                    val bc = Canvas(buf)
+                    bc.drawColor(0, BlendMode.CLEAR)
+                    val cp = bc.save()
+                    bc.translate(-sub.left.toFloat(), -sub.top.toFloat())
+                    renderInto(bc, sub)
+                    bc.restoreToCount(cp)
+                    st.editTile(tx, ty) { c ->
+                        c.drawBitmap(buf, sub.left.toFloat(), sub.top.toFloat(), stagePaint)
+                    }
+                }
+                if (CompositeProfile.enabled) {
+                    CompositeProfile.compositeNanos += System.nanoTime() - t0
                 }
                 // A tile that only ever held background must not stay allocated.
                 if (!existed && st.isTileEmpty(tx, ty)) st.clearTile(tx, ty)
@@ -743,18 +785,24 @@ class DrawingEngine(val width: Int, val height: Int) {
             val ts = cache.tileSize
             val tx = rect.left / ts
             val ty = rect.top / ts
-            val wholeTile = rect.left == tx * ts && rect.top == ty * ts &&
-                rect.right == min(width, (tx + 1) * ts) &&
-                rect.bottom == min(height, (ty + 1) * ts)
-            if (wholeTile) {
-                val cached = cache.getTile(tx, ty)
+            val tileX = tx * ts
+            val tileY = ty * ts
+            val tileRight = min(width, tileX + ts)
+            val tileBottom = min(height, tileY + ts)
+            // True for a whole tile and for any dirty sub-rect of one tile.
+            val withinTile = rect.left >= tileX && rect.top >= tileY &&
+                rect.right <= tileRight && rect.bottom <= tileBottom
+            if (withinTile) {
                 val above = aboveTiles
                 val stop = if (above != null && aboveFrom in 1..layers.size) aboveFrom
                 else layers.size
+                val cached = cache.getTile(tx, ty)
                 if (cached != null) {
                     // The cached tile already includes the background and SRC
-                    // replaces it exactly, so this is the same composite.
-                    c.drawBitmap(cached, rect.left.toFloat(), rect.top.toFloat(), belowPaint)
+                    // replaces it exactly, so this is the same composite. It is
+                    // blitted as a whole bitmap at its own integer origin, and the
+                    // clip keeps the result to [rect].
+                    c.drawBitmap(cached, tileX.toFloat(), tileY.toFloat(), belowPaint)
                     renderLayers(c, rect, belowFrom, stop)
                     if (above != null && aboveFrom in 1..layers.size) {
                         drawAboveInto(c, rect, tx, ty, above)
@@ -762,24 +810,30 @@ class DrawingEngine(val width: Int, val height: Int) {
                     c.restoreToCount(checkpoint)
                     return
                 }
-                c.drawColor(backgroundColor, BlendMode.SRC)
-                renderLayers(c, rect, 0, belowFrom)
-                val own = compositeTiles?.getTile(tx, ty)
-                if (own != null && belowBytes < belowBudget) {
-                    val copy = Bitmap.createBitmap(
-                        own.width, own.height, Bitmap.Config.ARGB_8888
-                    )
-                    Canvas(copy).drawBitmap(own, 0f, 0f, belowPaint)
-                    cache.putTile(tx, ty, copy)
-                    belowBytes += copy.byteCount.toLong()
-                    copy.recycle()
+                // Seeding a tile-granular cache needs the whole tile, so only a
+                // whole-tile pass may build one.
+                val wholeTile = rect.left == tileX && rect.top == tileY &&
+                    rect.right == tileRight && rect.bottom == tileBottom
+                if (wholeTile) {
+                    c.drawColor(backgroundColor, BlendMode.SRC)
+                    renderLayers(c, rect, 0, belowFrom)
+                    val own = compositeTiles?.getTile(tx, ty)
+                    if (own != null && belowBytes < belowBudget) {
+                        val copy = Bitmap.createBitmap(
+                            own.width, own.height, Bitmap.Config.ARGB_8888
+                        )
+                        Canvas(copy).drawBitmap(own, 0f, 0f, belowPaint)
+                        cache.putTile(tx, ty, copy)
+                        belowBytes += copy.byteCount.toLong()
+                        copy.recycle()
+                    }
+                    renderLayers(c, rect, belowFrom, stop)
+                    if (above != null && aboveFrom in 1..layers.size) {
+                        drawAboveInto(c, rect, tx, ty, above)
+                    }
+                    c.restoreToCount(checkpoint)
+                    return
                 }
-                renderLayers(c, rect, belowFrom, stop)
-                if (above != null && aboveFrom in 1..layers.size) {
-                    drawAboveInto(c, rect, tx, ty, above)
-                }
-                c.restoreToCount(checkpoint)
-                return
             }
         }
         c.drawColor(backgroundColor, BlendMode.SRC)
@@ -801,14 +855,30 @@ class DrawingEngine(val width: Int, val height: Int) {
      */
     private fun drawAboveInto(c: Canvas, rect: Rect, tx: Int, ty: Int, above: SparseTileStore) {
         val k = (tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL)
+        val ts = above.tileSize
+        val tileX = tx * ts
+        val tileY = ty * ts
         val t = above.getTile(tx, ty)
         if (t != null) {
-            c.drawBitmap(t, rect.left.toFloat(), rect.top.toFloat(), abovePaint)
+            // Whole-bitmap blit at the tile's own integer origin; [rect] is
+            // already clipped, so a dirty sub-rect only lands where it should.
+            c.drawBitmap(t, tileX.toFloat(), tileY.toFloat(), abovePaint)
             return
         }
         // Already built and it contributed nothing (fully transparent).
         if (aboveBuilt.contains(k)) return
         if (aboveBytes >= belowBudget) return
+        val tileRight = min(width, tileX + ts)
+        val tileBottom = min(height, tileY + ts)
+        // Only a whole tile can be stored in the tile-granular cache.
+        if (rect.left != tileX || rect.top != tileY ||
+            rect.right != tileRight || rect.bottom != tileBottom
+        ) {
+            // Partial tile: composite the layers above directly, without caching.
+            // [c] is already in document space and clipped to [rect].
+            renderLayers(c, rect, aboveFrom, layers.size)
+            return
+        }
         val w = rect.width()
         val h = rect.height()
         val buf = aboveBuf?.takeIf { !it.isRecycled && it.width == w && it.height == h }
@@ -834,9 +904,10 @@ class DrawingEngine(val width: Int, val height: Int) {
             val ts = TileStoreConfig.tileSize
             val tx = rect.left / ts
             val ty = rect.top / ts
-            if (rect.left == tx * ts && rect.top == ty * ts &&
-                rect.right == min(width, (tx + 1) * ts) &&
-                rect.bottom == min(height, (ty + 1) * ts)
+            // The opacity flag is per tile, so it applies to any sub-rect of it.
+            if (rect.left >= tx * ts && rect.top >= ty * ts &&
+                rect.right <= min(width, (tx + 1) * ts) &&
+                rect.bottom <= min(height, (ty + 1) * ts)
             ) {
                 var i = to - 1
                 while (i > from) {
@@ -916,21 +987,14 @@ class DrawingEngine(val width: Int, val height: Int) {
         }
     }
 
-    /**
-     * A scratch buffer for this tile-sized composite pass. The buffer is sized
-     * to the rect exactly, so the blit back is a plain origin blit of a whole
-     * bitmap: blitting a sub-rect of a larger buffer lets Skia resample past the
-     * sub-rect and costs a 1-LSB difference at the last (narrower) tile.
-     */
-    private fun scratchBuffer(
-        cache: HashMap<Long, Bitmap>,
-        site: String,
-        w: Int,
-        h: Int
-    ): Bitmap {
-        val k = (w.toLong() shl 32) or (h.toLong() and 0xFFFFFFFFL)
-        return cache.getOrPut(k) { AllocTracker.bitmap(site, w, h) }
-    }
+    /** Splits the sparse composite between dirty area and whole-tile area. */
+    fun poolReport(): String =
+        "pool stage=${stagePool.hits}/${stagePool.hits + stagePool.misses}" +
+            "(${stagePool.size}b,${stagePool.bytes / 1024}KB)" +
+            " group=${groupPool.hits}/${groupPool.hits + groupPool.misses}" +
+            "(${groupPool.size}b,${groupPool.bytes / 1024}KB)" +
+            " clip=${layerPool.hits}/${layerPool.hits + layerPool.misses}" +
+            "(${layerPool.size}b,${layerPool.bytes / 1024}KB)"
 
     /**
      * Draws a layer's pixels into [c]. Sparse stores are asked for tiles that
@@ -977,7 +1041,11 @@ class DrawingEngine(val width: Int, val height: Int) {
                     return
                 }
             }
-            layer.tiles.drawInto(c, layerPaint)
+            // Rect-limited on purpose: the canvas is already clipped to [rect],
+            // but a whole-store draw would still issue one blit per tile of the
+            // layer, which makes the cost scale with the layer's tile count
+            // instead of with the dirty area.
+            drawStoreInto(c, layer.tiles, rect, layerPaint)
             return
         }
         val buf = ensureLayerBuffer(rect)
@@ -1022,7 +1090,7 @@ class DrawingEngine(val width: Int, val height: Int) {
             return AllocTracker.bitmap("engine.groupBuffer", width, height)
                 .also { groupBuffer = it }
         }
-        return scratchBuffer(groupBuffers, "engine.groupBuffer", rect.width(), rect.height())
+        return groupPool.get(rect.width(), rect.height())
     }
 
     private fun ensureLayerBuffer(rect: Rect): Bitmap {
@@ -1031,7 +1099,7 @@ class DrawingEngine(val width: Int, val height: Int) {
             return AllocTracker.bitmap("engine.layerBuffer", width, height)
                 .also { layerBuffer = it }
         }
-        return scratchBuffer(layerBuffers, "engine.layerBuffer", rect.width(), rect.height())
+        return layerPool.get(rect.width(), rect.height())
     }
 
     fun setSoloLayer(id: Long?) {
@@ -1407,8 +1475,7 @@ class DrawingEngine(val width: Int, val height: Int) {
         val snapshot = strokeBaseBitmap?.byteCount?.toLong() ?: 0L
         var scratch = (groupBuffer?.byteCount?.toLong() ?: 0L) +
             (layerBuffer?.byteCount?.toLong() ?: 0L)
-        for (b in groupBuffers.values) scratch += b.byteCount
-        for (b in layerBuffers.values) scratch += b.byteCount
+        scratch += groupPool.bytes + layerPool.bytes + stagePool.bytes
         val mip = mipTiles?.residentBytes() ?: 0L
         fun mb(v: Long): Long = v / (1024L * 1024L)
         return "layers=${mb(layerTotal)}MB composite=${mb(compositeBytes)}MB " +

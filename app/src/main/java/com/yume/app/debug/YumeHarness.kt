@@ -128,6 +128,9 @@ object YumeHarness {
                     out.append(scoreGolden(app))
                 } else if (only == "dab") {
                     out.append(line(scoreDabScratch()))
+                } else if (only == "paint") {
+                    // Painted-stack frame tables only (the tail-latency work).
+                    out.append(scoreFramesPainted())
                 } else if (only == "dense") {
                     // Dense oracle only, for the determinism check: run this three
                     // times in fresh processes and diff the output.
@@ -2977,6 +2980,8 @@ object YumeHarness {
                 val fAlloc = LongArray(frameCount)
                 val fCapt = LongArray(frameCount)
                 val fDabs = LongArray(frameCount)
+                val fTilePx = LongArray(frameCount)
+                val fDirtyPx = LongArray(frameCount)
                 var pComp = CompositeProfile.compositeNanos
                 var pPaint = CompositeProfile.paintNanos
                 var pBlit = CompositeProfile.blitNanos
@@ -2985,6 +2990,8 @@ object YumeHarness {
                 var pAlloc = CompositeProfile.tilesAllocated
                 var pCapt = CompositeProfile.captures
                 var pDabs = CompositeProfile.paintDabs
+                var pTilePx = CompositeProfile.compositePx
+                var pDirtyPx = CompositeProfile.compositeDirtyPx
                 var fc = 0
                 while (i <= steps) {
                     val t0 = System.nanoTime()
@@ -3014,6 +3021,8 @@ object YumeHarness {
                         fAlloc[fc] = CompositeProfile.tilesAllocated - pAlloc
                         fCapt[fc] = CompositeProfile.captures - pCapt
                         fDabs[fc] = CompositeProfile.paintDabs - pDabs
+                        fTilePx[fc] = CompositeProfile.compositePx - pTilePx
+                        fDirtyPx[fc] = CompositeProfile.compositeDirtyPx - pDirtyPx
                         pComp = CompositeProfile.compositeNanos
                         pPaint = CompositeProfile.paintNanos
                         pBlit = CompositeProfile.blitNanos
@@ -3022,6 +3031,8 @@ object YumeHarness {
                         pAlloc = CompositeProfile.tilesAllocated
                         pCapt = CompositeProfile.captures
                         pDabs = CompositeProfile.paintDabs
+                        pTilePx = CompositeProfile.compositePx
+                        pDirtyPx = CompositeProfile.compositeDirtyPx
                         fc++
                     }
                 }
@@ -3043,7 +3054,8 @@ object YumeHarness {
                         "f=$f total=${ms(fTotal[f])} comp=${ms(fComp[f])}" +
                             " paint=${ms(fPaint[f])} blit=${ms(fBlit[f])}" +
                             " opa=${ms(fOpa[f])} tiles=${fTiles[f]}" +
-                            " alloc=${fAlloc[f]} cap=${fCapt[f]} dabs=${fDabs[f]}"
+                            " alloc=${fAlloc[f]} cap=${fCapt[f]} dabs=${fDabs[f]}" +
+                            " tilePx=${fTilePx[f]} dirtyPx=${fDirtyPx[f]}"
                     val byTotal = (0 until fc).sortedBy { fTotal[it] }
                     val nWorst = max(1, (fc + 99) / 100)
                     val sb = StringBuilder()
@@ -3060,7 +3072,8 @@ object YumeHarness {
                     " gate=${if (p99 < limit) "PASS" else "FAIL"} (limit=$limit)" +
                     " resLayer=${layerMb}MB" +
                     " gc=+${gc1.first - gc0.first}/${gc1.second - gc0.second}ms [$mb]" +
-                    (if (profile) " ${CompositeProfile.summary()}" else "") + tail
+                    (if (profile) " ${CompositeProfile.summary()}" else "") + tail +
+                    (if (profile) " ${engine.poolReport()}" else "")
             } catch (t: Throwable) {
                 "$tag: FAIL ${t.javaClass.simpleName} (needs more than the heap has)"
             } finally {

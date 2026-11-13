@@ -38,6 +38,9 @@ object CompositeProfile {
     var tilesAllocated: Long = 0L
     /** Tiles copied by the undo capture (one copy per tile per stroke). */
     var captures: Long = 0L
+    /** Pixels of composite tiles touched, and of those actually composited. */
+    var compositePx: Long = 0L
+    var compositeDirtyPx: Long = 0L
 
     @Synchronized
     fun reset() {
@@ -57,6 +60,8 @@ object CompositeProfile {
         paintDabs = 0L
         tilesAllocated = 0L
         captures = 0L
+        compositePx = 0L
+        compositeDirtyPx = 0L
     }
 
     private fun ms(nanos: Long): String =
@@ -77,6 +82,7 @@ object CompositeProfile {
             "blit=${ms(blitNanos)}ms lookup=${ms(lookupNanos)}ms " +
             "opacity=${ms(opacityNanos)}ms composite=${ms(compositeNanos)}ms " +
             "paint=${ms(paintNanos)}ms dabs=$paintDabs " +
-            "allocTiles=$tilesAllocated captured=$captures"
+            "allocTiles=$tilesAllocated captured=$captures " +
+            "tilePx=$compositePx dirtyPx=$compositeDirtyPx"
     }
 }
