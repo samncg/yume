@@ -365,6 +365,31 @@ class ProjectStore(private val context: Context) {
     /** Root for per-document tile caches (scratch, deleted on close). */
     fun cacheRoot(): File = context.cacheDir
 
+    /** A content:// URI other apps can read, for a file under cache/exports. */
+    fun shareUri(file: File): Uri =
+        androidx.core.content.FileProvider.getUriForFile(context, context.packageName + ".files", file)
+
+    fun openOutput(uri: Uri): java.io.OutputStream? = context.contentResolver.openOutputStream(uri)
+    fun openInput(uri: Uri): java.io.InputStream? = context.contentResolver.openInputStream(uri)
+
+    /** Zips a project folder (it must not be open in the editor). */
+    fun backupProject(id: String, out: java.io.OutputStream): Boolean = Exporter.backup(projectDir(id), out)
+
+    /** Restores a backup as a new project; returns its id, or null for a bad file. */
+    fun restoreProject(input: java.io.InputStream): String? {
+        val id = UUID.randomUUID().toString()
+        val dir = projectDir(id)
+        if (!Exporter.restore(input, dir)) return null
+        runCatching {
+            val m = File(dir, "manifest.json")
+            val json = JSONObject(m.readText())
+            json.put("name", json.optString("name", "Untitled") + " (restored)")
+            json.put("updatedAt", System.currentTimeMillis())
+            m.writeText(json.toString())
+        }
+        return id
+    }
+
     fun activityManager(): android.app.ActivityManager? =
         context.getSystemService(android.app.ActivityManager::class.java)
 

@@ -217,6 +217,7 @@ class EditorController(
      */
     fun autosave() {
         val session = _session.value ?: return
+        scope.launch { runCatching { captureTimelapseFrame(session) } }
         if (!session.engine.compositeIsSparse || journalBroken) {
             save()
             return
@@ -333,6 +334,106 @@ class EditorController(
             delay(700)
             runCatching { presetStore.save(presets) }
         }
+    }
+
+    private val _share = kotlinx.coroutines.flow.MutableSharedFlow<Pair<Uri, String>>(extraBufferCapacity = 1)
+    /** A file ready for the share sheet: its URI and MIME type. */
+    val shareRequests: kotlinx.coroutines.flow.SharedFlow<Pair<Uri, String>> = _share
+
+    private val _busy = kotlinx.coroutines.flow.MutableStateFlow(false)
+    /** An export is running (the UI shows progress and disables the buttons). */
+    val exporting: kotlinx.coroutines.flow.StateFlow<Boolean> = _busy
+
+    private suspend fun writeFormat(session: com.yume.app.engine.DrawingSession, format: com.yume.app.data.ExportFormat, out: java.io.OutputStream): Boolean =
+        when (format) {
+            com.yume.app.data.ExportFormat.Png -> com.yume.app.data.Exporter.writePng(session, out)
+            com.yume.app.data.ExportFormat.Jpeg, com.yume.app.data.ExportFormat.Webp ->
+                com.yume.app.data.Exporter.writeRaster(session, format, out)
+            com.yume.app.data.ExportFormat.Pdf -> com.yume.app.data.Exporter.writePdf(session, out)
+            com.yume.app.data.ExportFormat.Ora -> {
+                // OpenRaster packs the saved layer files: save first.
+                runCatching { saveNow(session) }
+                val scratch = java.io.File(store.cacheRoot(), "exports").apply { mkdirs() }
+                com.yume.app.data.Exporter.writeOra(session, store.projectDir(projectId), out, scratch)
+            }
+            com.yume.app.data.ExportFormat.Timelapse -> {
+                val tmp = java.io.File(store.cacheRoot(), "exports/timelapse-tmp.mp4").apply { parentFile?.mkdirs() }
+                val ok = com.yume.app.data.Exporter.encodeTimelapse(timelapseDir(), tmp)
+                if (ok) tmp.inputStream().use { it.copyTo(out) }
+                tmp.delete()
+                ok
+            }
+        }
+
+    private fun exportName(format: com.yume.app.data.ExportFormat): String {
+        val safe = (_session.value?.title ?: "Yume").replace(Regex("[^A-Za-z0-9 _-]"), "").trim().ifBlank { "Yume" }
+        return "$safe.${format.ext}"
+    }
+
+    fun suggestedName(format: com.yume.app.data.ExportFormat): String = exportName(format)
+
+    /** Writes the document in [format] to a file the user chose. */
+    fun exportTo(format: com.yume.app.data.ExportFormat, uri: Uri) {
+        val session = _session.value ?: return
+        if (_busy.value) return
+        _busy.value = true
+        scope.launch {
+            val ok = runCatching { store.openOutput(uri)?.use { writeFormat(session, format, it) } ?: false }.getOrDefault(false)
+            _busy.value = false
+            _message.value = if (ok) "Exported ${format.label}" else exportFailure(format)
+        }
+    }
+
+    /** Writes the document in [format] to cache and hands it to the share sheet. */
+    fun exportShare(format: com.yume.app.data.ExportFormat) {
+        val session = _session.value ?: return
+        if (_busy.value) return
+        _busy.value = true
+        scope.launch {
+            val dir = java.io.File(store.cacheRoot(), "exports").apply { mkdirs() }
+            // Old shares are no longer needed once a new one is made.
+            dir.listFiles()?.forEach { if (it.name != "timelapse-tmp.mp4") it.delete() }
+            val file = java.io.File(dir, exportName(format))
+            val ok = runCatching { java.io.FileOutputStream(file).use { writeFormat(session, format, it) } }.getOrDefault(false)
+            _busy.value = false
+            if (ok) _share.tryEmit(store.shareUri(file) to format.mime)
+            else _message.value = exportFailure(format)
+        }
+    }
+
+    private fun exportFailure(format: com.yume.app.data.ExportFormat): String =
+        if (format == com.yume.app.data.ExportFormat.Timelapse && (timelapseDir().list()?.isEmpty() != false))
+            "No timelapse yet: it records as you paint"
+        else "Export failed"
+
+    // ------------------------------------------------------------ timelapse
+
+    private fun timelapseDir() = java.io.File(store.projectDir(projectId), "timelapse").apply { mkdirs() }
+    private var lastTimelapseStrokes = -1L
+
+    /**
+     * Records one small frame (at most 1280 px) of the canvas for the
+     * timelapse, after an edit has settled. Taken from the composite at
+     * reduced size, so an 8K document costs the same as a small one. Frames
+     * thin out as a document grows so the video stays watchable.
+     */
+    private fun captureTimelapseFrame(session: com.yume.app.engine.DrawingSession) {
+        val strokes = session.engine.strokeCount
+        if (strokes == lastTimelapseStrokes) return
+        val dir = timelapseDir()
+        val count = dir.list()?.size ?: 0
+        val every = 1 + count / 900
+        if (lastTimelapseStrokes >= 0 && strokes - lastTimelapseStrokes < every) return
+        lastTimelapseStrokes = strokes
+        var frame: android.graphics.Bitmap? = null
+        session.runOnOwner { frame = session.engine.compositeThumb(1280) }
+        val f = frame ?: return
+        runCatching {
+            java.io.File(dir, String.format(java.util.Locale.ROOT, "f%07d.jpg", count)).outputStream().use {
+                f.compress(android.graphics.Bitmap.CompressFormat.JPEG, 82, it)
+            }
+        }
+        f.recycle()
     }
 
     fun export() {

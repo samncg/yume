@@ -2262,7 +2262,7 @@ fun ActionsPanel(
         if (onRemoveReference != null) MenuRow(Glyph.Close, "Remove reference image") { onRemoveReference() }
         MenuRow(Glyph.Select, "Crop or resize canvas…") { sizeDialog = true }
         MenuRow(Glyph.Droplet, "Fill layer with colour") { session.fillLayer(state.color) }
-        MenuRow(Glyph.Share, "Export PNG to gallery") { onExport() }
+        MenuRow(Glyph.Share, "Export…") { onExport() }
         MenuRow(Glyph.Save, "Save now") { onSave() }
         DividerLine()
         MenuRow(Glyph.Fit, "Fit to screen") { session.fitToScreen() }

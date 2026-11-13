@@ -175,6 +175,7 @@ object YumeHarness {
                     out.append(scoreSolidMemory())
                 } else if (only == "shapes") {
                     out.append(scoreShapes())
+                    out.append(scoreBackup(app))
                 } else if (only == "dab") {
                     out.append(line(scoreDabScratch()))
                 } else if (only == "paint") {
@@ -5851,5 +5852,40 @@ object YumeHarness {
             com.yume.app.engine.BrushAssets.root = oldRoot
         }
         return sb.toString()
+    }
+
+    /** Backup zip round trip: every file comes back byte for byte. */
+    private fun scoreBackup(app: YumeApp): String {
+        val ps = app.projectStore
+        val project = ps.createProject("harness-backup", 300, 200, BG)
+        var restored: String? = null
+        return try {
+            val dir = ps.projectDir(project.id)
+            java.io.File(dir, "extra.bin").writeBytes(ByteArray(5000) { (it * 31).toByte() })
+            val zip = java.io.File(cacheRoot, "harness-backup.zip")
+            val ok1 = zip.outputStream().use { ps.backupProject(project.id, it) }
+            restored = zip.inputStream().use { ps.restoreProject(it) }
+            val back = restored?.let { ps.projectDir(it) }
+            var same = back != null
+            if (back != null) {
+                dir.walkTopDown().filter { it.isFile && it.name != "manifest.json" && !it.path.contains("journal") }.forEach { f ->
+                    val g = java.io.File(back, f.relativeTo(dir).path)
+                    if (!g.exists() || !g.readBytes().contentEquals(f.readBytes())) same = false
+                }
+            }
+            // A zip that tries to escape its folder is refused.
+            val evil = java.io.File(cacheRoot, "harness-evil.zip")
+            java.util.zip.ZipOutputStream(evil.outputStream()).use { z ->
+                z.putNextEntry(java.util.zip.ZipEntry("yume-backup.json")); z.write("{}".toByteArray()); z.closeEntry()
+                z.putNextEntry(java.util.zip.ZipEntry("project/../../escape.txt")); z.write("x".toByteArray()); z.closeEntry()
+            }
+            val evilId = evil.inputStream().use { ps.restoreProject(it) }
+            zip.delete(); evil.delete()
+            val escaped = java.io.File(ps.projectDir("x").parentFile?.parentFile, "escape.txt").exists()
+            "backup: ${if (ok1 && same && evilId == null && !escaped) "PASS" else "FAIL"} backup=$ok1 sameFiles=$same evilRefused=${evilId == null} escaped=$escaped\n"
+        } finally {
+            runCatching { ps.deleteProject(project.id) }
+            restored?.let { runCatching { ps.deleteProject(it) } }
+        }
     }
 }

@@ -93,6 +93,36 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
     var menuTarget by remember { mutableStateOf<ProjectMeta?>(null) }
     var renameTarget by remember { mutableStateOf<ProjectMeta?>(null) }
     val scope = rememberCoroutineScope()
+    var galleryNote by remember { mutableStateOf<String?>(null) }
+    var backupTarget by remember { mutableStateOf<ProjectMeta?>(null) }
+    val backupLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        val meta = backupTarget
+        if (uri != null && meta != null) scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching { store.openOutput(uri)?.use { store.backupProject(meta.id, it) } ?: false }.getOrDefault(false)
+            }
+            galleryNote = if (ok) "Backed up “${meta.name}”" else "Backup failed"
+        }
+    }
+    LaunchedEffect(galleryNote) {
+        if (galleryNote != null) {
+            kotlinx.coroutines.delay(3500)
+            galleryNote = null
+        }
+    }
+    val restoreLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) scope.launch {
+            val id = withContext(Dispatchers.IO) {
+                runCatching { store.openInput(uri)?.use { store.restoreProject(it) } }.getOrNull()
+            }
+            galleryNote = if (id != null) "Project restored" else "That file is not a Yume backup"
+            refresh++
+        }
+    }
     val pinContext = androidx.compose.ui.platform.LocalContext.current
     val pins = remember { com.yume.app.data.PinStore(pinContext) }
     var pinTick by remember { mutableIntStateOf(0) }
@@ -131,7 +161,7 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     )
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        text = when (projects.size) {
+                        text = galleryNote ?: when (projects.size) {
                             0 -> "No artworks yet"
                             1 -> "1 artwork"
                             else -> "${projects.size} artworks"
@@ -141,6 +171,14 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     )
                 }
                 Spacer(Modifier.weight(1f))
+                PressableRow(onClick = { restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream")) }) {
+                    Text(
+                        text = "Restore…",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = YumeColors.textDim
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
                 PressableRow(onClick = { showNewDialog = true }) {
                     GlyphIcon(Glyph.Plus, YumeColors.text, size = 16.dp)
                     Spacer(Modifier.width(8.dp))
@@ -224,6 +262,11 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                 MenuRow(Glyph.Sliders, "Rename") {
                     menuTarget = null
                     renameTarget = meta
+                }
+                MenuRow(Glyph.Save, "Back up…") {
+                    menuTarget = null
+                    backupTarget = meta
+                    backupLauncher.launch(meta.name.replace(Regex("[^A-Za-z0-9 _-]"), "").ifBlank { "Yume" } + ".yume.zip")
                 }
                 MenuRow(Glyph.Copy, "Duplicate") {
                     menuTarget = null

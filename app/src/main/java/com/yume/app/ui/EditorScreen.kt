@@ -122,6 +122,18 @@ fun EditorScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri -> if (uri != null) controller.setReference(uri) }
     val reference by controller.reference.collectAsStateWithLifecycle()
+    var exportOpen by remember { mutableStateOf(false) }
+    val shareContext = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(controller) {
+        controller.shareRequests.collect { (uri, mime) ->
+            val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = mime
+                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching { shareContext.startActivity(android.content.Intent.createChooser(send, "Share")) }
+        }
+    }
 
     // Periodic autosave keeps work safe without ever blocking the render thread.
     LaunchedEffect(session) {
@@ -286,6 +298,10 @@ fun EditorScreen(
                                     onOpenProject = onOpenProject,
                                     onImport = { importLauncher.launch("image/*") },
                                     onReference = { referenceLauncher.launch("image/*") },
+                                    onExportDialog = {
+                                        exportOpen = true
+                                        panel = null
+                                    },
                                     hasReference = reference != null
                                 )
                             }
@@ -340,6 +356,10 @@ fun EditorScreen(
                 },
                 onDismiss = { penMenuAt = null }
             )
+        }
+
+        if (exportOpen) {
+            ExportDialog(controller, state.width, state.height, onDismiss = { exportOpen = false })
         }
 
         val textAt by session.textRequest.collectAsStateWithLifecycle()
@@ -411,7 +431,8 @@ private fun PanelHost(
     onImport: () -> Unit,
     onOpenProject: (String) -> Unit = {},
     onReference: () -> Unit = {},
-    hasReference: Boolean = false
+    hasReference: Boolean = false,
+    onExportDialog: () -> Unit = {}
 ) {
     when (panel) {
         PanelId.Layers -> LayersPanel(state, session, onClose)
@@ -439,7 +460,7 @@ private fun PanelHost(
             onImport = onImport,
             onReference = onReference,
             onRemoveReference = if (hasReference) ({ controller.clearReference() }) else null,
-            onExport = { controller.export() },
+            onExport = onExportDialog,
             onSave = { controller.save() },
             onCanvasCopy = { w, h, scale, center ->
                 controller.canvasCopy(w, h, scale, center) { id ->
