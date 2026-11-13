@@ -62,6 +62,7 @@ data class EditorUiState(
     val quickShape: Boolean = true,
     val shapeKind: ShapeKind = ShapeKind.Ellipse,
     val liquifyMode: LiquifyMode = LiquifyMode.Push,
+    val strokeCount: Long = 0L,
     val liquifySize: Float = 160f,
     val liquifyStrength: Float = 0.5f,
     val shapePerfect: Boolean = false,

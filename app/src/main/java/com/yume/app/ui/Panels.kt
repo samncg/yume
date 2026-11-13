@@ -2201,7 +2201,7 @@ fun ActionsPanel(
     PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
         PanelHeader("Actions", onClose)
         Text(
-            text = "${state.width} × ${state.height} px   ·   ${(state.zoom * 100).roundToInt()}%",
+            text = "${state.width} × ${state.height} px   ·   ${(state.zoom * 100).roundToInt()}%   ·   ${state.strokeCount} strokes",
             style = MaterialTheme.typography.bodySmall,
             color = YumeColors.textDim
         )

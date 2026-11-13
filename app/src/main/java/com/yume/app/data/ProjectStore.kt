@@ -33,7 +33,8 @@ data class ProjectMeta(
     val height: Int,
     val updatedAt: Long,
     val layerCount: Int,
-    val thumbFile: File?
+    val thumbFile: File?,
+    val strokeCount: Long = 0L
 )
 
 data class LoadedGroup(
@@ -402,6 +403,7 @@ class ProjectStore(private val context: Context) {
             height = json.optInt("height", 2048),
             updatedAt = json.optLong("updatedAt", manifest.lastModified()),
             layerCount = json.optJSONArray("layers")?.length() ?: 1,
+            strokeCount = json.optJSONObject("extras")?.optLong("strokes", 0L) ?: 0L,
             thumbFile = if (thumb.exists()) thumb else null
         )
     }

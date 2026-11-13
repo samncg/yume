@@ -74,11 +74,15 @@ class DrawingEngine(val width: Int, val height: Int) {
     /** Drawing guides (grid, perspective, ruler). */
     val guides = Guides(width, height)
 
+    /** Strokes painted in this document over its lifetime (shown in the gallery). */
+    @Volatile var strokeCount: Long = 0L
+
     /** Document settings beyond the core manifest, as one JSON object. */
     fun extrasJson(): String = org.json.JSONObject().apply {
         put("guides", guides.toJson())
         put("radial", symmetryRadial)
         put("mirror", symmetryMirror)
+        put("strokes", strokeCount)
     }.toString()
 
     fun loadExtras(json: String?) {
@@ -87,6 +91,7 @@ class DrawingEngine(val width: Int, val height: Int) {
         guides.load(o.optJSONObject("guides"))
         symmetryRadial = o.optInt("radial", 0).let { if (it < 2) 0 else it.coerceAtMost(32) }
         symmetryMirror = o.optBoolean("mirror", false)
+        strokeCount = o.optLong("strokes", 0L).coerceAtLeast(0L)
     }
 
     /** When set, only this layer is composited ("isolate layer"). */

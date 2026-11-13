@@ -561,6 +561,7 @@ class DrawingSession(
                     tool == Tool.Gradient -> gradientGuide = floatArrayOf(doc[0], doc[1], doc[0], doc[1])
                     tool == Tool.Shape -> beginShape(doc[0], doc[1], event.pressure)
                     tool == Tool.Liquify -> beginLiquify(doc[0], doc[1])
+                    tool == Tool.Text -> textRequest.value = floatArrayOf(doc[0], doc[1])
                     else -> beginStroke(doc[0], doc[1], event.pressure, event.tilt, event.eraserButton)
                 }
                 true
@@ -1172,6 +1173,7 @@ class DrawingSession(
                 }
             }
             layer.touch()
+            engine.strokeCount++
             // The colour only becomes "recent" once it has been used.
             if (brush?.category == BrushCategory.Brush) addRecent(swatch)
         } else {
@@ -1773,9 +1775,83 @@ class DrawingSession(
             return@post
         }
         val before = engine.snapshotState()
-        val scaled = fitToCanvas(source, engine.width, engine.height)
-        engine.newLayer(name = name, bitmap = scaled, at = engine.activeIndex + 1)
+        val canvasBytes = engine.width.toLong() * engine.height * 4L
+        if (canvasBytes > LARGE_CANVAS_BYTES) {
+            // Very large canvases: draw the picture straight into the new
+            // layer's tiles instead of building a canvas-sized bitmap first.
+            val layer = engine.newLayer(name = name, at = engine.activeIndex + 1)
+            val scale = min(engine.width.toFloat() / source.width, engine.height.toFloat() / source.height)
+            val w = source.width * scale
+            val h = source.height * scale
+            val left = (engine.width - w) / 2f
+            val top = (engine.height - h) / 2f
+            val dst = RectF(left, top, left + w, top + h)
+            val p = Paint(Paint.FILTER_BITMAP_FLAG)
+            layer.tiles.withWriteCanvas(Rect(left.toInt(), top.toInt(), (left + w).toInt() + 1, (top + h).toInt() + 1)) { c ->
+                c.drawBitmap(source, null, dst, p)
+            }
+            engine.markDirtyAll()
+        } else {
+            val scaled = fitToCanvas(source, engine.width, engine.height)
+            engine.newLayer(name = name, bitmap = scaled, at = engine.activeIndex + 1)
+        }
         pushStructural(before, "Import image", EditKind.Import)
+    }
+
+    /** Where the text tool was tapped (document px), waiting for the text dialog. */
+    val textRequest = kotlinx.coroutines.flow.MutableStateFlow<FloatArray?>(null)
+
+    /**
+     * Adds a text layer at ([x], [y]) (the top-left of the first line for
+     * left-aligned text; the alignment edge otherwise). The text is drawn
+     * straight into the new layer's tiles, only over its own bounds.
+     */
+    fun addTextLayer(
+        text: String, x: Float, y: Float, sizePx: Float, font: String,
+        bold: Boolean, italic: Boolean, align: Int, color: Int
+    ) = post {
+        val lines = text.split('\n')
+        if (text.isBlank()) return@post
+        if (!MemoryBudget.fitsDocument(engine.width, engine.height, engine.layers.size + 1)) {
+            onMessage?.invoke(MemoryBudget.documentRefusal(engine.width, engine.height, engine.layers.size + 1))
+            return@post
+        }
+        val style = when {
+            bold && italic -> android.graphics.Typeface.BOLD_ITALIC
+            bold -> android.graphics.Typeface.BOLD
+            italic -> android.graphics.Typeface.ITALIC
+            else -> android.graphics.Typeface.NORMAL
+        }
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+            typeface = android.graphics.Typeface.create(font, style)
+            textSize = sizePx.coerceIn(4f, 2000f)
+            this.color = color
+            textAlign = when (align) {
+                1 -> Paint.Align.CENTER
+                2 -> Paint.Align.RIGHT
+                else -> Paint.Align.LEFT
+            }
+        }
+        val fm = paint.fontMetrics
+        val lineH = (fm.descent - fm.ascent) * 1.15f
+        val widest = lines.maxOf { paint.measureText(it) }
+        val left = when (align) {
+            1 -> x - widest / 2f
+            2 -> x - widest
+            else -> x
+        }
+        val bounds = Rect(
+            (left - sizePx).toInt(), (y - sizePx * 0.2f).toInt(),
+            (left + widest + sizePx).toInt(), (y + lineH * lines.size + sizePx).toInt()
+        )
+        val before = engine.snapshotState()
+        val name = "Text: " + lines.first().take(24)
+        val layer = engine.newLayer(name = name, at = engine.activeIndex + 1)
+        layer.tiles.withWriteCanvas(bounds) { c ->
+            lines.forEachIndexed { i, line -> c.drawText(line, x, y - fm.ascent + i * lineH, paint) }
+        }
+        engine.markDirtyAll()
+        pushStructural(before, "Text", EditKind.LayerAdd)
     }
 
     private fun fitToCanvas(source: Bitmap, width: Int, height: Int): Bitmap {
@@ -3006,6 +3082,7 @@ class DrawingSession(
             quickShape = quickShapeEnabled,
             shapeKind = shapeKind,
             liquifyMode = liquifyMode,
+            strokeCount = engine.strokeCount,
             liquifySize = liquifySize,
             liquifyStrength = liquifyStrength,
             shapePerfect = shapePerfect,
@@ -3100,3 +3177,5 @@ class DrawingSession(
 
 private const val NO_HANDLE = -1
 private const val CENTER_HANDLE = 99
+/** Above this many bytes per layer, imports avoid canvas-sized bitmaps. */
+private const val LARGE_CANVAS_BYTES = 64L * 1024L * 1024L

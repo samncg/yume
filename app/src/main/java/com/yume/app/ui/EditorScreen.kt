@@ -342,6 +342,17 @@ fun EditorScreen(
             )
         }
 
+        val textAt by session.textRequest.collectAsStateWithLifecycle()
+        textAt?.let { at ->
+            TextDialog(
+                onDismiss = { session.textRequest.value = null },
+                onAdd = { text, size, font, bold, italic, align ->
+                    session.addTextLayer(text, at[0], at[1], size, font, bold, italic, align, state.color)
+                    session.textRequest.value = null
+                }
+            )
+        }
+
         if (renaming) {
             RenameDialog(
                 current = state.title,
@@ -523,6 +534,9 @@ private fun EditorTopBar(
                 },
                 CapsuleItem(Glyph.Liquify, "Liquify", selected = state.tool == Tool.Liquify) {
                     onTool(Tool.Liquify, PanelId.Liquify)
+                },
+                CapsuleItem(Glyph.Text, "Text", selected = state.tool == Tool.Text) {
+                    onTool(Tool.Text, null)
                 }
             ),
             onAnchor = onAnchor

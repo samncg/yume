@@ -365,7 +365,8 @@ private fun ProjectCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "${formatDate(meta.updatedAt)}  ·  ${meta.width} × ${meta.height}",
+                    text = "${formatDate(meta.updatedAt)}  ·  ${meta.width} × ${meta.height}" +
+                        if (meta.strokeCount > 0) "  ·  ${meta.strokeCount} strokes" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = YumeColors.textDim,
                     maxLines = 1
