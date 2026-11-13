@@ -519,7 +519,9 @@ class DrawingEngine(val width: Int, val height: Int) {
                     CompositeProfile.compositeNanos += System.nanoTime() - t0
                 }
                 // A tile that only ever held background must not stay allocated.
-                if (!existed && st.isTileEmpty(tx, ty)) st.clearTile(tx, ty)
+                // A tile created by this pass is default everywhere except [sub],
+                // so checking [sub] is enough and avoids a whole-tile scan.
+                if (!existed && st.isRectEmpty(sub)) st.clearTile(tx, ty)
             }
         }
     }
@@ -994,7 +996,8 @@ class DrawingEngine(val width: Int, val height: Int) {
             " group=${groupPool.hits}/${groupPool.hits + groupPool.misses}" +
             "(${groupPool.size}b,${groupPool.bytes / 1024}KB)" +
             " clip=${layerPool.hits}/${layerPool.hits + layerPool.misses}" +
-            "(${layerPool.size}b,${layerPool.bytes / 1024}KB)"
+            "(${layerPool.size}b,${layerPool.bytes / 1024}KB) " +
+            TilePool.stats()
 
     /**
      * Draws a layer's pixels into [c]. Sparse stores are asked for tiles that

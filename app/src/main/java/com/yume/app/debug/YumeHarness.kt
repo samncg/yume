@@ -35,6 +35,7 @@ import com.yume.app.engine.SelectionOp
 import com.yume.app.engine.SelectionUtil
 import com.yume.app.engine.SparseTileStore
 import com.yume.app.engine.StrokePainter
+import com.yume.app.engine.TilePool
 import com.yume.app.engine.TileStoreConfig
 import com.yume.app.engine.Tool
 import java.io.BufferedInputStream
@@ -2960,6 +2961,9 @@ object YumeHarness {
                 )
                 session.runInput()
                 val gc0 = gcStats()
+                // Measure this stroke from a cold tile pool so the counts are honest.
+                TilePool.reset()
+                TilePool.resetCounters()
                 FrameLogger.reset()
                 FrameLogger.enabled = true
                 FrameLogger.strokeActive = true
@@ -3073,7 +3077,8 @@ object YumeHarness {
                     " resLayer=${layerMb}MB" +
                     " gc=+${gc1.first - gc0.first}/${gc1.second - gc0.second}ms [$mb]" +
                     (if (profile) " ${CompositeProfile.summary()}" else "") + tail +
-                    (if (profile) " ${engine.poolReport()}" else "")
+                    (if (profile) " ${engine.poolReport()}" else "") +
+                    (if (profile) "" else " ${TilePool.stats()}")
             } catch (t: Throwable) {
                 "$tag: FAIL ${t.javaClass.simpleName} (needs more than the heap has)"
             } finally {

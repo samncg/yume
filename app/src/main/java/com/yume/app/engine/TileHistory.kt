@@ -77,7 +77,10 @@ class TileCapture(val store: TileStore) {
      */
     fun release(keep: Set<Long> = emptySet()) {
         for ((k, tile) in before) {
-            if (k !in keep) tile?.recycle()
+            if (k in keep || tile == null) continue
+            // Captured copies are exclusively owned by the capture, so they can
+            // be reused instead of waiting for the collector.
+            TilePool.release(tile)
         }
         before.clear()
     }

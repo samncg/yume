@@ -84,6 +84,13 @@ interface TileStore : PixelSource {
     /** True when the tile has no pixels that differ from [defaultPixel]. */
     fun isTileEmpty(tx: Int, ty: Int): Boolean
 
+    /**
+     * True when every pixel of [rect] equals the store's default pixel, treating
+     * missing tiles as the default. Used to decide whether a composite tile that
+     * was just updated over [rect] holds nothing but background.
+     */
+    fun isRectEmpty(rect: Rect): Boolean = false
+
     /** Drops the tile at (tx, ty) so it reads as [defaultPixel] again. */
     fun clearTile(tx: Int, ty: Int)
 
@@ -606,11 +613,13 @@ class SparseTileStore(
         canvases.getOrPut(k) { Canvas(tile) }
 
     private fun removeTile(k: Long) {
-        tiles.remove(k)
+        val b = tiles.remove(k)
         canvases.remove(k)
         // A removed tile reads as missing, so any cached opacity is stale.
         opaqueTiles.remove(k)
         opaqueVerified.remove(k)
+        // The store owns the bitmap exclusively, so it can go back to the pool.
+        if (b != null) TilePool.release(b)
     }
 
     private fun splitInto(source: Bitmap) {
@@ -634,7 +643,7 @@ class SparseTileStore(
                     if (any) break
                 }
                 if (!any) continue
-                val tile = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
+                val tile = TilePool.acquire(tw, th)
                 val c = Canvas(tile)
                 c.drawBitmap(
                     source,
@@ -683,6 +692,7 @@ class SparseTileStore(
     }
 
     override fun releaseToDisk(file: File) {
+        for (b in tiles.values) TilePool.release(b)
         backing = file
         tiles.clear()
         canvases.clear()
@@ -704,9 +714,7 @@ class SparseTileStore(
         val k = key(tx, ty)
         return tiles.getOrPut(k) {
             if (CompositeProfile.enabled) CompositeProfile.tilesAllocated++
-            val bmp = Bitmap.createBitmap(tileW(tx), tileH(ty), Bitmap.Config.ARGB_8888)
-            if (defaultPixel != 0) bmp.eraseColor(defaultPixel)
-            bmp
+            TilePool.acquire(tileW(tx), tileH(ty), defaultPixel)
         }
     }
 
@@ -722,14 +730,14 @@ class SparseTileStore(
     override fun isTileEmpty(tx: Int, ty: Int): Boolean {
         if (tx !in 0 until tileCountX || ty !in 0 until tileCountY) return true
         val tile = tiles[key(tx, ty)] ?: return true
-        val row = scanRow
-        for (y in 0 until tile.height) {
-            tile.getPixels(row, 0, tile.width, 0, y, tile.width, 1)
-            var x = 0
-            while (x < tile.width) {
-                if (row[x] != defaultPixel) return false
-                x++
-            }
+        val w = tile.width
+        val n = w * tile.height
+        val buf = scanBuf(n)
+        tile.getPixels(buf, 0, w, 0, 0, w, tile.height)
+        var i = 0
+        while (i < n) {
+            if (buf[i] != defaultPixel) return false
+            i++
         }
         return true
     }
@@ -1107,12 +1115,57 @@ class SparseTileStore(
         val t = tiles[k]
         // A missing tile is the store default, which is opaque for a mask.
         if (t == null || t.isRecycled) return (defaultPixel ushr 24) == 255
-        for (y in 0 until t.height) {
-            t.getPixels(scanRow, 0, t.width, 0, y, t.width, 1)
-            var x = 0
-            while (x < t.width) {
-                if ((scanRow[x] ushr 24) != 255) return false
-                x++
+        val n = t.width * t.height
+        val buf = scanBuf(n)
+        // One bulk read instead of one JNI call per row: the scan runs on the
+        // first touch of every tile, so it is on the tail-latency path.
+        t.getPixels(buf, 0, t.width, 0, 0, t.width, t.height)
+        var i = 0
+        while (i < n) {
+            if ((buf[i] ushr 24) != 255) return false
+            i++
+        }
+        return true
+    }
+
+    /** Reusable pixel buffer for full-tile scans; grown on demand. */
+    private var scanFull: IntArray? = null
+
+    private fun scanBuf(n: Int): IntArray {
+        val cur = scanFull
+        if (cur != null && cur.size >= n) return cur
+        val b = IntArray(n)
+        scanFull = b
+        return b
+    }
+
+    /**
+     * True when every pixel of [rect] is the store default. Missing tiles count
+     * as the default, so a rect over untouched area is empty.
+     */
+    override fun isRectEmpty(rect: Rect): Boolean {
+        val r = Rect(rect)
+        r.intersect(0, 0, width, height)
+        if (r.isEmpty) return true
+        for (ty in tyRange(r)) {
+            for (tx in txRange(r)) {
+                val tile = tiles[key(tx, ty)] ?: continue
+                val x0 = tx * tileSize
+                val y0 = ty * tileSize
+                val l = max(r.left, x0)
+                val t = max(r.top, y0)
+                val rr = min(r.right, x0 + tile.width)
+                val bb = min(r.bottom, y0 + tile.height)
+                if (rr <= l || bb <= t) continue
+                val w = rr - l
+                val h = bb - t
+                val buf = scanBuf(w * h)
+                tile.getPixels(buf, 0, w, l - x0, t - y0, w, h)
+                var i = 0
+                while (i < w * h) {
+                    if (buf[i] != defaultPixel) return false
+                    i++
+                }
             }
         }
         return true
@@ -1200,7 +1253,7 @@ class SparseTileStore(
         if (tx !in 0 until tileCountX || ty !in 0 until tileCountY) return null
         val tile = tiles[key(tx, ty)] ?: return null
         if (isTileEmpty(tx, ty)) return null
-        val out = Bitmap.createBitmap(tile.width, tile.height, Bitmap.Config.ARGB_8888)
+        val out = TilePool.acquire(tile.width, tile.height)
         Canvas(out).drawBitmap(tile, 0f, 0f, null)
         return out
     }
@@ -1228,7 +1281,7 @@ class SparseTileStore(
             removeTile(k)
             return
         }
-        val tile = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
+        val tile = TilePool.acquire(tw, th)
         Canvas(tile).drawBitmap(
             source,
             Rect(0, 0, min(tw, source.width), min(th, source.height)),
@@ -1275,24 +1328,28 @@ class SparseTileStore(
     }
 
     override fun clear() {
+        for (b in tiles.values) TilePool.release(b)
         tiles.clear()
         canvases.clear()
+        opaqueTiles.clear()
+        opaqueVerified.clear()
         backing = null
         materialized = true
         markDirty(Rect(0, 0, width, height))
     }
 
     override fun fill(color: Int) {
+        for (b in tiles.values) TilePool.release(b)
         tiles.clear()
         canvases.clear()
+        opaqueTiles.clear()
+        opaqueVerified.clear()
         backing = null
         materialized = true
         if (color != defaultPixel) {
             for (ty in 0 until tileCountY) {
                 for (tx in 0 until tileCountX) {
-                    val tile = Bitmap.createBitmap(tileW(tx), tileH(ty), Bitmap.Config.ARGB_8888)
-                    tile.eraseColor(color)
-                    tiles[key(tx, ty)] = tile
+                    tiles[key(tx, ty)] = TilePool.acquire(tileW(tx), tileH(ty), color)
                 }
             }
         }
