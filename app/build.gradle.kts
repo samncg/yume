@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -11,9 +13,29 @@ android {
     defaultConfig {
         applicationId = "com.yume.app"
         minSdk = 29
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.0.0"
+    }
+
+    // Release signing comes from keystore.properties (never committed):
+    //   storeFile=/path/to/yume-release.jks
+    //   storePassword=...
+    //   keyAlias=yume
+    //   keyPassword=...
+    // Without it, release builds are signed with the debug key so they can be
+    // installed for testing; Play rejects debug-signed uploads.
+    val keystoreFile = rootProject.file("keystore.properties")
+    signingConfigs {
+        if (keystoreFile.exists()) {
+            create("release") {
+                val props = Properties().apply { keystoreFile.inputStream().use { load(it) } }
+                storeFile = file(props.getProperty("storeFile"))
+                storePassword = props.getProperty("storePassword")
+                keyAlias = props.getProperty("keyAlias")
+                keyPassword = props.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
@@ -21,8 +43,11 @@ android {
             isMinifyEnabled = false
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = if (keystoreFile.exists()) signingConfigs.getByName("release")
+            else signingConfigs.getByName("debug")
         }
     }
 
@@ -35,6 +60,12 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    lint {
+        // The lifecycle library's LiveData detector crashes on this Kotlin
+        // version (IncompatibleClassChangeError in UAST). Yume uses no LiveData.
+        disable += "NullSafeMutableLiveData"
     }
 
     packaging {

@@ -273,6 +273,14 @@ class DrawingEngine(val width: Int, val height: Int) {
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val c = Canvas(out)
         val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+        val mip = mipTiles
+        if (mip != null && mipReady() && maxOf(mipWidth, mipHeight) >= maxPx) {
+            // The quarter-size mip is current and big enough: a few tiles
+            // instead of every composite tile (which may be on disk at 8K).
+            c.scale(w.toFloat() / mipWidth, h.toFloat() / mipHeight)
+            mip.drawInto(c, paint)
+            return out
+        }
         c.scale(w.toFloat() / width, h.toFloat() / height)
         val st = compositeTiles
         if (st != null) st.drawInto(c, paint) else c.drawBitmap(composite, 0f, 0f, paint)

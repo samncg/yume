@@ -57,6 +57,24 @@ Documents are plain PNG layers on disk and are saved automatically.
   brush, restored when you reopen the document, and individually deletable.
 - **Autosave** — changes are written shortly after you stop, every 25 seconds,
   when the app goes to the background and when you leave the document.
+- **8K canvases** — sparse tiled layers with a disk-backed tile cache accept
+  documents up to 8192 × 8192 (Stage 3c).
+- **QuickShape and the Shape tool** — hold the pen at the end of a stroke to
+  snap it to a line, polyline, polygon, rectangle, ellipse or circle; or draw
+  lines, rectangles, ellipses, polygons and stars directly.
+- **Drawing guides** — square grid, one/two/three-point perspective with
+  draggable vanishing points, and a ruler, with assisted drawing that locks
+  strokes to them; radial symmetry with an optional mirror.
+- **Liquify** — push, twirl, pinch, expand and restore.
+- **More adjustments** — curves, levels, colour balance and gradient maps,
+  on the active layer or all layers.
+- **Brush engine extras** — imported stamp shapes and grain textures, stamp
+  rotation (stroke, tilt, random), wet colour mixing, a live preview, and
+  `.yumebrush` import/export.
+- **Text, references, groups** — a text tool, a floating reference picture,
+  and groups you can drag layers into and out of, duplicate, merge or delete.
+- **Exports and backups** — PNG, JPEG, WebP, PDF, OpenRaster and a timelapse
+  video, to the share sheet or a file; whole-project backup and restore.
 
 ---
 
@@ -542,13 +560,28 @@ inside the gesture. Neither is canvas-sized.
 
 ## Building and installing
 
-Requirements: **JDK 17**, **Android SDK 35**, and a device on **Android 10
+Requirements: **JDK 17**, **Android SDK 36**, and a device on **Android 10
 (minSdk 29)** or newer.
 
 ```bash
 ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Release builds are shrunk with R8 and target API 36. Signing reads
+`keystore.properties` at the project root (never committed):
+
+```properties
+storeFile=/path/to/yume-release.jks
+storePassword=...
+keyAlias=yume
+keyPassword=...
+```
+
+Without that file `assembleRelease` signs with the debug key, which is fine for
+testing on a device but is rejected by Google Play. Cloud backup excludes
+paintings (they exceed Android's 25 MB cloud-backup limit); device-to-device
+transfer keeps everything, and the gallery's Back up… writes a full zip.
 
 `gradle.properties` pins `org.gradle.java.home`; if your JDK lives elsewhere,
 override it or set `JAVA_HOME` before invoking the wrapper.
@@ -761,6 +794,34 @@ so documents written by either store open in the other and in the old build.
 ---
 
 ## Known limitations
+
+- **Groups cannot be nested.** A group holds layers, not other groups. The
+  compositor renders groups with one scratch surface and the layer model is
+  flat; nesting needs a recursive compositor, a tree in the document model,
+  persistence and history. Tracked for a later release.
+- **After a crash, recovery restores the pixels but not undo history.** The
+  journal replays the pixels on top of the last full save; the history that
+  belonged to that save would not match, so it is dropped. A document opened
+  for the first time after the switch to sparse storage also starts with an
+  empty history (its pixels are unchanged).
+- **JPEG and WebP exports are capped at 16.8 megapixels.** Android encodes
+  them from one in-memory bitmap; larger documents export scaled (the dialog
+  says so). PNG, PDF and OpenRaster are always full size.
+- **OpenRaster export does not include layer masks or clipping.** The format
+  has no masks; layers are exported unmasked. Groups become sub-stacks.
+- **The timelapse records from the moment a document is opened with this
+  version.** Frames (at most 1280 px) are taken at autosave time, after new
+  strokes, and thin out as the document grows; older history is not replayed.
+- **Text is rasterised when placed.** Move or scale it with Transform; to
+  change the words, undo and add it again.
+- **Liquify Restore remembers the layer from when liquify started on it.**
+  Switching tools or layers forgets that starting point.
+- **Pen squeeze / double-tap on Xiaomi pens do not reach Yume.** HyperOS only
+  passes them to its approved apps; the two-finger hold opens the same menu.
+- **Full lint cannot run on this toolchain.** AGP 8.7.3's lint crashes on
+  Kotlin 2.3 UAST (Compose and lifecycle detectors). The release build's
+  lint-vital pass runs with the one crashing LiveData check disabled (Yume
+  uses no LiveData); a full report needs an AGP upgrade.
 
 - **Clipping uses the raw alpha of the layer directly below.** If that layer has
   a mask, the clip shape ignores the mask.

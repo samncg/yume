@@ -525,8 +525,10 @@ private fun EditorTopBar(
             ),
             onAnchor = onAnchor
         )
-        Spacer(Modifier.weight(1f))
-        // Every tool in one pill, so the glass bubble can travel between all of them.
+        // Every tool in one pill, so the glass bubble can travel between all of
+        // them. On a narrow (portrait) screen the pill scrolls sideways instead
+        // of pushing the colour chip off the edge.
+        Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
         GlassToolCapsule(
             listOf(
                 CapsuleItem(Glyph.Select, "Select", selected = state.tool == Tool.Selection) {
@@ -560,8 +562,10 @@ private fun EditorTopBar(
                     onTool(Tool.Text, null)
                 }
             ),
-            onAnchor = onAnchor
+            onAnchor = onAnchor,
+            modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState())
         )
+        }
         GlassToolCapsule(
             listOf(
                 CapsuleItem(Glyph.Sliders, "Adjustments", active = activePanel == PanelId.Adjust) {

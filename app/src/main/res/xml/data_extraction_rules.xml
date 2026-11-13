@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cloud backup is capped at 25 MB per app: paintings (files/projects) and
+     imported brush assets would exceed it and fail the whole backup, so only
+     settings travel to the cloud. Device-to-device transfer keeps everything. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="projects/" />
+        <exclude domain="file" path="brush_shapes/" />
+        <exclude domain="file" path="brush_grains/" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="file" path="." />
+        <include domain="sharedpref" path="." />
+    </device-transfer>
+</data-extraction-rules>

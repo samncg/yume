@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and older: settings only (see data_extraction_rules.xml). -->
+<full-backup-content>
+    <exclude domain="file" path="projects/" />
+    <exclude domain="file" path="brush_shapes/" />
+    <exclude domain="file" path="brush_grains/" />
+</full-backup-content>
