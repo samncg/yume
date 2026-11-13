@@ -24,7 +24,10 @@ object AllocTracker {
     const val ENCODE_SITE: String = "encode.canvas"
 
     /** Sites that may allocate at canvas size in a sparse document. */
-    val allowedSites: Set<String> = setOf(ENCODE_SITE)
+    // Stage 3c: saving, loading and export are banded, so nothing may
+    // allocate at canvas size any more. ENCODE_SITE is kept for the dense
+    // flatten() the harness still uses as a reference.
+    val allowedSites: Set<String> = emptySet()
 
     /** Allocates the canvas-sized surface used by the PNG encoder. */
     fun encodeCanvas(w: Int, h: Int): Bitmap = bitmap(ENCODE_SITE, w, h)

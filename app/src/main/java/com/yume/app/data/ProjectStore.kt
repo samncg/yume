@@ -431,8 +431,17 @@ class ProjectStore(private val context: Context) {
     private fun tempFile(dir: File, name: String): File = File(dir, "$TMP_PREFIX$name")
 
     /** Encodes [bitmap] to [file]; returns false on failure. */
+    /**
+     * Layer / mask PNG through the banded encoder (Stage 3c), so a dense layer
+     * and a sparse layer with the same pixels produce the same bytes.
+     */
     private fun encodePng(file: File, bitmap: Bitmap): Boolean = runCatching {
-        FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
+        val w = bitmap.width
+        java.io.BufferedOutputStream(FileOutputStream(file), 1 shl 16).use { out ->
+            com.yume.app.engine.BandedPng.encode(out, w, bitmap.height, ENCODE_BAND) { y0, rows, px ->
+                bitmap.getPixels(px, 0, w, 0, y0, w, rows)
+            }
+        }
         true
     }.getOrDefault(false)
 
@@ -453,32 +462,88 @@ class ProjectStore(private val context: Context) {
                 "were unreadable. The previous saved version was kept."
             return false
         }
-        // The one canvas-sized assembly a sparse document is allowed to build:
-        // the surface handed to the PNG encoder. Allocated through the shared
-        // encode site so the debug allocation counter can prove it is the only
-        // one, and capped by the memory guard.
-        if (!MemoryBudget.fitsBitmaps(store.width, store.height, 1)) return false
-        val full = runCatching {
-            val b = AllocTracker.encodeCanvas(store.width, store.height)
-            // Evicted tiles load on the engine's owner thread, never here.
-            if (!onOwner { store.readRectInto(Rect(0, 0, store.width, store.height), b) }) {
-                b.recycle()
-                saveWarning = "Saving timed out waiting for the canvas; kept the previous version"
+        // Stage 3c: rows go from tiles straight into the encoder, one tile row
+        // (band) at a time, read on the engine's owner thread. No canvas-sized
+        // bitmap exists at any point. A layer that changes while it is being
+        // encoded is encoded again (a band could otherwise mix two states).
+        for (attempt in 0 until 3) {
+            val before = sparse?.modCount ?: 0L
+            val error = encodeStoreBands(file, store, onOwner)
+            if (error != null) {
+                saveWarning = error
                 return false
             }
             if (sparse != null && sparse.lostTiles > 0) {
-                b.recycle()
                 saveWarning = "A layer could not be saved: cached tiles were unreadable. " +
                     "The previous saved version was kept."
                 return false
             }
-            b
-        }.getOrNull() ?: return false
-        return try {
-            encodePng(file, full)
-        } finally {
-            full.recycle()
+            if (sparse == null || sparse.modCount == before) return true
         }
+        // Still changing after three tries: keep the previous file; the next
+        // save retries.
+        return false
+    }
+
+    /** Encodes [store] band by band into [file]; returns an error message or null. */
+    private fun encodeStoreBands(
+        file: File,
+        store: TileStore,
+        onOwner: (() -> Unit) -> Boolean
+    ): String? {
+        val w = store.width
+        val h = store.height
+        val bandRows = if (store.isSparse) store.tileSize else ENCODE_BAND
+        val band = Bitmap.createBitmap(w, minOf(bandRows, h), Bitmap.Config.ARGB_8888)
+        val rect = Rect()
+        return try {
+            java.io.BufferedOutputStream(FileOutputStream(file), 1 shl 16).use { out ->
+                com.yume.app.engine.BandedPng.encode(out, w, h, bandRows) { y0, rows, px ->
+                    rect.set(0, y0, w, y0 + rows)
+                    if (!onOwner { store.readRectInto(rect, band) }) {
+                        throw java.io.IOException("timed out waiting for the canvas")
+                    }
+                    band.getPixels(px, 0, w, 0, 0, w, rows)
+                }
+            }
+            null
+        } catch (e: java.io.IOException) {
+            "Saving failed (${e.message}); kept the previous version"
+        } finally {
+            band.recycle()
+        }
+    }
+
+    /**
+     * Exports through [writer], which streams PNG bytes (banded for sparse
+     * documents) into a new Pictures/Yume entry. The entry is removed again if
+     * the writer fails.
+     */
+    fun exportPngStream(name: String, writer: (java.io.OutputStream) -> Boolean): Uri? {
+        val safeName = name.ifBlank { "Yume" }.replace(Regex("[^A-Za-z0-9 _-]"), "").trim()
+            .ifBlank { "Yume" }
+        val fileName = "$safeName-${System.currentTimeMillis()}.png"
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Yume")
+        }
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            ?: return null
+        val ok = runCatching {
+            resolver.openOutputStream(uri)?.use { raw ->
+                val out = java.io.BufferedOutputStream(raw, 1 shl 16)
+                val r = writer(out)
+                out.flush()
+                r
+            } ?: false
+        }.getOrDefault(false)
+        if (!ok) {
+            runCatching { resolver.delete(uri, null, null) }
+            return null
+        }
+        return uri
     }
 
     /** Copies bytes from [source] to [target]; returns false on failure. */
@@ -744,6 +809,8 @@ class ProjectStore(private val context: Context) {
     }.getOrNull()
 
     private companion object {
+        /** Rows per encoder band for dense surfaces (Stage 3c banded PNG). */
+        const val ENCODE_BAND = 256
         /** Prefix for in-progress writes; must not look like a layer file. */
         const val TMP_PREFIX = ".tmp-"
     }

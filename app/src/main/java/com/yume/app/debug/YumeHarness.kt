@@ -147,6 +147,11 @@ object YumeHarness {
                     out.append(scoreCacheFailures(app))
                     out.append(scoreGoldenEvict(app))
                     out.append(scoreCacheBig(app))
+                } else if (only == "png") {
+                    out.append(scorePngParity(app))
+                    out.append(line(scoreOpsAlloc(app)))
+                    out.append(line(scoreSparsePersistence(app)))
+                    out.append(line(scoreExportParity()))
                 } else if (only == "cachepaint") {
                     out.append(scoreCacheBig(app, quick = true))
                 } else if (only == "cachebig") {
@@ -193,7 +198,7 @@ object YumeHarness {
                 out.append(line(scoreComposite()))
                 out.append(line(scoreStrokeCache()))
                 out.append(line(scoreMip()))
-                out.append(line(scoreOpsAlloc()))
+                out.append(line(scoreOpsAlloc(app)))
                 out.append(line(scoreDabScratch()))
                 out.append(line(scoreHardEdge()))
                 out.append(line(scoreWand()))
@@ -205,6 +210,7 @@ object YumeHarness {
                 out.append(scoreSparseStore())
                 out.append(line(scoreMemory()))
                 out.append(scoreSolidMemory())
+                out.append(scorePngParity(app))
                 out.append(scoreFuzzEvict())
                 out.append(scoreCacheFailures(app))
                 out.append(scoreGoldenEvict(app))
@@ -2700,6 +2706,129 @@ object YumeHarness {
         return out.toString()
     }
 
+    /**
+     * Banded PNG (Stage 3c) against the platform codec, on opaque, translucent
+     * and mask-like content at sizes that are and are not tile multiples:
+     *  - legacy file (Bitmap.compress, what old documents contain) read by the
+     *    banded decoder into a sparse store == BitmapFactory decode;
+     *  - banded file read by BitmapFactory == the same file read banded;
+     *  - banded file read back == the source pixels (exact for opaque content;
+     *    translucent pixels go through unpremultiply, reported as a diff).
+     */
+    private fun scorePngParity(app: YumeApp): String {
+        val out = StringBuilder()
+        val dir = File(app.cacheDir, "png-parity")
+        dir.deleteRecursively()
+        dir.mkdirs()
+        val opts = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inMutable = true
+        }
+        fun content(kind: String, w: Int, h: Int): Bitmap {
+            val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val c = Canvas(b)
+            val rnd = Random(w * 31L + h + kind.length)
+            when (kind) {
+                "opaque" -> {
+                    c.drawColor(0xFF203040.toInt())
+                    val p = Paint()
+                    for (i in 0 until 60) {
+                        p.color = rnd.nextInt() or 0xFF000000.toInt()
+                        c.drawCircle(rnd.nextInt(w).toFloat(), rnd.nextInt(h).toFloat(), 8f + rnd.nextInt(120), p)
+                    }
+                }
+                "translucent" -> {
+                    val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                    for (i in 0 until 80) {
+                        p.color = rnd.nextInt()
+                        c.drawCircle(rnd.nextInt(w).toFloat(), rnd.nextInt(h).toFloat(), 8f + rnd.nextInt(120), p)
+                    }
+                }
+                else -> { // mask: white with black/grey shapes
+                    c.drawColor(0xFFFFFFFF.toInt())
+                    val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                    for (i in 0 until 30) {
+                        val g = rnd.nextInt(256)
+                        p.color = 0xFF000000.toInt() or (g * 0x010101)
+                        c.drawRect(
+                            rnd.nextInt(w).toFloat(), rnd.nextInt(h).toFloat(),
+                            rnd.nextInt(w).toFloat(), rnd.nextInt(h).toFloat(), p
+                        )
+                    }
+                }
+            }
+            return b
+        }
+        fun bandedRead(file: File, w: Int, h: Int, def: Int): Bitmap? {
+            val st = SparseTileStore(w, h, 256, null, file, def, solidTiles = true)
+            st.ensureResident()
+            if (!st.isResident) return null
+            return st.copyAll()
+        }
+        var fails = 0
+        for ((w, h) in listOf(1000 to 700, 1024 to 1024, 301 to 999)) {
+            for (kind in listOf("opaque", "translucent", "mask")) {
+                val def = if (kind == "mask") 0xFFFFFFFF.toInt() else 0
+                val src = content(kind, w, h)
+                val legacy = File(dir, "legacy-$kind-$w.png")
+                java.io.FileOutputStream(legacy).use { src.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                val banded = File(dir, "banded-$kind-$w.png")
+                java.io.BufferedOutputStream(java.io.FileOutputStream(banded)).use { o ->
+                    com.yume.app.engine.BandedPng.encode(o, w, h, 256) { y0, rows, px ->
+                        src.getPixels(px, 0, w, 0, y0, w, rows)
+                    }
+                }
+                val legacyPlatform = BitmapFactory.decodeFile(legacy.path, opts)
+                val legacyBanded = bandedRead(legacy, w, h, def)
+                val bandedPlatform = BitmapFactory.decodeFile(banded.path, opts)
+                val bandedBanded = bandedRead(banded, w, h, def)
+                val a = legacyBanded != null && legacyBanded.sameAs(legacyPlatform)
+                val b = bandedBanded != null && bandedPlatform != null && bandedBanded.sameAs(bandedPlatform)
+                val roundTrip = if (bandedBanded == null) "decode-failed"
+                else if (bandedBanded.sameAs(src)) "exact" else diffNote(bandedBanded, src)
+                val legacyVsBanded = if (bandedPlatform != null && legacyPlatform != null) {
+                    if (bandedPlatform.sameAs(legacyPlatform)) "same" else diffNote(bandedPlatform, legacyPlatform)
+                } else "n/a"
+                val ok = a && b && (kind == "translucent" || roundTrip == "exact")
+                if (!ok) fails++
+                out.append("png-parity ${w}x$h $kind: ${if (ok) "PASS" else "FAIL"}")
+                    .append(" legacy:banded==platform=$a new:banded==platform=$b")
+                    .append(" roundTrip=$roundTrip newVsLegacyPixels=$legacyVsBanded")
+                    .append(" bytes legacy=${legacy.length() / 1024}KB banded=${banded.length() / 1024}KB\n")
+                listOfNotNull(src, legacyPlatform, legacyBanded, bandedPlatform, bandedBanded).forEach { it.recycle() }
+            }
+        }
+        // Speed at 4096^2 opaque content: banded encode vs Bitmap.compress.
+        run {
+            val src = content("opaque", 4096, 4096)
+            val f1 = File(dir, "speed-legacy.png")
+            val t0 = System.nanoTime()
+            java.io.FileOutputStream(f1).use { src.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            val t1 = System.nanoTime()
+            val f2 = File(dir, "speed-banded.png")
+            java.io.BufferedOutputStream(java.io.FileOutputStream(f2), 1 shl 16).use { o ->
+                com.yume.app.engine.BandedPng.encode(o, 4096, 4096, 256) { y0, rows, px ->
+                    src.getPixels(px, 0, 4096, 0, y0, 4096, rows)
+                }
+            }
+            val t2 = System.nanoTime()
+            val st = SparseTileStore(4096, 4096, 256, null, f2, 0, solidTiles = true)
+            st.ensureResident()
+            val t3 = System.nanoTime()
+            val tPlat = System.nanoTime()
+            BitmapFactory.decodeFile(f2.path, opts)?.recycle()
+            val t4 = System.nanoTime()
+            out.append("png-speed 4096x4096: encode legacy=${(t1 - t0) / 1_000_000}ms ${f1.length() shr 10}KB")
+                .append(" banded=${(t2 - t1) / 1_000_000}ms ${f2.length() shr 10}KB;")
+                .append(" decode banded->tiles=${(t3 - t2) / 1_000_000}ms platform=${(t4 - tPlat) / 1_000_000}ms\n")
+            src.recycle()
+            st.clear()
+        }
+        out.append("png-parity verdict=${if (fails == 0) "PASS" else "FAIL"}\n")
+        dir.deleteRecursively()
+        return out.toString()
+    }
+
     private fun pct(sorted: LongArray, q: Double): String {
         if (sorted.isEmpty()) return "-"
         val i = ((sorted.size - 1) * q).toInt().coerceIn(0, sorted.size - 1)
@@ -4495,7 +4624,7 @@ object YumeHarness {
      * counter on. In sparse mode only the stamping band and the single PNG
      * encode surface may be canvas sized; anything else is a regression.
      */
-    private fun scoreOpsAlloc(): String {
+    private fun scoreOpsAlloc(app: YumeApp): String {
         val oldS = TileStoreConfig.useSparseLayers
         val oldT = TileStoreConfig.tileSize
         TileStoreConfig.useSparseLayers = true
@@ -4583,9 +4712,28 @@ object YumeHarness {
                 engine.applySelection(region, SelectionOp.Replace)
                 engine.setSelection(null)
             }
-            op("flatten") {
-                val flat = engine.flatten()
-                flat.recycle()
+            op("undo") { session.undo(); session.runCommands() }
+            op("redo") { session.redo(); session.runCommands() }
+            op("export") {
+                val sink = java.io.ByteArrayOutputStream()
+                if (!session.exportBandedTo(sink)) throw IllegalStateException("export failed")
+            }
+            // Save and lazy load through the real ProjectStore paths.
+            val ps = app.projectStore
+            val project = ps.createProject("harness-alloc", size, size, BG)
+            try {
+                op("save") { ps.saveProject(project.id, session.snapshotNow()) }
+                op("load") {
+                    val loaded = ps.loadProject(project.id) ?: error("reload failed")
+                    val rebuilt = DrawingEngine(size, size)
+                    for (d in loaded.layers) {
+                        val l = rebuilt.newLayer(name = d.name, bitmap = d.bitmap, backingFile = d.file)
+                        l.adoptMask(d.mask, d.maskFile)
+                    }
+                    rebuilt.compositeAll()
+                }
+            } finally {
+                runCatching { ps.deleteProject(project.id) }
             }
         } finally {
             TileStoreConfig.useSparseLayers = oldS

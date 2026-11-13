@@ -217,6 +217,14 @@ class EditorController(
     fun export() {
         val session = _session.value ?: return
         scope.launch {
+            if (session.engine.compositeIsSparse) {
+                // Stage 3c: no canvas-sized bitmap; rows stream from the tiles.
+                val uri = runCatching {
+                    store.exportPngStream(session.title) { out -> session.exportBandedTo(out) }
+                }.getOrNull()
+                _message.value = if (uri != null) "Exported to Pictures/Yume" else "Export failed"
+                return@launch
+            }
             val flat = session.flattenBlocking()
             if (flat == null) {
                 _message.value = "Export failed"

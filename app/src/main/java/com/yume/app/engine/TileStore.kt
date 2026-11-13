@@ -840,6 +840,14 @@ class SparseTileStore(
      * through [writableTile], which swaps a solid for a private copy first.
      */
     private val solids = HashMap<Long, Int>()
+    /**
+     * Bumped by every pixel change (write, solid assignment, removal, fill).
+     * A banded save reads a layer over several owner-thread turns and uses it
+     * to detect that the layer changed in between.
+     */
+    @Volatile var modCount: Long = 0L
+        private set
+
     /** Solid -> private copies made because something wrote into a solid. */
     var unshares: Long = 0L
         private set
@@ -898,6 +906,7 @@ class SparseTileStore(
     }
 
     private fun removeTile(k: Long) {
+        modCount++
         val b = tiles.remove(k)
         canvases.remove(k)
         lastUse.remove(k)
@@ -910,6 +919,7 @@ class SparseTileStore(
     }
 
     private fun releaseAll() {
+        modCount++
         for ((k, b) in tiles) if (k !in solids) TilePool.release(b)
         tiles.clear()
         evicted.clear()
@@ -929,6 +939,7 @@ class SparseTileStore(
      * so cached opacity stays valid until the caller's write marks it dirty.
      */
     private fun writableTile(k: Long, tx: Int, ty: Int): Bitmap {
+        modCount++
         if (spillFile != null) {
             // Protect the tile from eviction until the next one is handed out,
             // and invalidate its spill record: the caller is about to change it.
@@ -1012,6 +1023,7 @@ class SparseTileStore(
      * whatever private tile was there. Pixels change, so the caller marks dirty.
      */
     private fun assignSolid(k: Long, shared: Bitmap, colour: Int) {
+        modCount++
         forgetSpill(k)
         val old = tiles[k]
         if (old != null && old !== shared) releaseOwned(k, old)
@@ -1130,12 +1142,71 @@ class SparseTileStore(
 
     override val isResident: Boolean get() = materialized
 
+    /**
+     * Installs one decoded band (rows [y0] until y0+rows, unpremultiplied ARGB,
+     * stride [w]) as tiles. Bands are tile aligned: y0 is a multiple of the tile
+     * size and rows is that tile row's height. Default-only tiles are skipped,
+     * uniform ones become solids, and the cache budget is kept while loading.
+     */
+    fun loadBand(y0: Int, rows: Int, px: IntArray, w: Int) {
+        if (y0 % tileSize != 0) throw IllegalArgumentException("band not tile aligned")
+        val ty = y0 / tileSize
+        if (ty !in 0 until tileCountY) return
+        val th = min(rows, tileH(ty))
+        for (tx in 0 until tileCountX) {
+            val x0 = tx * tileSize
+            val tw = tileW(tx)
+            if (x0 + tw > w) break
+            var any = false
+            var r = 0
+            while (r < th && !any) {
+                var i = r * w + x0
+                val end = i + tw
+                while (i < end) {
+                    var c = px[i]
+                    // Fully transparent pixels premultiply to 0 whatever their
+                    // colour bits, exactly as a decoded bitmap would read back.
+                    if (c ushr 24 == 0) c = 0
+                    if (c != defaultPixel) {
+                        any = true
+                        break
+                    }
+                    i++
+                }
+                r++
+            }
+            if (!any) continue
+            val tile = TilePool.acquire(tw, th)
+            tile.setPixels(px, x0, w, 0, 0, tw, th)
+            val k = key(tx, ty)
+            tiles[k] = tile
+            modCount++
+            if (solidTiles) compactTile(k)
+            cache?.evictIfFarOver()
+        }
+    }
+
     override fun ensureResident() {
         if (materialized) return
         val file = backing
         if (file == null) {
             materialized = true
             return
+        }
+        // Stage 3c: stream the PNG band by band into tiles, never holding the
+        // whole layer. Formats the banded decoder does not handle (16-bit,
+        // interlaced, colour profiles) and corrupt files fall back to the old
+        // full decode below.
+        val head = BandedPng.readSize(file)
+        if (head != null && head.width == width && head.height == height) {
+            val ok = runCatching {
+                BandedPng.decode(file, tileSize) { y0, rows, px -> loadBand(y0, rows, px, width) }
+            }.getOrDefault(false)
+            if (ok) {
+                materialized = true
+                return
+            }
+            releaseAll()
         }
         val decoded = runCatching {
             BitmapFactory.decodeFile(
@@ -1793,6 +1864,7 @@ class SparseTileStore(
             srcPaint
         )
         forgetSpill(k)
+        modCount++
         val old = tiles[k]
         if (old != null && old !== source) releaseOwned(k, old)
         solids.remove(k)

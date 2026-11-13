@@ -1900,6 +1900,38 @@ class DrawingSession(
         symmetryYPos = engine.symmetryYPos
     )
 
+    /**
+     * Streams the flattened document as a PNG into [out], band by band from the
+     * sparse composite (read on the owner thread). Returns false on failure, or
+     * when the composite changed while it was being encoded (the caller then
+     * discards the partial export).
+     */
+    fun exportBandedTo(out: java.io.OutputStream): Boolean {
+        if (!runOnOwner { engine.compositeAll() }) return false
+        val st = engine.compositeTiles ?: return false
+        val w = engine.width
+        val h = engine.height
+        val bandRows = st.tileSize
+        val band = Bitmap.createBitmap(w, minOf(bandRows, h), Bitmap.Config.ARGB_8888)
+        val rect = android.graphics.Rect()
+        return try {
+            val before = st.modCount
+            BandedPng.encode(out, w, h, bandRows) { y0, rows, px ->
+                rect.set(0, y0, w, y0 + rows)
+                if (!runOnOwner { st.readRectInto(rect, band) }) {
+                    throw java.io.IOException("timed out")
+                }
+                band.getPixels(px, 0, w, 0, 0, w, rows)
+            }
+            out.flush()
+            st.modCount == before
+        } catch (e: java.io.IOException) {
+            false
+        } finally {
+            band.recycle()
+        }
+    }
+
     fun flattenBlocking(): Bitmap? {
         val latch = CountDownLatch(1)
         var result: Bitmap? = null
