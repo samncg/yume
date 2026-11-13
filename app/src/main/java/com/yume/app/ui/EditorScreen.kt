@@ -102,6 +102,15 @@ fun EditorScreen(
     // their own button and return to it.
     var panelAnchorX by remember { mutableStateOf<Float?>(null) }
     var rootWidth by remember { mutableStateOf(1f) }
+    // Each panel remembers the button it came from, so it closes back into that
+    // button even when another button was tapped since.
+    val panelAnchors = remember { androidx.compose.runtime.snapshots.SnapshotStateMap<PanelId, Float>() }
+    fun showPanel(id: PanelId?) {
+        if (id != null && id != panel) panelAnchors[id] = panelAnchorX ?: rootWidth
+        panel = id
+    }
+    // Squeeze menu position (window px), or null when closed.
+    var penMenuAt by remember { mutableStateOf<Offset?>(null) }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -171,13 +180,15 @@ fun EditorScreen(
                         // already selected opens (or closes) its settings.
                         val sameTool = state.tool == tool
                         session.chooseTool(tool)
-                        panel = when {
-                            sameTool && panelId != null -> if (panel == panelId) null else panelId
-                            panel in TOOL_PANELS -> null
-                            else -> panel
-                        }
+                        showPanel(
+                            when {
+                                sameTool && panelId != null -> if (panel == panelId) null else panelId
+                                panel in TOOL_PANELS -> null
+                                else -> panel
+                            }
+                        )
                     },
-                    onPanel = { id -> panel = if (panel == id) null else id },
+                    onPanel = { id -> showPanel(if (panel == id) null else id) },
                     onAnchor = { x -> panelAnchorX = x },
                     onColorDrop = { window ->
                         session.colorDropAt(window.x - canvasOrigin.x, window.y - canvasOrigin.y)
@@ -194,14 +205,16 @@ fun EditorScreen(
                 androidx.compose.animation.AnimatedContent(
                     targetState = if (state.chromeVisible) panel else null,
                     transitionSpec = {
-                        val origin = androidx.compose.ui.graphics.TransformOrigin(
-                            ((panelAnchorX ?: rootWidth) / rootWidth.coerceAtLeast(1f)).coerceIn(0f, 1f), 0f
+                        fun originOf(id: PanelId?) = androidx.compose.ui.graphics.TransformOrigin(
+                            ((id?.let { panelAnchors[it] } ?: rootWidth) / rootWidth.coerceAtLeast(1f))
+                                .coerceIn(0f, 1f),
+                            0f
                         )
                         (
-                            androidx.compose.animation.scaleIn(AppleSpring.sheet(), 0.6f, origin) +
+                            androidx.compose.animation.scaleIn(AppleSpring.sheet(), 0.6f, originOf(targetState)) +
                                 androidx.compose.animation.fadeIn(AppleSpring.fade())
                             ) togetherWith (
-                            androidx.compose.animation.scaleOut(AppleSpring.sheet(), 0.6f, origin) +
+                            androidx.compose.animation.scaleOut(AppleSpring.sheet(), 0.6f, originOf(initialState)) +
                                 androidx.compose.animation.fadeOut(AppleSpring.fade())
                             )
                     },
@@ -212,7 +225,7 @@ fun EditorScreen(
                         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
                             val margin = with(LocalDensity.current) { 12.dp.toPx() }
                             val areaW = constraints.maxWidth
-                            val anchor = panelAnchorX ?: areaW.toFloat()
+                            val anchor = panelAnchors[shown] ?: areaW.toFloat()
                             Box(
                                 Modifier
                                     .layout { measurable, c ->
@@ -239,6 +252,47 @@ fun EditorScreen(
                     }
                 }
             }
+        }
+
+        val penState by androidx.compose.runtime.rememberUpdatedState(state)
+        var penPrevTool by remember { mutableStateOf(Tool.Brush) }
+        DisposableEffect(session) {
+            com.yume.app.input.PenGestures.listener = { _, action ->
+                when (action) {
+                    com.yume.app.input.PenGestures.Action.Menu -> {
+                        penMenuAt = if (penMenuAt != null) null else {
+                            val px = com.yume.app.input.PenGestures.lastX
+                            val py = com.yume.app.input.PenGestures.lastY
+                            if (px < 0f) Offset(rootWidth / 2f, 600f)
+                            else Offset(px + canvasOrigin.x, py + canvasOrigin.y)
+                        }
+                    }
+                    com.yume.app.input.PenGestures.Action.Eraser -> {
+                        // Like Mi Canvas: toggle the eraser, then back to the tool before it.
+                        if (penState.tool == Tool.Eraser) {
+                            session.chooseTool(penPrevTool)
+                        } else {
+                            penPrevTool = penState.tool
+                            session.chooseTool(Tool.Eraser)
+                        }
+                    }
+                    com.yume.app.input.PenGestures.Action.Undo -> session.undo()
+                    com.yume.app.input.PenGestures.Action.Off -> Unit
+                }
+            }
+            onDispose { com.yume.app.input.PenGestures.listener = null }
+        }
+        penMenuAt?.let { at ->
+            PenShortcutMenu(
+                at = at,
+                state = state,
+                session = session,
+                onColor = {
+                    panelAnchorX = at.x
+                    showPanel(PanelId.Color)
+                },
+                onDismiss = { penMenuAt = null }
+            )
         }
 
         if (renaming) {
@@ -378,9 +432,6 @@ private fun EditorTopBar(
                 },
                 CapsuleItem(Glyph.Wrench, "Actions", active = activePanel == PanelId.Actions) {
                     onPanel(PanelId.Actions)
-                },
-                CapsuleItem(Glyph.Sliders, "Adjustments", active = activePanel == PanelId.Adjust) {
-                    onPanel(PanelId.Adjust)
                 }
             ),
             onAnchor = onAnchor
@@ -415,6 +466,9 @@ private fun EditorTopBar(
         )
         GlassToolCapsule(
             listOf(
+                CapsuleItem(Glyph.Sliders, "Adjustments", active = activePanel == PanelId.Adjust) {
+                    onPanel(PanelId.Adjust)
+                },
                 CapsuleItem(Glyph.Layers, "Layers", active = activePanel == PanelId.Layers) {
                     onPanel(PanelId.Layers)
                 }

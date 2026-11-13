@@ -111,6 +111,10 @@ class CanvasView(
 
     override fun onHoverEvent(event: MotionEvent): Boolean {
         val stylus = isStylus(event)
+        if (stylus) {
+            com.yume.app.input.PenGestures.lastX = event.x
+            com.yume.app.input.PenGestures.lastY = event.y
+        }
         when (event.actionMasked) {
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
                 if (stylus) stylusNear = true
@@ -126,6 +130,10 @@ class CanvasView(
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (isStylus(event)) {
+            com.yume.app.input.PenGestures.lastX = event.x
+            com.yume.app.input.PenGestures.lastY = event.y
+        }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> onDown(event)
             MotionEvent.ACTION_POINTER_DOWN -> onPointerDown(event)

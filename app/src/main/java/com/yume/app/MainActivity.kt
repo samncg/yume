@@ -25,6 +25,25 @@ import com.yume.app.ui.YumeTheme
 
 class MainActivity : ComponentActivity() {
 
+    private fun penHaptic() {
+        window.decorView.performHapticFeedback(
+            if (android.os.Build.VERSION.SDK_INT >= 30) android.view.HapticFeedbackConstants.CONFIRM
+            else android.view.HapticFeedbackConstants.VIRTUAL_KEY
+        )
+    }
+
+    // Smart-pen squeeze and double-tap arrive as keys / mouse buttons from the
+    // pen's own input devices, not as touches.
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (com.yume.app.input.PenGestures.handleKey(event, ::penHaptic)) return true
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(ev: android.view.MotionEvent): Boolean {
+        if (com.yume.app.input.PenGestures.handleButton(ev, ::penHaptic)) return true
+        return super.dispatchGenericMotionEvent(ev)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -51,6 +70,7 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
+        com.yume.app.input.PenGestures.init(applicationContext)
         enableEdgeToEdge()
         setContent {
             YumeTheme {

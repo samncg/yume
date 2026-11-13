@@ -523,6 +523,9 @@ private fun LayerRow(
     onDrag: (Float) -> Unit,
     onDragEnd: () -> Unit
 ) {
+    val dragStart by androidx.compose.runtime.rememberUpdatedState(onDragStart)
+    val dragBy by androidx.compose.runtime.rememberUpdatedState(onDrag)
+    val dragEnd by androidx.compose.runtime.rememberUpdatedState(onDragEnd)
     // A picked-up row lifts off the list: a little larger, with a shadow and a
     // solid backing, and it springs into and out of that state.
     val lift by androidx.compose.animation.core.animateFloatAsState(
@@ -552,14 +555,16 @@ private fun LayerRow(
             .clickable(onClick = onSelect)
             // Long press picks the layer up; dragging then reorders the stack.
             .pointerInput(layer.id) {
+                // Through State: the gesture outlives recompositions, and the
+                // row's index changes whenever layers are added or reordered.
                 detectDragGesturesAfterLongPress(
-                    onDragStart = { onDragStart() },
+                    onDragStart = { dragStart() },
                     onDrag = { change, amount ->
                         change.consume()
-                        onDrag(amount.y)
+                        dragBy(amount.y)
                     },
-                    onDragEnd = { onDragEnd() },
-                    onDragCancel = { onDragEnd() }
+                    onDragEnd = { dragEnd() },
+                    onDragCancel = { dragEnd() }
                 )
             }
             .padding(
@@ -2055,6 +2060,8 @@ fun ActionsPanel(
         MenuRow(Glyph.Rotate, "Reset rotation") { session.resetRotation() }
         MenuRow(Glyph.ZoomIn, "Zoom in") { session.zoomBy(1.25f) }
         MenuRow(Glyph.ZoomOut, "Zoom out") { session.zoomBy(1f / 1.25f) }
+        DividerLine()
+        PenGestureSettings()
         if (BuildConfig.DEBUG) {
             DividerLine()
             SectionLabel("Debug")
