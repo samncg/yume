@@ -1,0 +1,62 @@
+package com.yume.app.engine
+
+import android.graphics.BlendMode
+
+/** Which tool the canvas is currently using. */
+enum class Tool { Brush, Eraser, Smudge, Selection, Transform }
+
+/** Shape used when dragging out a selection. */
+enum class SelectionShape(val label: String) {
+    Rectangle("Rect"),
+    Ellipse("Oval"),
+    Lasso("Freehand"),
+    Automatic("Auto")
+}
+
+/** How a newly drawn selection combines with the existing one. */
+enum class SelectionOp(val label: String) {
+    Replace("New"),
+    Add("Add"),
+    Subtract("Cut")
+}
+
+/** Brush families shown in the brush browser. */
+enum class BrushCategory(val label: String) {
+    Brush("Brush"),
+    Eraser("Eraser"),
+    Smudge("Smudge")
+}
+
+/** Colour picker presentation. */
+enum class ColorMode(val label: String) {
+    Wheel("Wheel"),
+    Square("Square"),
+    Rgb("RGB"),
+    Hsl("HSL")
+}
+
+/** Layer compositing modes, exposed with Procreate-style labels. */
+enum class LayerBlend(val label: String, val mode: BlendMode) {
+    Normal("Normal", BlendMode.SRC_OVER),
+    Multiply("Multiply", BlendMode.MULTIPLY),
+    Screen("Screen", BlendMode.SCREEN),
+    Overlay("Overlay", BlendMode.OVERLAY),
+    Darken("Darken", BlendMode.DARKEN),
+    Lighten("Lighten", BlendMode.LIGHTEN),
+    ColorDodge("Color Dodge", BlendMode.COLOR_DODGE),
+    ColorBurn("Color Burn", BlendMode.COLOR_BURN),
+    SoftLight("Soft Light", BlendMode.SOFT_LIGHT),
+    HardLight("Hard Light", BlendMode.HARD_LIGHT),
+    Difference("Difference", BlendMode.DIFFERENCE),
+    Exclusion("Exclusion", BlendMode.EXCLUSION),
+    Hue("Hue", BlendMode.HUE),
+    Saturation("Saturation", BlendMode.SATURATION),
+    Color("Color", BlendMode.COLOR),
+    Luminosity("Luminosity", BlendMode.LUMINOSITY),
+    Add("Add", BlendMode.PLUS);
+
+    companion object {
+        fun fromName(name: String?): LayerBlend =
+            entries.firstOrNull { it.name == name } ?: Normal
+    }
+}

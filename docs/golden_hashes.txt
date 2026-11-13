@@ -1,0 +1,445 @@
+# Yume golden paint hashes
+#
+# Recorded on the Stage 0 build BEFORE any TileStore / engine-storage changes.
+# Device: Xiaomi Pad 25091RP04C (3200x2136), debug build, 2048x2048 canvas.
+# Sequence: hard, soft, pressure/tilt, smudge, eraser, symmetry, alpha lock,
+# selection clip, layer mask, clipping, merge, transform flip, blur, invert,
+# undo x3, redo x2, history delete with replay.
+#
+# Format: phase=<name> L<i>=CRC32(layer pixels)[/CRC32(mask)] C=CRC32(flattened composite)
+# These values must not change when layer storage is refactored.
+#
+# Baseline benchmark on this build:
+# bench: stroke=80.98 ms for 2000 move events, full-flush=5.43 ms
+# save-safety: FAIL order=true,true,false   (known Stage 0 gap, fixed next)
+
+phase=00-blank L0=a47ca14a C=86175ebf
+phase=01-hard L0=c9c498f4 C=96f26816
+phase=02-soft L0=3520eefe C=f37d958a
+phase=03-pressure-tilt L0=43b8f9e7 C=58dff59b
+phase=04-smudge L0=d135b378 C=c24f7d0c
+phase=05-eraser L0=fe744f89 C=f873d6a1
+phase=06-symmetry L0=fe744f89 L1=fa9653db C=61755446
+phase=07-alpha-lock L0=fe744f89 L1=aa84957b C=303813e7
+phase=08-selection-clip L0=fe744f89 L1=bf229f34 C=9ca6664a
+phase=09-mask L0=fe744f89 L1=bf229f34/6b0322f9 C=32084993
+phase=10-clipping L0=fe744f89 L1=bf229f34/6b0322f9 L2=ebc44da2 C=8ffd2c52
+phase=11-merge L0=fe744f89 L1=ac846efd/6b0322f9 C=7719df3e
+phase=12-transform-flip L0=fe744f89 L1=2bccdd53/6b0322f9 C=26fa4dbb
+phase=13-blur L0=fe744f89 L1=8b0758b0/6b0322f9 C=a2d9ef0f
+phase=14-invert L0=fe744f89 L1=ea6fb3cb/6b0322f9 C=4b0e6fd2
+phase=15-undo3 L0=fe744f89 L1=ac846efd/6b0322f9 C=7719df3e
+phase=16-redo2 L0=fe744f89 L1=8b0758b0/6b0322f9 C=a2d9ef0f
+phase=17-history-delete L0=fe744f89 L1=ea6fb3cb/6b0322f9 C=4b0e6fd2
+
+# --- Stage 1 result (TileStore + SingleTileStore) ---------------------------
+# All phase lines above matched exactly on the migrated build.
+# save-safety: PASS
+# lazy-open: PASS
+# bench (post-migration): stroke=80.13 ms / 2000 move events, full-flush=5.49 ms
+# pre-migration baseline: stroke=80.98 ms / 2000 move events, full-flush=5.43 ms
+# on-device painting: 118.8-120.0 fps (120 Hz panel mode) on the 2048x2048 document
+
+# --- Stage 2b-1 oracles: sparse painting live-wired -------------------------
+# The 2048x2048 single-store lines 00-17 above are unchanged. The phases below
+# are NEW entries (seam stress + a canvas that is not a multiple of 256),
+# recorded with the default SingleTileStore as the oracle. The sparse store
+# (SparseTileStore, tile size 256 and 64) reproduced every line byte for byte:
+# sparse-vs-single = MATCH (31 phases, 0 bad) on both canvas sizes.
+#
+# 2048x2048, phases 18-30 (tile borders at multiples of 256/64):
+phase=18-seam-h L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=3b3af478 C=b0008e9b
+phase=19-seam-v L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=c6c50538 C=9444a411
+phase=20-seam-diag L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=1d009cba C=a2e46cb1
+phase=21-seam-eraser L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=d76025d4 C=4f393c14
+phase=22-seam-smudge L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=4f14c66a C=4a97f8ee
+phase=23-seam-symmetry L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=193b6153 C=873d7f37
+phase=24-seam-outside L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=77997e34 C=ab838871
+phase=25-seam-alpha-lock L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=920ed296 C=ec033cdc
+phase=26-seam-selection L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=cfcf5d2e C=0e91e1cf
+phase=27-seam-mask L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=cfcf5d2e/9a5c068f C=f30a1b7e
+phase=28-seam-undo3 L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=77997e34/86175ebf C=ab838871
+phase=29-seam-redo2 L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=cfcf5d2e/86175ebf C=0e91e1cf
+phase=30-seam-delete L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f C=87ae26fb
+#
+# 2000x1333 oracle (edge tiles are clipped to the canvas), all 31 phases:
+phase=00-blank L0=c37ad379 C=3ea610b8
+phase=01-hard L0=eda780a2 C=79b3605b
+phase=02-soft L0=cca8b473 C=88aeeb0b
+phase=03-pressure-tilt L0=ae5bf036 C=0b9eb9ba
+phase=04-smudge L0=343ea4d9 C=c160616c
+phase=05-eraser L0=ff29254f C=7df09bfa
+phase=06-symmetry L0=ff29254f L1=cff4c603 C=869406e3
+phase=07-alpha-lock L0=ff29254f L1=fe7cdf5f C=1fc2b07e
+phase=08-selection-clip L0=ff29254f L1=0ffe9e48 C=ff991492
+phase=09-mask L0=ff29254f L1=0ffe9e48/73de0e35 C=639f129b
+phase=10-clipping L0=ff29254f L1=0ffe9e48/73de0e35 L2=3c539884 C=138762ba
+phase=11-merge L0=ff29254f L1=0189165a/73de0e35 C=bdff6ab2
+phase=12-transform-flip L0=ff29254f L1=b0fa8bb7/73de0e35 C=177f5236
+phase=13-blur L0=ff29254f L1=f35b3e4e/73de0e35 C=b0ba9b0a
+phase=14-invert L0=ff29254f L1=9f5ea32f/73de0e35 C=ff9c44f9
+phase=15-undo3 L0=ff29254f L1=0189165a/73de0e35 C=bdff6ab2
+phase=16-redo2 L0=ff29254f L1=f35b3e4e/73de0e35 C=b0ba9b0a
+phase=17-history-delete L0=ff29254f L1=9f5ea32f/73de0e35 C=ff9c44f9
+phase=18-seam-h L0=ff29254f L1=9f5ea32f/73de0e35 L2=3b37e401 C=0ddc0ba7
+phase=19-seam-v L0=ff29254f L1=9f5ea32f/73de0e35 L2=da2ee654 C=cae04424
+phase=20-seam-diag L0=ff29254f L1=9f5ea32f/73de0e35 L2=0a547792 C=4a850365
+phase=21-seam-eraser L0=ff29254f L1=9f5ea32f/73de0e35 L2=fabbcd06 C=6b5e010c
+phase=22-seam-smudge L0=ff29254f L1=9f5ea32f/73de0e35 L2=f45486dd C=3018924e
+phase=23-seam-symmetry L0=ff29254f L1=9f5ea32f/73de0e35 L2=a45ad000 C=afba2135
+phase=24-seam-outside L0=ff29254f L1=9f5ea32f/73de0e35 L2=532b7d8e C=5a7b650f
+phase=25-seam-alpha-lock L0=ff29254f L1=9f5ea32f/73de0e35 L2=ac3a6793 C=e0cf4797
+phase=26-seam-selection L0=ff29254f L1=9f5ea32f/73de0e35 L2=1e0aa160 C=51ff6b4a
+phase=27-seam-mask L0=ff29254f L1=9f5ea32f/73de0e35 L2=1e0aa160/0ee1cf31 C=1ea53bff
+phase=28-seam-undo3 L0=ff29254f L1=9f5ea32f/73de0e35 L2=532b7d8e/3ea610b8 C=5a7b650f
+phase=29-seam-redo2 L0=ff29254f L1=9f5ea32f/73de0e35 L2=1e0aa160/3ea610b8 C=51ff6b4a
+phase=30-seam-delete L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 C=91e6dce8
+#
+# Stage 2b-1 measurements (Xiaomi Pad 25091RP04C, debug build):
+# bench-single: 76.8-77.9 ms / 2000 move events (full flush 5.5-6.0 ms)
+# bench-sparse: 88.3-91.2 ms / 2000 move events (1.5 tile blits per dab)
+#   15% gate baseline 79.5 ms -> limit 91.4 ms; sparse is 11-15% over that
+#   baseline and 14-19% over the same-build dense number (see README).
+# memory 4096x4096 x20 mostly-empty layers: sparse 42 MB, dense 1280 MB
+# fuzz: 23 runs (tiles 16/64/256, canvases 2048^2 / 2000x1333 / 37x53 /
+#   1000x700 masks), >=2000 ops and 2 seeds on the large canvases, 0 mismatches
+
+# --- Stage 2b-1 hardening: band mode evaluation -----------------------------
+# All existing 2048x2048 and 2000x1333 lines above still match byte for byte in
+# "exact band" mode (band = canvas width x canvas height) on SingleTileStore and
+# SparseTileStore at tile sizes 64 and 256:
+#   exact256-vs-single 2048x2048: MATCH (31 phases, 0 bad)
+#   exact64-vs-single  2048x2048: MATCH (31 phases, 0 bad)
+#   exact256-vs-single 2000x1333: MATCH (31 phases, 0 bad)
+#   exact64-vs-single  2000x1333: MATCH (31 phases, 0 bad)
+#
+# A strip band (canvas width x 512/1024 rows) was implemented, measured and
+# REJECTED. It is pixel-identical across tile sizes (strip256-vs-strip64 MATCH
+# on both canvases) but not identical to the dense oracle:
+#
+#   512-row strips, 2048x2048: max channel diff 64, worst phase 379 px
+#     per phase: 00=0, 01=0, 02=6/6, 03=36/44, 04=36/51, 05..21=36/54,
+#                22=36/376, 23=36/375, 24..30=64/376..379  (maxch/diffpx)
+#   1024-row strips (fewer boundary-split dabs), 2048x2048: 37 px, maxch 64
+#   1024-row strips, 2000x1333: 1 px, maxch 2
+#   example pixels: (836,591)=fffe3232/ffff3232 (1409,604)=ff3cb45b/ff3cb55b
+#
+# The differing pixels sit on antialiased brush edges and grow with the number
+# of dabs over-blended into them. Root cause: Skia resamples a scaled, filtered
+# dab differently for a different absolute y in the destination surface, and a
+# strip band necessarily changes that y (splitting a dab on a strip edge makes
+# it worse). The proposed gate was max channel diff <= 1 and differing pixels
+# < 0.01%, so strip mode was not shipped and no strip oracle is recorded.
+# The exact band stays the only sparse band mode.
+
+# ============================================================================
+# Stage 2b-2: sparse composite and tile-sized scratch buffers
+# ============================================================================
+#
+# Ten new compositor-stress phases were added after phase 30: all-17-blend-modes
+# style layer stacks, layer opacity, one and two groups, a clipping layer, masks
+# on layers, a hidden layer, content exactly on tile borders (x = 0/256/512/64/
+# 192, y = 256/512), a stroke on the active layer, undo x3, redo x2 and a
+# history delete with replay.
+#
+# The lines below are the SingleTileStore (dense) oracle. SparseTileStore matches
+# them hash for hash in exact band mode, at tile sizes 64 and 256, on both
+# canvases:
+#
+#   exact256-vs-single 2048x2048: MATCH (41 phases, 0 bad)
+#   exact64-vs-single  2048x2048: MATCH (41 phases, 0 bad)
+#   exact256-vs-single 2000x1333: MATCH (41 phases, 0 bad)
+#   exact64-vs-single  2000x1333: MATCH (41 phases, 0 bad)
+#
+# Phases 00..30 above are unchanged and still reproduce exactly.
+#
+# Composite cache-freedom: 56 checks (tile 64/256 x 1000x700 and 720x720) where
+# the incremental composite is compared with a cache-free full recomposite after
+# every kind of edit (stroke, non-active-layer stroke, hidden, opacity, blend,
+# reorder, mask, group, group stroke, solo, undo3, redo1) - all match.
+#
+# Mip level: a partial dirty update produces the same mip as a full rebuild on
+# both canvases. Against Bitmap.createScaledBitmap(composite, mipW, mipH, true)
+# the mip differs on maxch=1 for 15466 px (2048x2048, 0.37%) and 6298 px
+# (1000x700, 0.9%): per-mip-tile downscaling rounds 1 LSB away from a single
+# full-canvas downscale. Mip tiles are display-only.
+#
+# --- 2048x2048 (dense oracle) ---
+phase=31-comp-blend L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5 L4=6c1e9f58 L5=61c12fff L6=d6e24de1 C=f43249fa
+phase=32-comp-opacity L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5 L4=6c1e9f58 L5=61c12fff L6=d6e24de1 C=66a124c4
+phase=33-comp-group L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5 L4=6c1e9f58 L5=61c12fff L6=d6e24de1 C=33ec6227
+phase=34-comp-group2 L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5 L4=6c1e9f58 L5=61c12fff L6=d6e24de1 C=cd60cb44
+phase=35-comp-clip L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5 L4=6c1e9f58 L5=61c12fff L6=d6e24de1 C=990b5c84
+phase=36-comp-mask-hidden L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=d6e24de1 C=aa525560
+phase=37-comp-paint L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=a4135ef2 C=15d56308
+phase=38-comp-undo3 L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=fcaccdf1/86175ebf L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=d6e24de1 C=74ff8f46
+phase=39-comp-redo2 L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=d6e24de1 C=33ec6227
+phase=40-comp-delete L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=a4135ef2 C=15d56308
+# --- 2000x1333 (dense oracle) ---
+phase=31-comp-blend L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854 L4=16fe98ef L5=bffb3852 L6=70a1e833 C=cca5cc9f
+phase=32-comp-opacity L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854 L4=16fe98ef L5=bffb3852 L6=70a1e833 C=737f0128
+phase=33-comp-group L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854 L4=16fe98ef L5=bffb3852 L6=70a1e833 C=5f2a5750
+phase=34-comp-group2 L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854 L4=16fe98ef L5=bffb3852 L6=70a1e833 C=58f9b9d7
+phase=35-comp-clip L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854 L4=16fe98ef L5=bffb3852 L6=70a1e833 C=65624e97
+phase=36-comp-mask-hidden L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=70a1e833 C=300b734b
+phase=37-comp-paint L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=cb65fe5f C=27d0f638
+phase=38-comp-undo3 L0=ff29254f L1=9f5ea32f/73de0e35 L2=6bef0fbf/3ea610b8 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=70a1e833 C=0ceae92d
+phase=39-comp-redo2 L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=70a1e833 C=5f2a5750
+phase=40-comp-delete L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=cb65fe5f C=27d0f638
+
+# ============================================================================
+# Stage 2b-3: one-shot operations on sparse layers
+# ============================================================================
+#
+# Sixteen new phases after 40: a whole-layer translate, a two-axis flip, a
+# scale+rotate, a selection move, hue / blur / noise / brightness adjustments,
+# a merge down across blend modes, a duplicate, a fill, a clear, an import as a
+# layer, then undo x4, redo x2 and a history delete across all of it.
+#
+# The lines below are the SingleTileStore (dense) oracle. SparseTileStore is
+# hash-identical for phases 00..42 (43 phases) plus 51 (fill) and 55 (redo), and
+# differs only on the phases that sit downstream of the scale+rotate resample:
+#
+#   43-ops-transform-scale-rot : maxch 5, 5 px   (tile 256) / 5 px (tile 64)
+#   44-ops-transform-selection : maxch 5, 5 px (inherits 43's layer pixels)
+#   45..56                     : maxch 1..4, 2..73 px (inherited from 43)
+#
+# All of those differences are <= 0.0018% of the canvas and come from one cause:
+# a rotated, scaled resample cannot be bit-exact when it is computed per tile,
+# because Skia composes the canvas translation with the matrix in float and the
+# resulting sample position can land on the other side of a 1/64 bilinear
+# weight. The flip and translate phases, which are exact integer mappings, match
+# perfectly. Per the stage's tolerance policy these phases are recorded, not
+# relaxed: the numbers above are the measured deviation.
+#
+# Everything else in the stage is exact:
+#   composite-invalidate: PASS (56 checks)   stroke-cache: PASS (hash equal)
+#   alloc-per-op: PASS (only encode.canvas in flatten)   export-parity: PASS
+#   mip: partial-vs-full MATCH   save-safety/lazy-open/sparse-persist: PASS
+# --- 2048x2048 (dense oracle) ---
+phase=41-ops-transform-move L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=d8e13584 C=6d3406c7
+phase=42-ops-transform-flip L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=9afb03ed C=734c5463
+phase=43-ops-transform-scale-rot L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=82a4d6dd C=6c31858b
+phase=44-ops-transform-selection L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=d0f9c60d C=dbf17151
+phase=45-ops-adjust-hue L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=1b209d7f C=4f16ef9e
+phase=46-ops-adjust-blur L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=50e273fb C=420c91b5
+phase=47-ops-adjust-noise L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=ce7f2480 C=bd6c7cc0
+phase=48-ops-adjust-brightness L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=1a479e29 C=9e9a12ab
+phase=49-ops-merge L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=1a479e29 L7=468f6f0c C=7171d7c6
+phase=50-ops-duplicate L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=1a479e29 L7=468f6f0c L8=468f6f0c C=0dac6cc1
+phase=51-ops-fill L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=1a479e29 L7=468f6f0c L8=197ada4d C=197ada4d
+phase=52-ops-clear L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=1a479e29 L7=468f6f0c L8=a47ca14a C=7171d7c6
+phase=53-ops-import L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=1a479e29 L7=468f6f0c L8=a47ca14a L9=12123ac1 C=45f72d6d
+phase=54-ops-undo4 L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=1a479e29 L7=468f6f0c C=7171d7c6
+phase=55-ops-redo2 L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=1a479e29 L7=468f6f0c L8=197ada4d C=197ada4d
+phase=56-ops-delete L0=fe744f89 L1=ea6fb3cb/6b0322f9 L2=a16d4249/9a5c068f L3=9ff289b5/71e97b82 L4=6c1e9f58/08f6902c L5=61c12fff L6=1a479e29 L7=468f6f0c L8=468f6f0c L9=12123ac1 C=f220cf15
+# --- 2000x1333 (dense oracle) ---
+phase=41-ops-transform-move L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=5923f4a1 C=fc42c620
+phase=42-ops-transform-flip L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=52d50558 C=b91a0901
+phase=43-ops-transform-scale-rot L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=1118e125 C=aacc3880
+phase=44-ops-transform-selection L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=4779092f C=e6a35317
+phase=45-ops-adjust-hue L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=9fa78c7a C=8d3839eb
+phase=46-ops-adjust-blur L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=dafeac78 C=9e2195d7
+phase=47-ops-adjust-noise L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=2b3d0b4b C=a29bf241
+phase=48-ops-adjust-brightness L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=971948fb C=ecf2c7b6
+phase=49-ops-merge L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=971948fb L7=41452c9d C=82aff942
+phase=50-ops-duplicate L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=971948fb L7=41452c9d L8=41452c9d C=0426521e
+phase=51-ops-fill L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=971948fb L7=41452c9d L8=fac7c123 C=fac7c123
+phase=52-ops-clear L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=971948fb L7=41452c9d L8=c37ad379 C=82aff942
+phase=53-ops-import L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=971948fb L7=41452c9d L8=c37ad379 L9=49e0688c C=f229a6ac
+phase=54-ops-undo4 L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=971948fb L7=41452c9d C=82aff942
+phase=55-ops-redo2 L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=971948fb L7=41452c9d L8=fac7c123 C=fac7c123
+phase=56-ops-delete L0=ff29254f L1=9f5ea32f/73de0e35 L2=d9dfc94c/0ee1cf31 L3=051d2854/bb31b51d L4=16fe98ef/5a7e8ced L5=bffb3852 L6=971948fb L7=41452c9d L8=41452c9d L9=49e0688c C=f46fd7c2
+
+# ============================================================================
+# Stage 2b-3.5: one wand algorithm, rotate/scale tolerance policy
+# ============================================================================
+#
+# A. Wand. The app now contains exactly one selection algorithm: the cell-based
+# streaming flood fill (WandGrid + SelectionUtil.magicWandGrid), used by the
+# dense store and by sparse stores alike. The old whole-image implementation was
+# moved out of the app into the harness, where it is only the reference for the
+# comparison below.
+#
+#   wand-stores: PASS (36 cases, 0 cross-store mismatches)
+#
+# dense, sparse@256 and sparse@64 return bit-identical selections on 2048x2048
+# and 2000x1333, for six seeds (on paint, on blank canvas, on tile borders, on
+# the edges) x tolerance 0/30/120.
+#
+# Dense default versus the previous whole-image algorithm:
+#   2048x2048 : 0 of 36 cases changed (bit-identical)
+#   2000x1333 : 19 of 36 cases changed, by 4..460 pixels on selections of
+#               11k..2.2M pixels (largest relative change 0.02%)
+#     seed=(1000,666) tol=30 : 328 px of 2 198 644
+#     seed=(256,256)  tol=0  :   4 px of 44 820
+#     seed=(64,64)    tol=30 :  32 px of 11 580
+# The cause is the odd 1333-pixel height: the old path downscaled the whole
+# image by 1333/666 = 2.0015, the cell algorithm downscales each cell by exactly
+# 2, so a few pixels land on the other side of the tolerance comparison. Even
+# dimensions are unaffected.
+#
+# B. Rotate/scale tolerance. Differing pixels of phases 43..56 were classified by
+# distance to a tile border (2 px band) at both tile sizes:
+#
+#   phase 43 (scale+rotate), tile 256: near=0 interior=5
+#   phase 43 (scale+rotate), tile  64: near=0 interior=7
+#   phase 46 (blur, downstream)      : near=1..8,  interior=32..53
+#   phase 49 (merge, downstream)     : near=2..14, interior=30..62
+#
+# Every differing pixel of the resample itself is in the tile INTERIOR; none
+# sits on a seam, which rules out a seam bug and identifies float matrix
+# rounding: Skia composes the canvas translation with the matrix, so a sample
+# position can cross a 1/64 bilinear weight. Tile 64 reports more differing
+# pixels than tile 256 because it composes 1024 tile translations instead of 64,
+# i.e. more independent rounding contexts.
+#
+# Policy for phases 43..56 ONLY (exact phases 00..42 unchanged):
+#   * sparse results deterministic for a fixed tile size (the product uses 256),
+#   * max channel difference <= 8,
+#   * differing pixels < 0.01% of the canvas,
+#   * cross-tile-size identity NOT required for these phases.
+# Measured: maxch 5, 5 px = 0.00012% of the canvas (tile 256); 7 px (tile 64).
+# The dense oracle lines for 41..56 recorded above are unchanged and still
+# reproduce exactly.
+#
+# Amplified diff PNGs for review: docs/diffs/<canvas>-<tile>_p<phase>-t<tile>.png
+# (red = within 2 px of a tile border, yellow = interior, black = identical).
+#
+# Selection oracle (identical for dense, sparse@256 and sparse@64):
+wand 2048x2048 seed=(1024,1024) tol=0 sig=81920:0,1024,2048,1064:d0259bd
+wand 2048x2048 seed=(1024,1024) tol=30 sig=81920:0,1024,2048,1064:d0259bd
+wand 2048x2048 seed=(1024,1024) tol=120 sig=81920:0,1024,2048,1064:d0259bd
+wand 2048x2048 seed=(4,4) tol=0 sig=643032:0,0,1024,682:677d12a3
+wand 2048x2048 seed=(4,4) tol=30 sig=643608:0,0,1024,682:e2a28b6d
+wand 2048x2048 seed=(4,4) tol=120 sig=645684:0,0,1024,682:9cf21cee
+wand 2048x2048 seed=(256,256) tol=0 sig=103936:244,244,1772,850:6bc9695f
+wand 2048x2048 seed=(256,256) tol=30 sig=104884:244,244,1772,850:9ce45220
+wand 2048x2048 seed=(256,256) tol=120 sig=108356:242,242,1772,850:f1c0360e
+wand 2048x2048 seed=(1024,256) tol=0 sig=1343848:0,0,2048,1024:dd9f8ee5
+wand 2048x2048 seed=(1024,256) tol=30 sig=1344312:0,0,2048,1024:51a99e0a
+wand 2048x2048 seed=(1024,256) tol=120 sig=1345732:0,0,2048,1024:65628453
+wand 2048x2048 seed=(2045,2045) tol=0 sig=2015232:0,1064,2048,2048:7fa38a0e
+wand 2048x2048 seed=(2045,2045) tol=30 sig=2015232:0,1064,2048,2048:7fa38a0e
+wand 2048x2048 seed=(2045,2045) tol=120 sig=2015232:0,1064,2048,2048:7fa38a0e
+wand 2048x2048 seed=(512,768) tol=0 sig=1343848:0,0,2048,1024:dd9f8ee5
+wand 2048x2048 seed=(512,768) tol=30 sig=1344312:0,0,2048,1024:51a99e0a
+wand 2048x2048 seed=(512,768) tol=120 sig=1345732:0,0,2048,1024:65628453
+wand 2000x1333 seed=(1000,666) tol=0 sig=80000:0,666,2000,706:2e452298
+wand 2000x1333 seed=(1000,666) tol=30 sig=80000:0,666,2000,706:2e452298
+wand 2000x1333 seed=(1000,666) tol=120 sig=80000:0,666,2000,706:2e452298
+wand 2000x1333 seed=(4,4) tol=0 sig=392056:0,0,1000,444:31645fc0
+wand 2000x1333 seed=(4,4) tol=30 sig=392508:0,0,1000,444:a787c5fb
+wand 2000x1333 seed=(4,4) tol=120 sig=394392:0,0,1000,444:c04b2df7
+wand 2000x1333 seed=(256,256) tol=0 sig=95172:244,244,1728,564:3f4871ab
+wand 2000x1333 seed=(256,256) tol=30 sig=96096:244,244,1728,564:11183d50
+wand 2000x1333 seed=(256,256) tol=120 sig=99420:242,242,1730,564:7cf1e62a
+wand 2000x1333 seed=(1000,256) tol=0 sig=839288:0,0,2000,666:f6317b39
+wand 2000x1333 seed=(1000,256) tol=30 sig=839648:0,0,2000,666:3b9a1a9c
+wand 2000x1333 seed=(1000,256) tol=120 sig=841116:0,0,2000,666:8fd3e54
+wand 2000x1333 seed=(1997,1330) tol=0 sig=1252000:0,706,2000,1332:b2705194
+wand 2000x1333 seed=(1997,1330) tol=30 sig=1252000:0,706,2000,1332:b2705194
+wand 2000x1333 seed=(1997,1330) tol=120 sig=1252000:0,706,2000,1332:b2705194
+wand 2000x1333 seed=(512,768) tol=0 sig=1252000:0,706,2000,1332:b2705194
+wand 2000x1333 seed=(512,768) tol=30 sig=1252000:0,706,2000,1332:b2705194
+wand 2000x1333 seed=(512,768) tol=120 sig=1252000:0,706,2000,1332:b2705194
+
+# ============================================================================
+# Stage 2b-4: dab scratch replaces the canvas-width stamping band
+# ============================================================================
+#
+# STATUS: v2 is NOT ACCEPTED against the proposed tolerance yet. NO v2 oracle is
+# recorded on purpose; the v1 (band) lines above stay the reference.
+#
+# What changed
+#   * The full-canvas stamping band is gone. A dab is resampled into a
+#     brush-sized scratch (dab bbox + 1 px margin) and then blended into the
+#     layer 1:1 with the real colour filter, alpha and blend mode. Dense and
+#     sparse share this one path.
+#   * Smudge samples a dab-sized patch read through the tile store instead of
+#     sampling the band.
+#   * TileStoreConfig.exactBand / BAND_ROWS and TileStore.blitBand are removed.
+#   * MemoryBudget no longer counts a band. Painting (dense or sparse) allocates
+#     no canvas-sized bitmap at all. AllocTracker.allowedSites = {encode.canvas}.
+#
+# Store identity (v2 vs v2), 2048x2048 and 2000x1333, tile 64 and 256:
+#   sparse256-vs-dense: MISMATCH (59 phases, 16 bad)
+#   sparse64-vs-dense : MISMATCH (59 phases, 16 bad)
+#   Bad phases are 43..56 (the documented rotate/scale resample family) plus
+#   57/58, which only inherit that state (same 11 px at the same coordinates as
+#   53..56). All 43 phases 00..42 are hash-identical, including seams 18..30 and
+#   the compositor stress 31..42.
+#
+# v1 (band) vs v2 (dab scratch), 2048x2048 dense, flattened composite:
+#   phase            maxch  differing px   %canvas   hist[1|2|3-4|5-8|9-16|>16]
+#   01-hard              2         229     0.0055   221|8|0|0|0|0
+#   02-soft              4       16760     0.3996   13637|2769|354|0|0|0
+#   03-pressure-tilt     4       22452     0.5353   18479|3564|409|0|0|0
+#   04-smudge           25       36872     0.8791   20826|5151|3714|4164|2075|942
+#   05-eraser           25       34603     0.8250   19749|4755|3474|3880|1806|939
+#   06-symmetry         25       32296     0.7700   18003|4401|3318|3830|1805|939
+#   07-alpha-lock       25       32392     0.7723   18102|4399|3317|3830|1805|939
+#   11-merge            17       25930     0.6182   16251|3780|2715|2927|256|1
+#   20-seam-diag        17       58244     1.3886   42779|8607|3602|2999|256|1
+#   22-seam-smudge      26       79420     1.8935   41908|9487|7321|11783|8024|897
+#   37-comp-paint       26       72379     1.7256   33316|10679|6888|11094|9498|904
+#   42-ops-transform-flip 33     69164     1.6490   (inherited)
+#   v1v2 worst: maxch=33 px=69164 phase=42-ops-transform-flip
+#
+# Reading
+#   * Hard stroke: 229 px, every one within 2/255 -> inside the acceptance.
+#   * Soft / pressure strokes: 98% of differing pixels within 2/255; worst 4.
+#   * From 04-smudge on, 939-942 pixels sit above 16/255 and do not grow again
+#     in later phases: one fixed set of pixels at the high-contrast edges the
+#     smudge drags. 25/255 on 0.02% of the canvas.
+#   * Verdict against the proposed rule: FAIL. 02-soft is 4 (limit 2), and the
+#     smudge family is 25..33 with up to 1.9% of pixels changed (limits 8 and
+#     0.5%). No v2 oracle is recorded until this is decided.
+#
+# Cause. The decomposition rounds the resampled dab coverage to 8 bits once,
+# before the filter+alpha+blend pipeline. Applying alpha and the colour filter in
+# pass 1 as well (the first implementation) accumulated a 10/255 bias on a soft
+# stroke; moving them into pass 2 cut that to 4/255 and the hard stroke to 2/255.
+# Smudge is the residual because it feeds its own output back into the next
+# sample, so the rounding is re-sampled every dab and compounds at sharp edges.
+#
+# Amplified diff PNGs (difference x32, black = identical): docs/diffs_v2/
+#   p1-01-hard, p2-02-soft, p3-03-pressure-tilt, p4-04-smudge, p5-05-eraser,
+#   p6-06-symmetry. Differences are thin outlines on antialiased stroke edges,
+#   not filled interiors.
+#
+# Single-dab decomposition check (one-pass draw vs two-pass scratch, 3 fractional
+# offsets, maxch/differing px summed over the offsets; harness "dab" mode):
+#   hard=2/7368  soft=2/11495  pen1=1/2  marker=2/2858  eraser=5/950
+#   alpha-lock=1/6429  worst=5/341
+#   The 1-px pen is all but exact and every brush except the eraser stays within
+#   2/255 on a single dab; the eraser's DST_OUT path reaches 5/255 on 950 px
+#   because its result is dst*(1-srcA), which multiplies the 1 LSB source-alpha
+#   rounding by the destination and by the paint alpha.
+#
+# Gate results on this build
+#   frames 2048x2048 sparse 1 layer : p50 0.41 p95 0.87 p99 1.58 max 41.05 PASS
+#   frames 2048x2048 sparse 20      : p50 0.43 p95 1.13 p99 1.91 max 66.64 PASS
+#   frames 4096x4096 sparse 20      : p50 1.19 p95 2.09 p99 3.16 max 239.5
+#   painted 2048x2048 sparse x30/60%: p50 0.86 p95 4.63 p99 5.63 PASS (<6)
+#   painted 2048x2048 sparse x10/80%: p50 0.75 p95 2.17 p99 3.49 PASS (<6)
+#   painted 4096x4096 sparse x10/50%: p99 9.02 (vs 8.33 budget, reported)
+#   painted 4096x4096 sparse x30/30%: p99 12.09 (vs 8.33 budget, reported)
+#   allocGate, sparse: PASS on every row, table empty
+#   allocGate, dense : engine.composite + engine.strokeBase + engine.newLayer
+#   bench-single: 111.64 ms / 2000 events, full-flush 6.00 ms
+#   bench-sparse: 117.57 ms / 2000 events, full-flush 32.93 ms
+#                 1562 dabs, 2361 tile draws, 6.97 M px written back
+#   memory 4096^2 sparse x20: layers=43MB composite=21MB strokeBase=0 scratch=0
+#   other tests: composite-invalidate PASS (56), stroke-cache PASS x3,
+#     mip MATCH, alloc-per-op PASS (flatten = encode.canvas), export-parity PASS,
+#     wand-stores PASS (36), save-safety PASS, lazy-open PASS,
+#     sparse-persist PASS (4), sparse-fuzz 23/23 PASS, opaque verifier PASS.
+#
+# Compositor profile (4096^2 sparse, 150-frame painted stroke)
+#   10 layers: 291 tiles, 1914 layer draws, 12 non-empty tile lookups,
+#              blit 5.35 ms total, opacity 14.64 ms (32 first-touch scans,
+#              87% hit), composite 272 ms total, paint 210 ms (2747 dabs)
+#   30 layers: 291 tiles, 8672 draws, 9.01 ms blit, opacity 0 ms (100% hit),
+#              composite 456 ms total, paint 195 ms
+#   Composition is not the residual: it is 1.8-3.0 ms/frame of the 9-12 ms p99.
