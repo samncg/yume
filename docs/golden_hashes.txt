@@ -950,3 +950,18 @@ feature=85-shape-rotated L0=c37ad379 L1=58d77751/e068eda2 L2=c637ddf0 L3=23eae7e
 feature=86-grain-texture L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C=aa163222
 feature=87-wet-mix L0=c37ad379 L1=73dc2670/e068eda2 L2=d5802b36 L3=23eae7e1 C=262a22a7
 feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C=aa163222
+
+# --- 1.0 release-candidate gate (full harness, Nov 2026, 1907 s) -------------
+# Every feature of the 1.0 batch in place (QuickShape/shapes, guides, radial
+# symmetry, tone adjustments, brush stamps/grain/rotation/wet mix, liquify,
+# groups, text, exports, backup, timelapse).
+# dense vs this file: golden 59/59 on 2048x2048 and 2000x1333; features 30/30
+#   on both (phases 80-88 included).
+# sparse vs dense, wand delta: identical to the Stage 3c gate (phase 43+
+#   rotate/scale residue; 2000x1333 wand odd-height delta).
+# fuzz / evict-fuzz / golden-evict / journal / spill / cache-big / accept-8k:
+#   PASS (8K reopen aace48fd = aace48fd, nativeHeapPeak 1053 MB).
+# lazy-open failed only because it ran under the new sparse default; it is a
+#   dense-store contract and now pins the dense store: PASS (rerun in the
+#   'png' mode together with png-parity, sparse-persist, export-parity and
+#   save-safety, all PASS).

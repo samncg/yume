@@ -161,6 +161,8 @@ object YumeHarness {
                     out.append(line(scoreOpsAlloc(app)))
                     out.append(line(scoreSparsePersistence(app)))
                     out.append(line(scoreExportParity()))
+                    out.append(line(scoreLazyOpen(app)))
+                    out.append(line(scoreSaveSafety(app)))
                 } else if (only == "cachepaint") {
                     out.append(scoreCacheBig(app, quick = true))
                 } else if (only == "cachebig") {
@@ -1276,6 +1278,20 @@ object YumeHarness {
      * decode to exactly the saved pixels when something finally needs it.
      */
     private fun scoreLazyOpen(app: YumeApp): String {
+        // This is the dense-store loading contract (a visible layer decodes on
+        // load, a hidden one stays on disk). Since Stage 3c sparse is the
+        // default and loads every layer lazily by design (covered by
+        // sparse-persist), so pin the store this check was written for.
+        val oldSparse = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = false
+        try {
+            return scoreLazyOpenDense(app)
+        } finally {
+            TileStoreConfig.useSparseLayers = oldSparse
+        }
+    }
+
+    private fun scoreLazyOpenDense(app: YumeApp): String {
         val store = app.projectStore
         val size = 256
         val project = store.createProject("harness-lazy", size, size, BG)
