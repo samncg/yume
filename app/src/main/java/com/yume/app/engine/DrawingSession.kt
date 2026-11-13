@@ -82,6 +82,8 @@ data class DocumentSnapshot(
     val symmetryY: Boolean = false,
     val symmetryXPos: Float = -1f,
     val symmetryYPos: Float = -1f,
+    /** [DrawingEngine.extrasJson]: guides, radial symmetry and later settings. */
+    val extras: String = "",
     /**
      * Runs a block that reads sparse layer tiles on the thread that owns the
      * engine (the render thread while it runs), so a save never mutates tile
@@ -533,6 +535,7 @@ class DrawingSession(
                 wandDownX = event.x
                 wandDownY = event.y
                 when {
+                    tryHandleDrag(doc[0], doc[1]) -> Unit
                     tryGuideDrag(doc[0], doc[1]) -> Unit
                     tool == Tool.Selection -> beginSelectionOrMove(doc[0], doc[1])
                     tool == Tool.Transform -> beginTransformDrag(doc[0], doc[1])
@@ -549,6 +552,10 @@ class DrawingSession(
                 for (i in event.xs.indices) {
                     view.toDocument(event.xs[i], event.ys[i], doc)
                     when {
+                        draggingHandle != NO_HANDLE -> {
+                            moveHandle(doc[0], doc[1])
+                            changed = true
+                        }
                         draggingGuide != 0 -> {
                             moveGuide(doc[0], doc[1])
                             changed = true
@@ -596,7 +603,11 @@ class DrawingSession(
                                 redrawQuickStroke()
                             } else {
                                 recordStrokePoint(doc[0], doc[1], event.pressures[i])
-                                painter.move(doc[0], doc[1], event.pressures[i], event.tilt)
+                                if (assistActive()) {
+                                    assistedMove(doc[0], doc[1], event.pressures[i], event.tilt)
+                                } else {
+                                    painter.move(doc[0], doc[1], event.pressures[i], event.tilt)
+                                }
                             }
                             changed = true
                         }
@@ -615,6 +626,10 @@ class DrawingSession(
                     }
                 }
                 when {
+                    draggingHandle != NO_HANDLE -> {
+                        draggingHandle = NO_HANDLE
+                        touchProperties()
+                    }
                     draggingGuide != 0 -> draggingGuide = 0
                     painter.isActive -> endStroke()
                     movingSelection -> {
@@ -732,6 +747,136 @@ class DrawingSession(
         }
     }
 
+    // ------------------------------------------------------- drawing guides
+
+    /** Guide handles (vanishing points, ruler ends) are draggable while the Guides panel is open. */
+    @Volatile var guideEditing: Boolean = false
+        private set
+    private var draggingHandle = NO_HANDLE
+    private var assistLocked = false
+    private var assistDx = 0f
+    private var assistDy = 0f
+    private var assistOnRuler = false
+
+    fun setGuideEditing(value: Boolean) = post {
+        guideEditing = value
+        requestState()
+    }
+
+    private fun tryHandleDrag(x: Float, y: Float): Boolean {
+        if (!guideEditing) return false
+        val reach = 34f / max(view.scale, 0.0001f)
+        val g = engine.guides
+        var best = NO_HANDLE
+        var bestD = reach
+        for (i in 0 until g.handleCount()) {
+            val d = hypot(x - g.handleX(i), y - g.handleY(i))
+            if (d <= bestD) { bestD = d; best = i }
+        }
+        // The radial symmetry centre is a handle too.
+        if (engine.symmetryRadial >= 2) {
+            val d = hypot(x - engine.symmetryXPos, y - engine.symmetryYPos)
+            if (d <= bestD) { bestD = d; best = CENTER_HANDLE }
+        }
+        draggingHandle = best
+        return best != NO_HANDLE
+    }
+
+    private fun moveHandle(x: Float, y: Float) {
+        if (draggingHandle == CENTER_HANDLE) {
+            engine.symmetryXPos = x.coerceIn(0f, engine.width.toFloat())
+            engine.symmetryYPos = y.coerceIn(0f, engine.height.toFloat())
+        } else {
+            engine.guides.moveHandle(draggingHandle, x, y)
+        }
+    }
+
+    private fun assistActive(): Boolean =
+        engine.guides.visible && engine.guides.assist && strokePreset?.category != BrushCategory.Smudge
+
+    /**
+     * Assisted drawing: the stroke waits until it has moved a little, picks the
+     * guide direction closest to that movement, and from then on every point
+     * is projected onto the line through the stroke's start along it. A
+     * stroke that starts on the ruler is drawn on the ruler itself.
+     */
+    private fun assistedMove(x: Float, y: Float, pressure: Float, tilt: Float) {
+        val g = engine.guides
+        if (!assistLocked) {
+            val moved = hypot(x - strokeStartX, y - strokeStartY)
+            if (moved * view.scale < 14f) return
+            val dirs = g.directionsFrom(strokeStartX, strokeStartY)
+            if (dirs.isEmpty()) {
+                painter.move(x, y, pressure, tilt)
+                return
+            }
+            val mx = (x - strokeStartX) / moved
+            val my = (y - strokeStartY) / moved
+            var best = 0
+            var bestDot = -1f
+            for (k in 0 until dirs.size / 2) {
+                val d = abs(mx * dirs[k * 2] + my * dirs[k * 2 + 1])
+                if (d > bestDot) { bestDot = d; best = k }
+            }
+            assistDx = dirs[best * 2]
+            assistDy = dirs[best * 2 + 1]
+            assistOnRuler = g.mode == GuideMode.Ruler &&
+                g.rulerDistance(strokeStartX, strokeStartY) * view.scale < 40f
+            assistLocked = true
+        }
+        val ox: Float
+        val oy: Float
+        if (assistOnRuler) {
+            ox = engine.guides.rulerX[0]
+            oy = engine.guides.rulerY[0]
+        } else {
+            ox = strokeStartX
+            oy = strokeStartY
+        }
+        val t = (x - ox) * assistDx + (y - oy) * assistDy
+        painter.move(ox + assistDx * t, oy + assistDy * t, pressure, tilt)
+    }
+
+    fun setGuideMode(mode: GuideMode) = post {
+        engine.guides.mode = mode
+        touchProperties()
+        requestState()
+    }
+
+    fun setGuideAssist(value: Boolean) = post {
+        engine.guides.assist = value
+        touchProperties()
+        requestState()
+    }
+
+    fun setGridSize(value: Float) = post {
+        engine.guides.gridSize = value.coerceIn(8f, 4096f)
+        touchProperties()
+        requestState()
+    }
+
+    fun setVanishingPoints(count: Int) = post {
+        engine.guides.vpCount = count.coerceIn(1, 3)
+        touchProperties()
+        requestState()
+    }
+
+    fun setRadialSymmetry(segments: Int) = post {
+        engine.symmetryRadial = if (segments < 2) 0 else segments.coerceAtMost(32)
+        if (engine.symmetryRadial >= 2 && engine.symmetryXPos <= 0f) {
+            engine.symmetryXPos = engine.width / 2f
+            engine.symmetryYPos = engine.height / 2f
+        }
+        touchProperties()
+        requestState()
+    }
+
+    fun setSymmetryMirror(value: Boolean) = post {
+        engine.symmetryMirror = value
+        touchProperties()
+        requestState()
+    }
+
     // ------------------------------------------------------- symmetry guides
 
     private fun tryGuideDrag(x: Float, y: Float): Boolean {
@@ -796,6 +941,7 @@ class DrawingSession(
         qsPressureSum = 0f
         qsPressureCount = 0
         recordStrokePoint(x, y, pressure)
+        assistLocked = false
         painter.begin(layer, brush, color, x, y, pressure, tilt, assistStrength = assist)
         FrameLogger.strokeActive = true
         // Cache the layers below for the tiles this stroke touches, so a frame
@@ -2470,7 +2616,8 @@ class DrawingSession(
         symmetryX = engine.symmetryX,
         symmetryY = engine.symmetryY,
         symmetryXPos = engine.symmetryXPos,
-        symmetryYPos = engine.symmetryYPos
+        symmetryYPos = engine.symmetryYPos,
+        extras = engine.extrasJson()
     )
 
     /**
@@ -2680,6 +2827,12 @@ class DrawingSession(
             symmetryXPos = (engine.symmetryXPos / engine.width).coerceIn(0f, 1f),
             symmetryYPos = (engine.symmetryYPos / engine.height).coerceIn(0f, 1f),
             symmetryLocked = engine.symmetryLocked,
+            symmetryRadial = engine.symmetryRadial,
+            symmetryMirror = engine.symmetryMirror,
+            guideMode = engine.guides.mode,
+            guideAssist = engine.guides.assist,
+            gridSize = engine.guides.gridSize,
+            vanishingPoints = engine.guides.vpCount,
             soloLayerId = engine.soloLayerId ?: -1L,
             assist = assist,
             quickShape = quickShapeEnabled,
@@ -2773,3 +2926,6 @@ class DrawingSession(
         }
     }
 }
+
+private const val NO_HANDLE = -1
+private const val CENTER_HANDLE = 99

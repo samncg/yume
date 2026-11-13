@@ -110,6 +110,8 @@ fun EditorScreen(
         if (id != null && id != panel) panelAnchors[id] = panelAnchorX ?: rootWidth
         panel = id
     }
+    // Guide handles are draggable only while the Guides panel is open.
+    LaunchedEffect(panel == PanelId.Guides) { session.setGuideEditing(panel == PanelId.Guides) }
     // Squeeze menu position (window px), or null when closed.
     var penMenuAt by remember { mutableStateOf<Offset?>(null) }
 
@@ -401,7 +403,8 @@ private fun PanelHost(
         PanelId.Fill -> FillPanel(state, session, onClose)
         PanelId.Gradient -> GradientPanel(state, session, onClose)
         PanelId.Shape -> ShapePanel(state, session, onClose)
-        PanelId.Liquify, PanelId.Guides -> Unit
+        PanelId.Guides -> GuidesPanel(state, session, onClose)
+        PanelId.Liquify -> Unit
         PanelId.Actions -> ActionsPanel(
             state = state,
             session = session,
@@ -465,6 +468,9 @@ private fun EditorTopBar(
                 },
                 CapsuleItem(Glyph.Wrench, "Actions", active = activePanel == PanelId.Actions) {
                     onPanel(PanelId.Actions)
+                },
+                CapsuleItem(Glyph.Guides, "Guides", active = activePanel == PanelId.Guides) {
+                    onPanel(PanelId.Guides)
                 }
             ),
             onAnchor = onAnchor

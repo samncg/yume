@@ -372,6 +372,26 @@ class StrokePainter(private val engine: DrawingEngine) {
                 alpha
             )
         }
+        val radial = engine.symmetryRadial
+        if (radial >= 2) {
+            // Copies rotated about the symmetry centre; with mirror on, each
+            // segment is also reflected across its own axis.
+            val cx = engine.symmetryXPos
+            val cy = engine.symmetryYPos
+            val dx = x - cx
+            val dy = y - cy
+            val step = (2.0 * Math.PI / radial)
+            for (k in 0 until radial) {
+                val a = step * k
+                val c = kotlin.math.cos(a).toFloat()
+                val s = kotlin.math.sin(a).toFloat()
+                if (k > 0) stampInternal(cx + dx * c - dy * s, cy + dx * s + dy * c, sized, alpha)
+                if (engine.symmetryMirror) {
+                    // Reflect across the horizontal axis, then rotate.
+                    stampInternal(cx + dx * c + dy * s, cy + dx * s - dy * c, sized, alpha)
+                }
+            }
+        }
         lastStampX = x
         lastStampY = y
     }

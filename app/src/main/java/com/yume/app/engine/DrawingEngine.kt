@@ -63,6 +63,31 @@ class DrawingEngine(val width: Int, val height: Int) {
     var symmetryXPos: Float = width / 2f
     var symmetryYPos: Float = height / 2f
     var symmetryLocked: Boolean = false
+    /**
+     * Radial (rotational) symmetry: number of segments around the symmetry
+     * centre ([symmetryXPos], [symmetryYPos]); 0 = off. With [symmetryMirror]
+     * every segment is also mirrored (a kaleidoscope).
+     */
+    @Volatile var symmetryRadial: Int = 0
+    @Volatile var symmetryMirror: Boolean = false
+
+    /** Drawing guides (grid, perspective, ruler). */
+    val guides = Guides(width, height)
+
+    /** Document settings beyond the core manifest, as one JSON object. */
+    fun extrasJson(): String = org.json.JSONObject().apply {
+        put("guides", guides.toJson())
+        put("radial", symmetryRadial)
+        put("mirror", symmetryMirror)
+    }.toString()
+
+    fun loadExtras(json: String?) {
+        if (json.isNullOrBlank()) return
+        val o = runCatching { org.json.JSONObject(json) }.getOrNull() ?: return
+        guides.load(o.optJSONObject("guides"))
+        symmetryRadial = o.optInt("radial", 0).let { if (it < 2) 0 else it.coerceAtMost(32) }
+        symmetryMirror = o.optBoolean("mirror", false)
+    }
 
     /** When set, only this layer is composited ("isolate layer"). */
     var soloLayerId: Long? = null

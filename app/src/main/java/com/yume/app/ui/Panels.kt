@@ -1913,6 +1913,84 @@ fun GradientPanel(state: EditorUiState, session: DrawingSession, onClose: () -> 
     }
 }
 
+// ================================================================== guides
+
+@Composable
+fun GuidesPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {
+    PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
+        PanelHeader("Guides", onClose)
+        SegmentedRow(
+            options = com.yume.app.engine.GuideMode.entries.map { it.label },
+            selectedIndex = state.guideMode.ordinal,
+            onSelect = { session.setGuideMode(com.yume.app.engine.GuideMode.entries[it]) }
+        )
+        when (state.guideMode) {
+            com.yume.app.engine.GuideMode.Grid -> {
+                Spacer(Modifier.height(10.dp))
+                YumeSlider(
+                    value = state.gridSize,
+                    onChange = { session.setGridSize(it) },
+                    label = "Grid size",
+                    valueLabel = "${state.gridSize.roundToInt()} px",
+                    min = 16f,
+                    max = 1024f
+                )
+            }
+            com.yume.app.engine.GuideMode.Perspective -> {
+                Spacer(Modifier.height(10.dp))
+                SectionLabel("Vanishing points")
+                Spacer(Modifier.height(6.dp))
+                SegmentedRow(
+                    options = listOf("1 point", "2 points", "3 points"),
+                    selectedIndex = state.vanishingPoints - 1,
+                    onSelect = { session.setVanishingPoints(it + 1) }
+                )
+            }
+            else -> Unit
+        }
+        if (state.guideMode != com.yume.app.engine.GuideMode.Off) {
+            Spacer(Modifier.height(6.dp))
+            ToggleRow(Glyph.Guides, "Assisted drawing", state.guideAssist) { session.setGuideAssist(it) }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = when (state.guideMode) {
+                com.yume.app.engine.GuideMode.Off -> "Pick a guide to draw over the canvas."
+                com.yume.app.engine.GuideMode.Grid -> "With assisted drawing, strokes run along the grid."
+                com.yume.app.engine.GuideMode.Perspective ->
+                    "Drag the vanishing points while this panel is open. Assisted strokes head to the nearest point, or run vertically."
+                com.yume.app.engine.GuideMode.Ruler ->
+                    "Drag the ruler's ends while this panel is open. Strokes that start on the ruler follow it; others run parallel."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = YumeColors.textDim
+        )
+        DividerLine()
+        SectionLabel("Radial symmetry")
+        Spacer(Modifier.height(6.dp))
+        YumeSlider(
+            value = state.symmetryRadial.toFloat(),
+            onChange = { session.setRadialSymmetry(it.roundToInt().let { n -> if (n < 2) 0 else n }) },
+            label = "Segments",
+            valueLabel = if (state.symmetryRadial < 2) "Off" else state.symmetryRadial.toString(),
+            min = 0f,
+            max = 16f
+        )
+        if (state.symmetryRadial >= 2) {
+            ToggleRow(Glyph.FlipH, "Mirror each segment", state.symmetryMirror) { session.setSymmetryMirror(it) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallButton("Centre on canvas") { session.centerSymmetry() }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Drag the centre point while this panel is open.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YumeColors.textDim
+            )
+        }
+    }
+}
+
 // ================================================================== shapes
 
 @Composable

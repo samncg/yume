@@ -59,6 +59,7 @@ data class LoadedProject(
     val symmetryY: Boolean = false,
     val symmetryXPos: Float = -1f,
     val symmetryYPos: Float = -1f,
+    val extras: String = "",
     /** Set when the document was restored from its crash-recovery journal. */
     val recovery: JournalRecovery? = null
 )
@@ -212,6 +213,7 @@ class ProjectStore(private val context: Context) {
             put("symmetryY", snap.symmetryY)
             put("symmetryXPos", snap.symmetryXPos.toDouble())
             put("symmetryYPos", snap.symmetryYPos.toDouble())
+            if (snap.extras.isNotEmpty()) put("extras", JSONObject(snap.extras))
             put("layers", layersJson)
             put("groups", JSONArray().apply {
                 snap.groups.forEach { g ->
@@ -575,6 +577,7 @@ class ProjectStore(private val context: Context) {
                 symmetryY = json.optBoolean("symmetryY", false),
                 symmetryXPos = json.optDouble("symmetryXPos", -1.0).toFloat(),
                 symmetryYPos = json.optDouble("symmetryYPos", -1.0).toFloat(),
+                extras = json.optJSONObject("extras")?.toString() ?: "",
                 recovery = state?.let { st ->
                     val n = layersJson.length()
                     JournalRecovery(
@@ -723,6 +726,7 @@ class ProjectStore(private val context: Context) {
             put("symmetryY", snapshot.symmetryY)
             put("symmetryXPos", snapshot.symmetryXPos.toDouble())
             put("symmetryYPos", snapshot.symmetryYPos.toDouble())
+            if (snapshot.extras.isNotEmpty()) put("extras", JSONObject(snapshot.extras))
             put("updatedAt", System.currentTimeMillis())
             put("layers", layersJson)
             put("groups", groupsJson)

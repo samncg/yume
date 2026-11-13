@@ -349,6 +349,7 @@ class SurfaceRenderer(
             canvas.restore()
 
             drawCanvasBorder(canvas, matrix, engine.width, engine.height)
+            drawGuides(canvas, matrix, engine.width, engine.height)
             drawSymmetry(canvas, matrix, engine.width, engine.height)
             drawSelection(canvas, matrix)
             drawGradientGuide(canvas, matrix)
@@ -381,6 +382,115 @@ class SurfaceRenderer(
         overlay.color = 0x33FFFFFF
         overlay.pathEffect = null
         canvas.drawPath(antPath, overlay)
+    }
+
+    private val guidePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    /**
+     * Drawing guides and radial symmetry spokes, in document space so lines
+     * stay put while panning; stroke widths are divided by the zoom so they
+     * read as hairlines at any scale. Handles are drawn in screen space.
+     */
+    private fun drawGuides(canvas: Canvas, matrix: Matrix, w: Int, h: Int) {
+        val engine = session.engine
+        val g = engine.guides
+        val radial = engine.symmetryRadial
+        if (!g.visible && radial < 2) return
+        val scale = session.view.scale.coerceAtLeast(0.0001f)
+        val save = canvas.save()
+        canvas.concat(matrix)
+        canvas.clipRect(0f, 0f, w.toFloat(), h.toFloat())
+        guidePaint.strokeWidth = 1f * density / scale
+        guidePaint.color = 0x664A7BE0
+        when (g.mode) {
+            com.yume.app.engine.GuideMode.Grid -> {
+                val step = g.gridSize
+                // Too dense to read at this zoom: show every Nth line.
+                var k = 1
+                while (step * k * scale < 10f * density) k *= 2
+                val s = step * k
+                var x = 0f
+                while (x <= w) { canvas.drawLine(x, 0f, x, h.toFloat(), guidePaint); x += s }
+                var y = 0f
+                while (y <= h) { canvas.drawLine(0f, y, w.toFloat(), y, guidePaint); y += s }
+            }
+            com.yume.app.engine.GuideMode.Perspective -> {
+                val far = maxOf(w, h) * 8f
+                for (i in 0 until g.vpCount) {
+                    val vx = g.vpX[i]
+                    val vy = g.vpY[i]
+                    val rays = 48
+                    for (r in 0 until rays) {
+                        val a = 2.0 * Math.PI * r / rays
+                        canvas.drawLine(
+                            vx, vy,
+                            vx + far * kotlin.math.cos(a).toFloat(), vy + far * kotlin.math.sin(a).toFloat(),
+                            guidePaint
+                        )
+                    }
+                }
+                // Horizon through the first two points (or level through one).
+                guidePaint.color = 0xAAE9A13B.toInt()
+                guidePaint.strokeWidth = 1.6f * density / scale
+                if (g.vpCount >= 2) {
+                    val dx = g.vpX[1] - g.vpX[0]
+                    val dy = g.vpY[1] - g.vpY[0]
+                    val l = kotlin.math.hypot(dx, dy).coerceAtLeast(1e-3f)
+                    canvas.drawLine(
+                        g.vpX[0] - dx / l * far, g.vpY[0] - dy / l * far,
+                        g.vpX[0] + dx / l * far, g.vpY[0] + dy / l * far, guidePaint
+                    )
+                } else {
+                    canvas.drawLine(-far, g.vpY[0], far, g.vpY[0], guidePaint)
+                }
+            }
+            com.yume.app.engine.GuideMode.Ruler -> {
+                guidePaint.color = 0xCCE9A13B.toInt()
+                guidePaint.strokeWidth = 2f * density / scale
+                val dx = g.rulerX[1] - g.rulerX[0]
+                val dy = g.rulerY[1] - g.rulerY[0]
+                val l = kotlin.math.hypot(dx, dy).coerceAtLeast(1e-3f)
+                val far = maxOf(w, h) * 4f
+                canvas.drawLine(
+                    g.rulerX[0] - dx / l * far, g.rulerY[0] - dy / l * far,
+                    g.rulerX[0] + dx / l * far, g.rulerY[0] + dy / l * far, guidePaint
+                )
+            }
+            com.yume.app.engine.GuideMode.Off -> Unit
+        }
+        if (radial >= 2) {
+            guidePaint.color = 0xAAE9A13B.toInt()
+            guidePaint.strokeWidth = 1.3f * density / scale
+            val far = maxOf(w, h) * 2f
+            for (k in 0 until radial) {
+                val a = 2.0 * Math.PI * k / radial
+                canvas.drawLine(
+                    engine.symmetryXPos, engine.symmetryYPos,
+                    engine.symmetryXPos + far * kotlin.math.cos(a).toFloat(),
+                    engine.symmetryYPos + far * kotlin.math.sin(a).toFloat(),
+                    guidePaint
+                )
+            }
+        }
+        canvas.restoreToCount(save)
+
+        // Handles, in screen space, while the Guides panel is open.
+        if (!session.guideEditing) return
+        val pts = FloatArray(2)
+        fun handle(x: Float, y: Float) {
+            pts[0] = x; pts[1] = y
+            matrix.mapPoints(pts)
+            handlePaint.style = Paint.Style.FILL
+            handlePaint.color = 0xE6FFFFFF.toInt()
+            canvas.drawCircle(pts[0], pts[1], 9f * density, handlePaint)
+            handlePaint.style = Paint.Style.STROKE
+            handlePaint.strokeWidth = 2.5f * density
+            handlePaint.color = 0xFFE9A13B.toInt()
+            canvas.drawCircle(pts[0], pts[1], 9f * density, handlePaint)
+        }
+        for (i in 0 until g.handleCount()) handle(g.handleX(i), g.handleY(i))
+        if (radial >= 2) handle(engine.symmetryXPos, engine.symmetryYPos)
     }
 
     /** Dashed mirror guides, draggable on the canvas. */

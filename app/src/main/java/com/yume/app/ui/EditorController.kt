@@ -72,6 +72,7 @@ class EditorController(
             engine.symmetryY = project.symmetryY
             if (project.symmetryXPos > 0f) engine.symmetryXPos = project.symmetryXPos
             if (project.symmetryYPos > 0f) engine.symmetryYPos = project.symmetryYPos
+            engine.loadExtras(project.extras)
             for (data in project.layers) {
                 // Hidden layers may arrive without pixels; they reload on demand.
                 val layer = engine.newLayer(
