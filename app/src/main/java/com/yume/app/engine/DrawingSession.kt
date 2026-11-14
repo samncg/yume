@@ -618,21 +618,23 @@ class DrawingSession(
                             dragLastDocY = doc[1]
                             changed = true
                         }
+                        shapeDragging || quickShaping -> {
+                            // Shapes follow the pen as a light preview; the brush
+                            // stamps them once, when the pen lifts.
+                            strokeLastX = doc[0]
+                            strokeLastY = doc[1]
+                            updateShapePreview()
+                            changed = true
+                        }
                         painter.isActive -> {
                             strokeLastX = doc[0]
                             strokeLastY = doc[1]
-                            if (shapeDragging) {
-                                redrawShapeDrag()
-                            } else if (quickShaping) {
-                                redrawQuickStroke()
+                            recordStrokePoint(doc[0], doc[1], event.pressures[i])
+                            painter.orientation = event.orientation
+                            if (assistActive()) {
+                                assistedMove(doc[0], doc[1], event.pressures[i], event.tilt)
                             } else {
-                                recordStrokePoint(doc[0], doc[1], event.pressures[i])
-                                painter.orientation = event.orientation
-                                if (assistActive()) {
-                                    assistedMove(doc[0], doc[1], event.pressures[i], event.tilt)
-                                } else {
-                                    painter.move(doc[0], doc[1], event.pressures[i], event.tilt)
-                                }
+                                painter.move(doc[0], doc[1], event.pressures[i], event.tilt)
                             }
                             changed = true
                         }
@@ -657,6 +659,7 @@ class DrawingSession(
                     }
                     draggingGuide != 0 -> draggingGuide = 0
                     liquify.active -> liquify.end()?.let { history.push(it) }
+                    shapeDragging || quickShaping -> finishShape()
                     painter.isActive -> endStroke()
                     movingSelection -> {
                         movingSelection = false
@@ -731,7 +734,19 @@ class DrawingSession(
                     engine.endStrokeCache()
                     strokeLayer = null
                     strokePreset = null
+                } else if (quickShaping || shapeDragging) {
+                    // A snapped QuickShape has already put the freehand pixels
+                    // back; only its capture and the preview remain.
+                    painter.releaseTileCapture()
+                    FrameLogger.strokeActive = false
+                    engine.endStrokeCache()
+                    strokeLayer = null
+                    strokePreset = null
                 }
+                shapeDragging = false
+                shapePreview = null
+                // A liquify drag keeps what it did so far, as one undo step.
+                if (liquify.active) liquify.end()?.let { history.push(it) }
                 // The gesture turned into a multi-touch pan/zoom: drop the
                 // pending magic wand instead of selecting under the fingers.
                 autoSelectPending = false
@@ -765,7 +780,15 @@ class DrawingSession(
                         qsCenterX = cx / n
                         qsCenterY = cy / n
                         qsPressure = if (qsPressureCount > 0) qsPressureSum / qsPressureCount else 1f
-                        redrawQuickStroke()
+                        // The freehand stroke leaves the pixels (its pre-stroke
+                        // capture is kept) and the preview morphs from it into
+                        // the clean shape.
+                        val (fx, fy) = resamplePath(qsXs, qsYs, qsCount, MORPH_POINTS)
+                        qsFreeXs = fx
+                        qsFreeYs = fy
+                        painter.cancel()
+                        qsMorphStart = android.os.SystemClock.uptimeMillis()
+                        updateShapePreview()
                     }
                 }
                 true
@@ -882,7 +905,18 @@ class DrawingSession(
     }
 
     fun setVanishingPoints(count: Int) = post {
+        val before = engine.guides.vpCount
         engine.guides.vpCount = count.coerceIn(1, 3)
+        // A point that is switched on comes in where it can be seen and
+        // dragged (older documents kept the third one far below). Points
+        // already in use stay where the user put them, on or off the canvas.
+        val g = engine.guides
+        for (i in before until g.vpCount) {
+            if (g.vpX[i] !in 0f..engine.width.toFloat() || g.vpY[i] !in 0f..engine.height.toFloat()) {
+                g.vpX[i] = g.vpX[i].coerceIn(engine.width * 0.05f, engine.width * 0.95f)
+                g.vpY[i] = g.vpY[i].coerceIn(engine.height * 0.05f, engine.height * 0.95f)
+            }
+        }
         touchProperties()
         requestState()
     }
@@ -1000,9 +1034,10 @@ class DrawingSession(
      * the pen moves relative to where it was when the shape snapped. The
      * pre-stroke snapshot is kept, so this is cheap enough for every move.
      */
-    private fun redrawQuickStroke() {
-        val shape = qsShape ?: return
-        val drawn = when (shape.kind) {
+    /** The QuickShape as the pen has adjusted it since it snapped. */
+    private fun adjustedQuickShape(): ShapePath? {
+        val shape = qsShape ?: return null
+        return when (shape.kind) {
             "line" -> ShapeGeometry.line(shape.xs[0], shape.ys[0], strokeLastX, strokeLastY)
             else -> {
                 val d0 = hypot(qsAnchorX - qsCenterX, qsAnchorY - qsCenterY)
@@ -1019,20 +1054,122 @@ class DrawingSession(
                 }
             }
         }
-        paintShape(drawn, qsPressure)
     }
 
+    /** What the shape tool or QuickShape would stamp right now. */
+    private fun currentShape(): ShapePath? = when {
+        shapeDragging -> if (hypot(strokeLastX - shapeStartX, strokeLastY - shapeStartY) < 1f) null
+        else ShapeGeometry.fromDrag(shapeKind, shapeStartX, shapeStartY, strokeLastX, strokeLastY, shapePerfect, shapeSides)
+        quickShaping -> adjustedQuickShape()
+        else -> null
+    }
+
+    /** A shape being placed, drawn by the renderer as a plain stroked path. */
+    class ShapePreview(
+        val xs: FloatArray, val ys: FloatArray, val closed: Boolean,
+        val width: Float, val color: Int
+    )
+
+    /** Read by the renderer each frame (render thread, so no locking). */
+    var shapePreview: ShapePreview? = null
+        private set
+    private var qsFreeXs = FloatArray(0)
+    private var qsFreeYs = FloatArray(0)
+    private var qsMorphStart = 0L
+
+    private fun morphProgress(): Float {
+        if (!quickShaping || qsFreeXs.isEmpty()) return 1f
+        val t = ((android.os.SystemClock.uptimeMillis() - qsMorphStart) / MORPH_MS.toFloat()).coerceIn(0f, 1f)
+        return 1f - (1f - t) * (1f - t) * (1f - t)
+    }
+
+    private fun updateShapePreview() {
+        val brush = strokePreset ?: return
+        val shape = currentShape()
+        if (shape == null) {
+            shapePreview = null
+            return
+        }
+        val pressure = if (quickShaping) qsPressure else shapePressure
+        val width = max(1.5f, brush.size * (1f - brush.pressureSize.coerceIn(0f, 1f) * (1f - pressure)))
+        val tint = if (brush.category == BrushCategory.Eraser) 0x99A6A6AE.toInt()
+        else {
+            val a = (brush.opacity * 255f).toInt().coerceIn(40, 255)
+            (a shl 24) or (color and 0x00FFFFFF)
+        }
+        val e = morphProgress()
+        if (e < 1f) {
+            val (tx, ty) = resamplePath(shape.xs, shape.ys, shape.size, MORPH_POINTS)
+            val n = MORPH_POINTS
+            val xs = FloatArray(n) { qsFreeXs[it] + (tx[it] - qsFreeXs[it]) * e }
+            val ys = FloatArray(n) { qsFreeYs[it] + (ty[it] - qsFreeYs[it]) * e }
+            shapePreview = ShapePreview(xs, ys, closed = false, width = width, color = tint)
+        } else {
+            shapePreview = ShapePreview(shape.xs, shape.ys, shape.closed, width, tint)
+        }
+    }
+
+    /** Stamps the placed shape with the brush and ends it as one stroke. */
+    private fun finishShape() {
+        val shape = currentShape()
+        shapePreview = null
+        if (shape == null) {
+            if (quickShaping) {
+                // Nothing to draw any more: the freehand pixels are already back.
+                painter.clearTileCapture()
+            }
+            strokeLayer = null
+            strokePreset = null
+            shapeDragging = false
+            quickShaping = false
+            FrameLogger.strokeActive = false
+            return
+        }
+        if (shapeDragging) engine.beginStrokeCache()
+        paintShape(shape, if (quickShaping) qsPressure else shapePressure, fresh = shapeDragging)
+        endStroke()
+    }
+
+    /**
+     * Per frame (render thread): the QuickShape morph, and liquify modes that
+     * keep working while the pen is held still. True while there is motion.
+     */
+    fun tickFrame(): Boolean {
+        var work = false
+        if (quickShaping && morphProgress() < 1f) {
+            updateShapePreview()
+            work = true
+        } else if (quickShaping && shapePreview != null && qsMorphStart != 0L) {
+            // The last morph frame lands exactly on the shape.
+            qsMorphStart = 0L
+            updateShapePreview()
+            work = true
+        }
+        if (liquify.active && liquifyMode != LiquifyMode.Push) {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - liquifyHoldLast >= LIQUIFY_HOLD_MS) {
+                liquifyHoldLast = now
+                liquify.dab(liquifyMode, liquifyLastX, liquifyLastY, liquifySize / 2f, 0f, 0f, liquifyStrength * 0.45f)
+            }
+            work = true
+        }
+        return work
+    }
+    private var liquifyHoldLast = 0L
+
     /** Paints [shape] with the stroke's brush from the pre-stroke pixels. */
-    private fun paintShape(shape: ShapePath, pressure: Float) {
+    private fun paintShape(shape: ShapePath, pressure: Float, fresh: Boolean = false) {
         val layer = strokeLayer ?: return
         val brush = strokePreset ?: return
         painter.cancel()
         // Smoothing would lag the vertices, so shapes use a non-streamlined
-        // version of the brush, at the stroke's average pressure.
+        // version of the brush, at the stroke's average pressure. A QuickShape
+        // reuses its freehand stroke's pre-stroke capture; a shape tool drag
+        // takes a fresh one.
         painter.begin(
             layer, brush.copy(smoothing = 0f), color,
             shape.xs[0], shape.ys[0], pressure, 0f,
-            captureBase = false, assistStrength = 0f, startTaper = !shape.closed
+            captureBase = fresh, assistStrength = 0f, startTaper = !shape.closed
         )
         for (k in 1 until shape.size) painter.move(shape.xs[k], shape.ys[k], pressure, 0f)
     }
@@ -1046,6 +1183,7 @@ class DrawingSession(
         liquify.begin(layer)
         liquifyLastX = x
         liquifyLastY = y
+        liquifyHoldLast = android.os.SystemClock.uptimeMillis()
         // Twirl, pinch, expand and restore act on a press that does not move.
         if (liquifyMode != LiquifyMode.Push) liquify.dab(liquifyMode, x, y, liquifySize / 2f, 0f, 0f, liquifyStrength)
     }
@@ -1111,17 +1249,29 @@ class DrawingSession(
         shapePressure = 1f
         quickShaping = false
         shapeDragging = true
-        painter.begin(layer, brush.copy(smoothing = 0f), color, x, y, shapePressure, 0f, startTaper = false)
+        shapePreview = null
         FrameLogger.strokeActive = true
-        engine.beginStrokeCache()
     }
 
-    private fun redrawShapeDrag() {
-        if (hypot(strokeLastX - shapeStartX, strokeLastY - shapeStartY) < 1f) return
-        val shape = ShapeGeometry.fromDrag(
-            shapeKind, shapeStartX, shapeStartY, strokeLastX, strokeLastY, shapePerfect, shapeSides
-        )
-        paintShape(shape, shapePressure)
+    /** Arc-length resampling of a path into [n] points (for the morph). */
+    private fun resamplePath(xs: FloatArray, ys: FloatArray, count: Int, n: Int): Pair<FloatArray, FloatArray> {
+        val ox = FloatArray(n)
+        val oy = FloatArray(n)
+        if (count <= 0) return ox to oy
+        if (count == 1) { ox.fill(xs[0]); oy.fill(ys[0]); return ox to oy }
+        val cum = FloatArray(count)
+        for (i in 1 until count) cum[i] = cum[i - 1] + hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1])
+        val total = max(cum[count - 1], 1e-3f)
+        var j = 0
+        for (k in 0 until n) {
+            val t = total * k / (n - 1)
+            while (j < count - 2 && cum[j + 1] < t) j++
+            val seg = max(cum[j + 1] - cum[j], 1e-6f)
+            val f = ((t - cum[j]) / seg).coerceIn(0f, 1f)
+            ox[k] = xs[j] + (xs[j + 1] - xs[j]) * f
+            oy[k] = ys[j] + (ys[j + 1] - ys[j]) * f
+        }
+        return ox to oy
     }
 
     fun setShapeKind(kind: ShapeKind) {
@@ -3179,3 +3329,8 @@ private const val NO_HANDLE = -1
 private const val CENTER_HANDLE = 99
 /** Above this many bytes per layer, imports avoid canvas-sized bitmaps. */
 private const val LARGE_CANVAS_BYTES = 64L * 1024L * 1024L
+/** QuickShape morph: points and duration. */
+private const val MORPH_POINTS = 160
+private const val MORPH_MS = 240L
+/** Liquify modes repeat this often while the pen rests. */
+private const val LIQUIFY_HOLD_MS = 33L

@@ -147,6 +147,7 @@ class SurfaceRenderer(
                 session.runCommands()
                 if (session.runInput()) work = true
                 if (session.consumePendingPreview()) work = true
+                if (session.tickFrame()) work = true
                 session.rebuildTransformIfNeeded()
 
                 val engine = session.engine
@@ -350,6 +351,7 @@ class SurfaceRenderer(
 
             drawCanvasBorder(canvas, matrix, engine.width, engine.height)
             drawGuides(canvas, matrix, engine.width, engine.height)
+            drawShapePreview(canvas, matrix, engine.width, engine.height)
             drawSymmetry(canvas, matrix, engine.width, engine.height)
             drawSelection(canvas, matrix)
             drawGradientGuide(canvas, matrix)
@@ -491,6 +493,62 @@ class SurfaceRenderer(
         }
         for (i in 0 until g.handleCount()) handle(g.handleX(i), g.handleY(i))
         if (radial >= 2) handle(engine.symmetryXPos, engine.symmetryYPos)
+    }
+
+    private val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val previewPath = android.graphics.Path()
+    private val copyMatrix = Matrix()
+
+    /**
+     * A shape being placed (shape tool, QuickShape): a stroked path at the
+     * brush's width and colour, with the symmetry copies the brush will make.
+     * Stamping happens once, when the pen lifts.
+     */
+    private fun drawShapePreview(canvas: Canvas, matrix: Matrix, w: Int, h: Int) {
+        val p = session.shapePreview ?: return
+        if (p.xs.isEmpty()) return
+        previewPath.reset()
+        previewPath.moveTo(p.xs[0], p.ys[0])
+        for (i in 1 until p.xs.size) previewPath.lineTo(p.xs[i], p.ys[i])
+        if (p.closed) previewPath.close()
+        previewPaint.strokeWidth = p.width
+        previewPaint.color = p.color
+        val engine = session.engine
+        val save = canvas.save()
+        canvas.concat(matrix)
+        canvas.clipRect(0f, 0f, w.toFloat(), h.toFloat())
+        fun draw(m: Matrix?) {
+            if (m == null) canvas.drawPath(previewPath, previewPaint)
+            else {
+                val s = canvas.save()
+                canvas.concat(m)
+                canvas.drawPath(previewPath, previewPaint)
+                canvas.restoreToCount(s)
+            }
+        }
+        draw(null)
+        val cx = engine.symmetryXPos
+        val cy = engine.symmetryYPos
+        if (engine.symmetryX) { copyMatrix.setScale(-1f, 1f, cx, 0f); draw(copyMatrix) }
+        if (engine.symmetryY) { copyMatrix.setScale(1f, -1f, 0f, cy); draw(copyMatrix) }
+        if (engine.symmetryX && engine.symmetryY) { copyMatrix.setScale(-1f, -1f, cx, cy); draw(copyMatrix) }
+        val radial = engine.symmetryRadial
+        if (radial >= 2) {
+            for (k in 0 until radial) {
+                val deg = 360f * k / radial
+                if (k > 0) { copyMatrix.setRotate(deg, cx, cy); draw(copyMatrix) }
+                if (engine.symmetryMirror) {
+                    copyMatrix.setScale(1f, -1f, 0f, cy)
+                    copyMatrix.postRotate(deg, cx, cy)
+                    draw(copyMatrix)
+                }
+            }
+        }
+        canvas.restoreToCount(save)
     }
 
     /** Dashed mirror guides, draggable on the canvas. */

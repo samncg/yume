@@ -551,7 +551,19 @@ class DrawingEngine(val width: Int, val height: Int) {
         layer.groupId = g?.id ?: 0L
         // A grouped layer's opacity belongs to its group.
         if (g != null) layer.opacity = 1f
-        activeIndex = target
+        var at = target
+        if (g == null) {
+            // Leaving a group from its middle would split the group in two:
+            // the layer goes just below the group instead.
+            val below = layers.getOrNull(at - 1)?.groupId ?: 0L
+            val above = layers.getOrNull(at + 1)?.groupId ?: 0L
+            if (below != 0L && below == above) {
+                layers.removeAt(at)
+                at = layers.indexOfFirst { it.groupId == below }.coerceAtLeast(0)
+                layers.add(at, layer)
+            }
+        }
+        activeIndex = at
         pruneGroups()
         markDirtyAll()
     }

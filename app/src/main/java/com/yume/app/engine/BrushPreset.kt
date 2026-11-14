@@ -32,6 +32,8 @@ data class BrushPreset(
     val pressureOpacity: Float = 0.35f,
     /** How strongly stylus tilt enlarges the brush (0..1). */
     val tiltSize: Float = 0f,
+    /** How strongly stylus tilt lightens the brush (0..1): pencil shading. */
+    val tiltOpacity: Float = 0f,
     /** Strength used by the smudge engine (0..1). */
     val smudgeAmount: Float = 0.4f,
     /** Extra soft bloom around the dab (used by glow-style brushes). */
@@ -70,6 +72,7 @@ data class BrushPreset(
         put("pressureSize", pressureSize.toDouble())
         put("pressureOpacity", pressureOpacity.toDouble())
         put("tiltSize", tiltSize.toDouble())
+        put("tiltOpacity", tiltOpacity.toDouble())
         put("smudgeAmount", smudgeAmount.toDouble())
         put("glow", glow)
         put("shapeId", shapeId)
@@ -98,7 +101,11 @@ data class BrushPreset(
             jitter = o.optDouble("jitter", base.jitter.toDouble()).toFloat(),
             pressureSize = o.optDouble("pressureSize", base.pressureSize.toDouble()).toFloat(),
             pressureOpacity = o.optDouble("pressureOpacity", base.pressureOpacity.toDouble()).toFloat(),
-            tiltSize = o.optDouble("tiltSize", base.tiltSize.toDouble()).toFloat(),
+            // Built-ins saved before tilt shading existed take the new tilt
+            // defaults; anything the user set on their own presets stays.
+            tiltSize = if (!o.has("tiltOpacity") && o.optBoolean("builtIn", base.builtIn)) base.tiltSize
+            else o.optDouble("tiltSize", base.tiltSize.toDouble()).toFloat(),
+            tiltOpacity = o.optDouble("tiltOpacity", base.tiltOpacity.toDouble()).toFloat(),
             smudgeAmount = o.optDouble("smudgeAmount", base.smudgeAmount.toDouble()).toFloat(),
             glow = o.optBoolean("glow", base.glow),
             shapeId = o.optString("shapeId", base.shapeId),
@@ -129,20 +136,22 @@ object BrushLibrary {
         BrushPreset(
             id = "pencil-6b", name = "6B Pencil", size = 16f, hardness = 0.55f, flow = 0.75f,
             spacing = 0.1f, smoothing = 0.3f, grain = 0.5f, jitter = 0.04f,
-            pressureSize = 0.8f, pressureOpacity = 0.5f, tiltSize = 0.15f
+            pressureSize = 0.8f, pressureOpacity = 0.5f, tiltSize = 0.6f, tiltOpacity = 0.5f
         ),
         BrushPreset(
             id = "soft-brush", name = "Soft Brush", size = 60f, hardness = 0.12f, flow = 0.8f,
-            spacing = 0.05f, smoothing = 0.35f, pressureSize = 0.6f, pressureOpacity = 0.4f
+            spacing = 0.05f, smoothing = 0.35f, pressureSize = 0.6f, pressureOpacity = 0.4f,
+            tiltSize = 0.4f, tiltOpacity = 0.3f
         ),
         BrushPreset(
             id = "airbrush", name = "Airbrush", size = 90f, hardness = 0.05f, flow = 0.25f,
-            spacing = 0.035f, smoothing = 0.3f, pressureSize = 0.4f, pressureOpacity = 0.7f
+            spacing = 0.035f, smoothing = 0.3f, pressureSize = 0.4f, pressureOpacity = 0.7f,
+            tiltSize = 0.5f, tiltOpacity = 0.3f
         ),
         BrushPreset(
             id = "charcoal", name = "Charcoal", size = 30f, hardness = 0.35f, flow = 0.7f,
             spacing = 0.09f, smoothing = 0.25f, grain = 0.8f, jitter = 0.12f,
-            pressureSize = 0.7f, pressureOpacity = 0.4f, tiltSize = 0.35f
+            pressureSize = 0.7f, pressureOpacity = 0.4f, tiltSize = 0.6f, tiltOpacity = 0.4f
         ),
         BrushPreset(
             id = "ink-bleed", name = "Ink Bleed", size = 18f, hardness = 0.7f, flow = 0.65f,
@@ -166,7 +175,7 @@ object BrushLibrary {
         BrushPreset(
             id = "spray", name = "Spray Paint", size = 50f, hardness = 0.3f, flow = 0.3f,
             spacing = 0.02f, smoothing = 0.25f, grain = 0.6f, jitter = 0.6f,
-            pressureSize = 0.4f, pressureOpacity = 0.5f
+            pressureSize = 0.4f, pressureOpacity = 0.5f, tiltSize = 0.4f
         ),
         BrushPreset(
             id = "eraser-soft", name = "Soft Eraser", category = BrushCategory.Eraser,

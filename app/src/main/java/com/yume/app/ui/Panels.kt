@@ -221,6 +221,9 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
 
         var dragId by remember { mutableStateOf(-1L) }
         var dragOffset by remember { mutableFloatStateOf(0f) }
+        // Sideways drag: pulling a layer left takes it out of its group.
+        var dragOffsetX by remember { mutableFloatStateOf(0f) }
+        val outdentPx = with(density) { 28.dp.toPx() }
         var dragFrom by remember { mutableStateOf(-1) }
         // After a drop, until the new order arrives from the engine, rows hold
         // the positions they were pushed to and the dropped row stays where the
@@ -331,8 +334,11 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                                 dragId = row.id
                                 dragFrom = index
                                 dragOffset = 0f
+                                dragOffsetX = 0f
                             },
                             onDrag = { dragOffset += it },
+                            onDragX = { dragOffsetX = (dragOffsetX + it).coerceIn(-outdentPx * 2f, outdentPx) },
+                            dragOffsetX = if (dragging) dragOffsetX.coerceAtMost(0f) else 0f,
                             onDragEnd = {
                                 val slots = slotsFor(dragFrom, dragOffset)
                                 val id = dragId
@@ -373,6 +379,8 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                                     val landing = if (slots > 0) rows.getOrNull(targetPanel)
                                     else rows.getOrNull(targetPanel - 1)
                                     val joinGroup: Long = when {
+                                        // Pulled left: out of any group, where it lands.
+                                        dragOffsetX < -outdentPx -> 0L
                                         landing == null -> 0L
                                         landing.isGroup -> if (landing.expanded) landing.id else 0L
                                         landing.depth > 0 -> {
@@ -387,6 +395,11 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                                         joinGroup
                                     )
                                 } else {
+                                    if (dragOffsetX < -outdentPx && row.depth > 0) {
+                                        // Pulled left in place: out of its group, same spot.
+                                        val above = rows.take(index).count { !it.isGroup && it.id != id }
+                                        session.moveLayerTo(id, (layerCount - 1 - above).coerceIn(0, layerCount - 1), 0L)
+                                    }
                                     // Not moved: spring back home from the finger.
                                     scope.launch {
                                         settle.snapTo(offset)
@@ -395,6 +408,7 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                                     }
                                 }
                                 dragOffset = 0f
+                                dragOffsetX = 0f
                             }
                         )
                     }
@@ -537,10 +551,13 @@ private fun LayerRow(
     lifted: Boolean = false,
     onDragStart: () -> Unit,
     onDrag: (Float) -> Unit,
+    onDragX: (Float) -> Unit = {},
+    dragOffsetX: Float = 0f,
     onDragEnd: () -> Unit
 ) {
     val dragStart by androidx.compose.runtime.rememberUpdatedState(onDragStart)
     val dragBy by androidx.compose.runtime.rememberUpdatedState(onDrag)
+    val dragByX by androidx.compose.runtime.rememberUpdatedState(onDragX)
     val dragEnd by androidx.compose.runtime.rememberUpdatedState(onDragEnd)
     // A picked-up row lifts off the list: a little larger, with a shadow and a
     // solid backing, and it springs into and out of that state.
@@ -554,6 +571,7 @@ private fun LayerRow(
             .fillMaxWidth()
             .graphicsLayer {
                 translationY = dragOffset
+                translationX = dragOffsetX
                 scaleX = 1f + 0.035f * lift
                 scaleY = 1f + 0.035f * lift
                 shadowElevation = 14.dp.toPx() * lift
@@ -578,6 +596,7 @@ private fun LayerRow(
                     onDrag = { change, amount ->
                         change.consume()
                         dragBy(amount.y)
+                        dragByX(amount.x)
                     },
                     onDragEnd = { dragEnd() },
                     onDragCancel = { dragEnd() }
@@ -912,6 +931,12 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                     onChange = { v -> session.updatePreset { it.copy(tiltSize = v) } },
                     label = "Tilt → Size",
                     valueLabel = formatPercent(preset.tiltSize)
+                )
+                YumeSlider(
+                    value = preset.tiltOpacity,
+                    onChange = { v -> session.updatePreset { it.copy(tiltOpacity = v) } },
+                    label = "Tilt → Opacity",
+                    valueLabel = formatPercent(preset.tiltOpacity)
                 )
                 if (preset.category == BrushCategory.Smudge) {
                     YumeSlider(
@@ -2053,6 +2078,25 @@ fun GuidesPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
             color = YumeColors.textDim
         )
         DividerLine()
+        SectionLabel("Symmetry")
+        Spacer(Modifier.height(2.dp))
+        ToggleRow(Glyph.Grid, "Vertical mirror", state.symmetryX) {
+            session.setSymmetry(it, state.symmetryY)
+        }
+        ToggleRow(Glyph.Grid, "Horizontal mirror", state.symmetryY) {
+            session.setSymmetry(state.symmetryX, it)
+        }
+        if (state.symmetryX || state.symmetryY) {
+            ToggleRow(Glyph.Lock, "Lock mirror axes", state.symmetryLocked) {
+                session.setSymmetryLocked(it)
+            }
+            Text(
+                text = "Drag a dashed axis on the canvas to move it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YumeColors.textDim
+            )
+        }
+        Spacer(Modifier.height(8.dp))
         SectionLabel("Radial symmetry")
         Spacer(Modifier.height(6.dp))
         YumeSlider(
@@ -2223,24 +2267,6 @@ fun ActionsPanel(
             })
         }
         DividerLine()
-        ToggleRow(Glyph.Grid, "Vertical symmetry", state.symmetryX) {
-            session.setSymmetry(it, state.symmetryY)
-        }
-        ToggleRow(Glyph.Grid, "Horizontal symmetry", state.symmetryY) {
-            session.setSymmetry(state.symmetryX, it)
-        }
-        if (state.symmetryX || state.symmetryY) {
-            ToggleRow(Glyph.Lock, "Lock symmetry guides", state.symmetryLocked) {
-                session.setSymmetryLocked(it)
-            }
-            MenuRow(Glyph.Fit, "Centre guides") { session.centerSymmetry() }
-            Text(
-                text = "Drag a dashed guide on the canvas to move its axis.",
-                style = MaterialTheme.typography.bodySmall,
-                color = YumeColors.textDim,
-                modifier = Modifier.padding(start = 8.dp, bottom = 6.dp)
-            )
-        }
         ToggleRow(Glyph.Brush, "QuickShape hold", state.quickShape) {
             session.setQuickShape(it)
         }

@@ -222,7 +222,7 @@ class StrokePainter(private val engine: DrawingEngine) {
         tilt = initialTilt.coerceIn(0f, 1f)
         isActive = true
 
-        stampAt(x, y, sizeFor(pressure, tilt), alphaFor(pressure))
+        stampAt(x, y, sizeFor(pressure, tilt), alphaFor(pressure, tilt))
     }
 
     fun move(x: Float, y: Float, pressureIn: Float, tiltIn: Float) {
@@ -289,7 +289,7 @@ class StrokePainter(private val engine: DrawingEngine) {
             remaining -= advance
             distanceSinceStamp = 0f
             travel += step
-            stampAt(px, py, size, alphaFor(pressure))
+            stampAt(px, py, size, alphaFor(pressure, tilt))
             guard++
         }
         distanceSinceStamp += remaining
@@ -306,7 +306,7 @@ class StrokePainter(private val engine: DrawingEngine) {
             val dx = lastRawX - lastX
             val dy = lastRawY - lastY
             if (hypot(dx, dy) > 0.75f) {
-                stampLine(lastX, lastY, lastRawX, lastRawY, sizeFor(pressure, tilt), alphaFor(pressure))
+                stampLine(lastX, lastY, lastRawX, lastRawY, sizeFor(pressure, tilt), alphaFor(pressure, tilt))
             }
         }
         val c = canvas
@@ -332,10 +332,13 @@ class StrokePainter(private val engine: DrawingEngine) {
         return max(1.2f, brush.size * p * t)
     }
 
-    private fun alphaFor(pressure: Float): Float {
+    private fun alphaFor(pressure: Float, tilt: Float): Float {
         val brush = preset ?: return 1f
         val p = 1f - brush.pressureOpacity.coerceIn(0f, 1f) * (1f - pressure)
-        return (baseAlpha * p).coerceIn(0.004f, 1f)
+        val to = brush.tiltOpacity.coerceIn(0f, 1f)
+        // Leaning the pen shades lighter (exactly 1 when the brush ignores tilt).
+        val t = if (to > 0f) 1f - to * tilt * 0.75f else 1f
+        return (baseAlpha * p * t).coerceIn(0.004f, 1f)
     }
 
     /**

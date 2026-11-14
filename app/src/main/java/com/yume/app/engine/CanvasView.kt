@@ -337,7 +337,7 @@ class CanvasView(
             }
         }
         longPressAction = action
-        handler.postDelayed(action, 380L)
+        handler.postDelayed(action, EYEDROPPER_HOLD_MS)
     }
 
     private fun cancelScheduledLongPress() {
@@ -572,3 +572,5 @@ private const val MENU_HOLD_TURN_DEG = 6.0
 /** How long the pen rests before QuickShape snaps, and how still it must be. */
 private const val QUICKSHAPE_HOLD_MS = 600L
 private const val QUICKSHAPE_SLOP_DP = 6f
+/** Holding a stroke this still for this long picks a colour instead. */
+private const val EYEDROPPER_HOLD_MS = 750L

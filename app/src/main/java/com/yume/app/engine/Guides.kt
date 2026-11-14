@@ -22,7 +22,8 @@ class Guides(private val width: Int, private val height: Int) {
 
     /** Vanishing points (up to 3); the first [vpCount] are used. */
     val vpX = floatArrayOf(width * 0.18f, width * 0.82f, width * 0.5f)
-    val vpY = floatArrayOf(height * 0.42f, height * 0.42f, height * 2.4f)
+    // The third point starts inside the canvas so its handle can be grabbed.
+    val vpY = floatArrayOf(height * 0.42f, height * 0.42f, height * 0.92f)
 
     /** Ruler ends. */
     val rulerX = floatArrayOf(width * 0.25f, width * 0.75f)
