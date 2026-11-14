@@ -158,6 +158,13 @@ object YumeHarness {
                     out.append(scoreFill8k(app))
                 } else if (only == "pancancel") {
                     out.append(scorePanCancel())
+                } else if (only == "comp8k") {
+                    TileStoreConfig.flatComposite = false
+                    out.append("# flat fast path OFF\n").append(scoreCompositeBig(app, 8192))
+                    TileStoreConfig.flatComposite = true
+                    out.append("# flat fast path ON\n").append(scoreCompositeBig(app, 8192))
+                } else if (only == "comp16k") {
+                    out.append(scoreCompositeBig(app, 16384))
                 } else if (only == "pickfresh") {
                     out.append(line(scorePickFresh()))
                 } else if (only == "wand") {
@@ -2715,7 +2722,7 @@ object YumeHarness {
                 layer.touch()
                 val session = DrawingSession("refuse", "R", engine, History())
                 ps.saveProject(project.id, session.snapshotNow())
-                val file = File(ps.projectDir(project.id), "layer_0.png")
+                val file = savedLayerFile(ps.projectDir(project.id), "layer_0")
                 val crcA = crcBytes(file.readBytes())
                 layer.tiles.fillRect(Rect(10, 10, 300, 200), 0xFF00FF00.toInt())
                 layer.touch()
@@ -3418,6 +3425,157 @@ object YumeHarness {
             s.setGuideEditing(true)
         }
         out.insert(0, "pan-cancel: ${if (bad == 0) "PASS" else "FAIL ($bad changed)"}\n")
+        return out.toString()
+    }
+
+    /**
+     * Big-canvas compositing timings: three filled layers at different
+     * opacities plus a few strokes. Opening (every tile dirty, renderer-style
+     * frames with the frame budget), an opacity change, the mip, and undo /
+     * redo of a whole-canvas fill, each until the screen has settled.
+     */
+    private fun scoreCompositeBig(app: YumeApp, size: Int): String {
+        val out = StringBuilder()
+        val ps = app.projectStore
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = 256
+        val am = app.getSystemService(android.app.ActivityManager::class.java)
+        val budget = TileCache.defaultBudget(am)
+        var cache: TileCache? = null
+        val project = ps.createProject("harness-comp", size, size, BG)
+        val tag = "comp-${size / 1024}k"
+        fun ms(t0: Long) = "%.0f".format((System.nanoTime() - t0) / 1e6)
+        try {
+            cache = TileCache.open(app.cacheDir, project.id, budget)
+            val c0 = cache!!
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("cb", "CB", engine, History())
+            session.history.spill = com.yume.app.engine.HistorySpill(File(c0.dir, "history.spill"))
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            var t0 = System.nanoTime()
+            val a = engine.newLayer("A")
+            a.tiles.fillRect(Rect(0, 0, size, size), 0xFFD04030.toInt())
+            val b = engine.newLayer("B")
+            b.tiles.fillRect(Rect(0, 0, size, size), 0xFF3060C0.toInt())
+            b.opacity = 0.6f
+            val c = engine.newLayer("C")
+            c.tiles.fillRect(Rect(0, size / 3, size, size), 0xFF40B060.toInt())
+            c.opacity = 0.4f
+            engine.selectLayer(c.id)
+            session.color = 0xFF101010.toInt()
+            for (k in 0 until 4) {
+                val y = size * (0.2f + 0.2f * k)
+                session.stroke(listOf(P(size * 0.1f, y), P(size * 0.5f, y + size * 0.05f), P(size * 0.9f, y)))
+            }
+            listOf(a, b, c).forEach { it.touch() }
+            out.append("$tag setup ${size}x$size: ${ms(t0)}ms\n")
+            fun settle(): String {
+                val f0 = System.nanoTime()
+                var frames = 0
+                var worst = 0L
+                while (engine.hasDirty() && frames < 200000) {
+                    val s0 = System.nanoTime()
+                    c0.adoptPrefetched()
+                    c0.blockingLoads = false
+                    try { engine.flush() } finally { c0.blockingLoads = true }
+                    c0.evictIfNeeded()
+                    frames++
+                    worst = max(worst, System.nanoTime() - s0)
+                }
+                return "${ms(f0)}ms frames=$frames worstFrame=${"%.1f".format(worst / 1e6)}ms"
+            }
+            fun mip(): String {
+                val m0 = System.nanoTime()
+                engine.enableMip()
+                var g = 0
+                while (engine.hasMipDirty && g++ < 100000) engine.updateMip()
+                return "${ms(m0)}ms"
+            }
+            com.yume.app.engine.CompositeProfile.flatTiles = 0
+            com.yume.app.engine.CompositeProfile.enabled = true
+            engine.markDirtyAll()
+            out.append("$tag open: ${settle()} flatTiles=${com.yume.app.engine.CompositeProfile.flatTiles} mip=${mip()}\n")
+            b.opacity = 0.45f
+            engine.markDirtyAll()
+            out.append("$tag opacity change: ${settle()} mip=${mip()}\n")
+            val f = engine.newLayer("F")
+            engine.selectLayer(f.id)
+            session.chooseTool(Tool.Fill)
+            session.runCommands()
+            session.fillLayerOnly = true
+            session.color = 0xFFEEBB22.toInt()
+            t0 = System.nanoTime()
+            session.fillAt(10f, 10f)
+            session.runCommands()
+            out.append("$tag fill: ${ms(t0)}ms + ${settle()} mip=${mip()}\n")
+            t0 = System.nanoTime()
+            session.undo(); session.runCommands()
+            out.append("$tag undo: ${ms(t0)}ms + ${settle()} mip=${mip()}\n")
+            t0 = System.nanoTime()
+            session.redo(); session.runCommands()
+            out.append("$tag redo: ${ms(t0)}ms + ${settle()} mip=${mip()}\n")
+            com.yume.app.engine.CompositeProfile.enabled = false
+            out.append("$tag memory: nativeHeap=${android.os.Debug.getNativeHeapAllocatedSize() shr 20}MB | ${c0.stats()}\n")
+            session.history.spill?.close()
+
+            // Save, then open from disk the way the editor does: lazy layers,
+            // renderer-style frames until the screen has settled.
+            engine.selectLayer(f.id)
+            engine.deleteLayer(f.id)
+            engine.compositeAll()
+            val hashBefore = bandHash(engine.compositeTiles!!)
+            t0 = System.nanoTime()
+            ps.saveProject(project.id, session.snapshotNow())
+            out.append("$tag save: ${ms(t0)}ms complete=${ps.lastSaveComplete}\n")
+            c0.close()
+            cache = null
+            Runtime.getRuntime().gc()
+            t0 = System.nanoTime()
+            val c1 = TileCache.open(app.cacheDir, project.id, budget)
+            cache = c1
+            val loaded = ps.loadProject(project.id) ?: error("reload failed")
+            val re = DrawingEngine(size, size)
+            re.backgroundColor = loaded.background
+            for (d in loaded.layers) {
+                val l = re.newLayer(name = d.name, bitmap = d.bitmap, backingFile = d.file)
+                l.adoptMask(d.mask, d.maskFile)
+                l.opacity = d.opacity
+                l.blend = d.blend
+                l.visible = d.visible
+            }
+            val loadMs = ms(t0)
+            val r0 = System.nanoTime()
+            var frames = 0
+            re.markDirtyAll()
+            while (re.hasDirty() && frames < 200000) {
+                c1.adoptPrefetched()
+                c1.blockingLoads = false
+                try { re.flush() } finally { c1.blockingLoads = true }
+                c1.evictIfNeeded()
+                frames++
+            }
+            re.compositeAll()
+            val hashAfter = bandHash(re.compositeTiles!!)
+            out.append("$tag reopen ${if (hashAfter == hashBefore) "MATCH" else "MISMATCH before=$hashBefore after=$hashAfter"}: manifest ${loadMs}ms, composite settled ${ms(r0)}ms frames=$frames total ${ms(t0)}ms | ${c1.stats()}\n")
+        } catch (t: Throwable) {
+            Log.e(TAG, "comp failed", t)
+            out.append("$tag: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            com.yume.app.engine.CompositeProfile.enabled = false
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
+            Runtime.getRuntime().gc()
+        }
         return out.toString()
     }
 
@@ -4590,6 +4748,24 @@ object YumeHarness {
         return DiffStat(maxCh, diff, samples)
     }
 
+    /** The saved file for [base] ("layer_0"): tile file or PNG, whichever exists. */
+    private fun savedLayerFile(dir: File, base: String): File {
+        val t = File(dir, "$base.${com.yume.app.engine.TileFile.EXT}")
+        return if (t.exists()) t else File(dir, "$base.png")
+    }
+
+    /** CRC of the pixels saved for [base], decoded from either format; null if none. */
+    private fun savedPixelsHash(dir: File, base: String): String? {
+        val f = savedLayerFile(dir, base)
+        if (!f.exists()) return null
+        val bmp = if (com.yume.app.engine.TileFile.isTileFile(f)) com.yume.app.engine.TileFile.decodeFull(f)
+        else android.graphics.BitmapFactory.decodeFile(f.absolutePath, android.graphics.BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        })
+        bmp ?: return "undecodable"
+        return hashBitmap(bmp).also { bmp.recycle() }
+    }
+
     private fun crcBytes(bytes: ByteArray): String {
         val crc = CRC32()
         crc.update(bytes)
@@ -4729,10 +4905,10 @@ object YumeHarness {
             val dir = store.projectDir(project.id)
             val pngHashes = ArrayList<String>()
             for (i in engine.layers.indices) {
-                val layerFile = File(dir, "layer_$i.png")
-                pngHashes.add(if (layerFile.exists()) crcBytes(layerFile.readBytes()) else "missing")
-                val maskFile = File(dir, "mask_$i.png")
-                if (maskFile.exists()) pngHashes.add(crcBytes(maskFile.readBytes()))
+                // Saved pixels, whatever the file format (sparse layers are
+                // tile files now, dense ones PNG): decoded and hashed.
+                pngHashes.add(savedPixelsHash(dir, "layer_$i") ?: "missing")
+                savedPixelsHash(dir, "mask_$i")?.let { pngHashes.add(it) }
             }
 
             // Real load path: decode the project, rebuild layers as the editor does.

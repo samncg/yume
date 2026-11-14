@@ -1688,8 +1688,8 @@ fun CanvasSizeDialog(
     var scale by remember { mutableStateOf(true) }
     var center by remember { mutableStateOf(true) }
     var keepRatio by remember { mutableStateOf(true) }
-    val w = wText.toIntOrNull()?.coerceIn(16, 8192)
-    val h = hText.toIntOrNull()?.coerceIn(16, 8192)
+    val w = wText.toIntOrNull()?.coerceIn(16, com.yume.app.engine.MemoryBudget.MAX_SPARSE_EDGE)
+    val h = hText.toIntOrNull()?.coerceIn(16, com.yume.app.engine.MemoryBudget.MAX_SPARSE_EDGE)
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         PanelCard(Modifier.width(360.dp)) {
             PanelHeader("Canvas size", onClose = onDismiss)
@@ -1703,7 +1703,7 @@ fun CanvasSizeDialog(
                 androidx.compose.material3.OutlinedTextField(
                     value = wText,
                     onValueChange = { v ->
-                        wText = v.filter(Char::isDigit).take(4)
+                        wText = v.filter(Char::isDigit).take(5)
                         val nw = wText.toIntOrNull()
                         if (keepRatio && scale && nw != null) {
                             hText = (nw.toLong() * height / width).coerceAtLeast(1).toString()
@@ -1719,7 +1719,7 @@ fun CanvasSizeDialog(
                 androidx.compose.material3.OutlinedTextField(
                     value = hText,
                     onValueChange = { v ->
-                        hText = v.filter(Char::isDigit).take(4)
+                        hText = v.filter(Char::isDigit).take(5)
                         val nh = hText.toIntOrNull()
                         if (keepRatio && scale && nh != null) {
                             wText = (nh.toLong() * width / height).coerceAtLeast(1).toString()

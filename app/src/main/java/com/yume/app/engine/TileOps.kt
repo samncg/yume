@@ -106,10 +106,12 @@ object TileOps {
         store: TileStore,
         bounds: Rect,
         halo: Int,
+        skip: Set<Long> = emptySet(),
         op: (patch: Bitmap, patchRect: Rect, tile: Rect) -> Unit
     ) {
         for (ty in tileRangeY(store, bounds)) {
             for (tx in tileRangeX(store, bounds)) {
+                if (skip.isNotEmpty() && ((tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL)) in skip) continue
                 val tile = tileRect(store, tx, ty)
                 if (tile.isEmpty) continue
                 if (tile.right <= bounds.left || tile.left >= bounds.right ||
@@ -142,7 +144,13 @@ object TileOps {
         val paint = Paint()
         paint.colorFilter = filter
         paint.isFilterBitmap = false
-        forEachTile(store, bounds, 0) { patch, pad, tile ->
+        val flat = flatTiles(store, bounds) { one ->
+            val tmp = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+            Canvas(tmp).drawBitmap(one, 0f, 0f, paint)
+            Canvas(one).drawBitmap(tmp, 0f, 0f, srcPaint1)
+            tmp.recycle()
+        }
+        forEachTile(store, bounds, 0, flat) { patch, pad, tile ->
             val tmp = scratch(patch.width, patch.height)
             Canvas(tmp).drawBitmap(patch, 0f, 0f, paint)
             writePart(store, tmp, pad, tile)
@@ -171,6 +179,10 @@ object TileOps {
                 pad.top = max(0, tile.top - halo)
                 pad.right = min(store.width, tile.right + halo)
                 pad.bottom = min(store.height, tile.bottom + halo)
+                // Everything the blur reads here is empty, or one and the same
+                // opaque solid: a box blur of a constant is that constant, so
+                // the tile (still the captured one) stays exactly as it is.
+                if (uniformSnapshot(capture, pad)) continue
                 val patch = scratch(pad.width(), pad.height())
                 readSnapshot(capture, pad, patch)
                 Adjustments.blur(patch, radius)
@@ -194,11 +206,99 @@ object TileOps {
 
     /** Tone mapping (curves, levels, colour balance, gradient map), tile by tile. */
     fun tone(store: TileStore, bounds: Rect, lut: ToneLut) {
-        forEachTile(store, bounds, 0) { patch, pad, tile ->
+        val flat = flatTiles(store, bounds) { one -> lut.apply(one) }
+        forEachTile(store, bounds, 0, flat) { patch, pad, tile ->
             lut.apply(patch)
             writePart(store, patch, pad, tile)
         }
     }
+
+    /** True when the captured snapshot over [rect] is all empty or all one opaque shared solid. */
+    private fun uniformSnapshot(capture: TileCapture, rect: Rect): Boolean {
+        val store = capture.store
+        var first: Bitmap? = null
+        var seen = false
+        for (ty in tileRangeY(store, rect)) {
+            for (tx in tileRangeX(store, rect)) {
+                val t = if (capture.has(tx, ty)) capture.beforeAt(tx, ty) else null
+                if (t != null) {
+                    val c = SolidTiles.colourOf(t) ?: return false
+                    if ((c ushr 24) != 255) return false
+                }
+                if (!seen) {
+                    first = t
+                    seen = true
+                } else if (t !== first) {
+                    return false
+                }
+            }
+        }
+        // A tile never captured reads as the default; only a 0 default is
+        // left unchanged by the blur round trip.
+        return seen && (first != null || store.defaultPixel == 0)
+    }
+
+    private val srcPaint1 = Paint().apply { blendMode = BlendMode.SRC }
+
+    /**
+     * Per-pixel operations on flat tiles: a tile that is missing or one shared
+     * solid gives the same result at every pixel, so [op] runs on one pixel
+     * and the tile is set to it (or left alone when unchanged). Returns the
+     * keys handled; other tiles still need the full pass. Only results that
+     * can be written back exactly (unchanged, or opaque) are taken.
+     */
+    fun flatTiles(store: TileStore, bounds: Rect, op: (Bitmap) -> Unit): Set<Long> {
+        val sp = store as? SparseTileStore ?: return emptySet()
+        val done = HashSet<Long>()
+        val one = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        val raw = java.nio.IntBuffer.allocate(1)
+        // Source raw pixel -> result: UNCHANGED, TRANSLUCENT, or an opaque colour.
+        val results = HashMap<Long, Int>()
+        try {
+            for (ty in tileRangeY(store, bounds)) {
+                for (tx in tileRangeX(store, bounds)) {
+                    val tile = tileRect(store, tx, ty)
+                    if (tile.isEmpty || !intersects(tile, bounds)) continue
+                    // Only whole tiles inside the work area: the full pass
+                    // rewrites whole tiles too, so this matches it.
+                    val solid = sp.sharedSolidAt(tx, ty)
+                    if (solid == null && sp.hasTile(tx, ty)) continue
+                    if (solid != null) {
+                        Canvas(one).drawBitmap(solid, Rect(0, 0, 1, 1), Rect(0, 0, 1, 1), srcPaint1)
+                    } else {
+                        one.eraseColor(store.defaultPixel)
+                    }
+                    raw.clear()
+                    one.copyPixelsToBuffer(raw)
+                    val srcKey = raw.get(0).toLong() and 0xFFFFFFFFL
+                    val out = results.getOrPut(srcKey) {
+                        op(one)
+                        raw.clear()
+                        one.copyPixelsToBuffer(raw)
+                        if ((raw.get(0).toLong() and 0xFFFFFFFFL) == srcKey) {
+                            UNCHANGED
+                        } else {
+                            val c = one.getPixel(0, 0)
+                            if ((c ushr 24) == 255) c else TRANSLUCENT
+                        }
+                    }
+                    when (out) {
+                        TRANSLUCENT -> continue
+                        UNCHANGED -> Unit
+                        else -> sp.putSolidTile(tx, ty, out)
+                    }
+                    done.add((tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL))
+                }
+            }
+        } finally {
+            one.recycle()
+        }
+        return done
+    }
+
+    // Opaque colours always have the top byte 0xFF, so these never collide.
+    private const val UNCHANGED = 0x00000001
+    private const val TRANSLUCENT = 0x00000002
 
     /** Fills [patch] (covering [rect]) from the captured pre-edit snapshot. */
     fun readSnapshot(capture: TileCapture, rect: Rect, patch: Bitmap) {

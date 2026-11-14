@@ -226,6 +226,9 @@ class DrawingEngine(val width: Int, val height: Int) {
     private fun newCompositeStore(bg: Int): SparseTileStore =
         SparseTileStore(
             width, height, TileStoreConfig.tileSize, null, null, bg,
+            // Flat composite tiles (a filled area, any number of flat layers
+            // at any opacity) are one shared solid instead of 256 KB each.
+            solidTiles = true,
             cache = TileCache.active
         ).also { it.cacheRole = "composite" }
 
@@ -681,6 +684,12 @@ class DrawingEngine(val width: Int, val height: Int) {
     fun hasDirty(): Boolean = !dirty.isEmpty || pending.isNotEmpty()
 
     /**
+     * The document area on screen (set by the renderer each frame; empty =
+     * no preference). Damage there is composited before damage elsewhere.
+     */
+    val priorityRect = Rect()
+
+    /**
      * Rebuilds the dirty part of the composite. Returns true if anything changed.
      *
      * Composite tiles a non-blocking frame could not finish (time budget, or an
@@ -694,14 +703,45 @@ class DrawingEngine(val width: Int, val height: Int) {
         prefetchLeft = 4
         val retry = ArrayList(pending)
         pending.clear()
+        val prio = priorityRect
         if (!dirty.isEmpty) {
             // New damage first: it is what the user is looking at right now.
             val d = Rect(dirty)
             dirty.setEmpty()
-            compositeRegion(d)
+            if (prio.isEmpty || !Rect.intersects(prio, d) || prio.contains(d)) {
+                compositeRegion(d)
+            } else {
+                // The part on screen first (tile aligned, so no tile is split),
+                // then the bands around it: a big undo or fill refreshes where
+                // the user is looking before the off-screen rest.
+                val ts = TileStoreConfig.tileSize
+                val p = Rect(
+                    prio.left / ts * ts, prio.top / ts * ts,
+                    min(width, (prio.right + ts - 1) / ts * ts), min(height, (prio.bottom + ts - 1) / ts * ts)
+                )
+                p.intersect(d)
+                compositeRegion(p)
+                if (d.top < p.top) compositeRegion(Rect(d.left, d.top, d.right, p.top))
+                if (p.bottom < d.bottom) compositeRegion(Rect(d.left, p.bottom, d.right, d.bottom))
+                if (d.left < p.left) compositeRegion(Rect(d.left, p.top, p.left, p.bottom))
+                if (p.right < d.right) compositeRegion(Rect(p.right, p.top, d.right, p.bottom))
+            }
             if (sparseMode) mipDirtyUnion(d)
         }
-        for (r in retry) {
+        if (!prio.isEmpty && retry.size > 1) {
+            // Deferred tiles on screen go first too.
+            retry.sortBy { if (Rect.intersects(it, prio)) 0 else 1 }
+        }
+        val cache = TileCache.active
+        for ((n, r) in retry.withIndex()) {
+            // Out of frame time: carry the rest over untouched instead of
+            // visiting thousands of deferred tiles only to defer them again.
+            if (cache != null && !cache.blockingLoads &&
+                System.nanoTime() - frameStart > cache.frameCompositeBudgetNs
+            ) {
+                for (k in n until retry.size) pending.add(retry[k])
+                break
+            }
             compositeRegion(r)
             if (sparseMode) mipDirtyUnion(r)
         }
@@ -800,6 +840,16 @@ class DrawingEngine(val width: Int, val height: Int) {
                     cache.deferredTiles++
                     continue
                 }
+                if (sub == r && flatStack(tx, ty)) {
+                    // Every source here is one colour: the whole tile is the
+                    // composite of one pixel, rendered through the same path.
+                    val p = flatPixel(r.left, r.top)
+                    if ((p ushr 24) == 255) {
+                        if (CompositeProfile.enabled) CompositeProfile.flatTiles++
+                        st.putSolidTile(tx, ty, p)
+                        continue
+                    }
+                }
                 if (sub == r && st.isEvicted(tx, ty)) {
                     // Fully re-rendered below: its old pixels are not needed.
                     // Only now, once the tile is really being drawn: clearing
@@ -836,6 +886,39 @@ class DrawingEngine(val width: Int, val height: Int) {
                 if (!existed && st.isRectEmpty(sub)) st.clearTile(tx, ty)
             }
         }
+    }
+
+    /**
+     * True when every source of composite tile ([tx], [ty]) is flat: each
+     * visible layer's tile (and mask tile) is missing or a shared solid, with
+     * no live preview and no stroke caches in play. Then every pixel of the
+     * tile composites to the same value.
+     */
+    private fun flatStack(tx: Int, ty: Int): Boolean {
+        if (!TileStoreConfig.flatComposite) return false
+        if (belowTiles != null || aboveTiles != null || preview != null) return false
+        for (l in layers) {
+            if (!l.visible) continue
+            val t = l.tiles as? SparseTileStore ?: return false
+            if (!t.isFlatTile(tx, ty)) return false
+            if (l.maskEnabled && l.hasMask) {
+                val m = l.maskTiles as? SparseTileStore ?: return false
+                if (!m.isFlatTile(tx, ty)) return false
+            }
+        }
+        return true
+    }
+
+    private var flatProbe: Bitmap? = null
+
+    /** The composite at one pixel, through the ordinary render path. */
+    private fun flatPixel(x: Int, y: Int): Int {
+        val b = flatProbe ?: Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).also { flatProbe = it }
+        val c = Canvas(b)
+        c.drawColor(0, BlendMode.CLEAR)
+        c.translate(-x.toFloat(), -y.toFloat())
+        renderInto(c, Rect(x, y, x + 1, y + 1))
+        return b.getPixel(0, 0)
     }
 
     /**
@@ -893,7 +976,8 @@ class DrawingEngine(val width: Int, val height: Int) {
     fun enableMip() {
         if (mipTiles == null) {
             mipTiles = SparseTileStore(
-                mipWidth, mipHeight, TileStoreConfig.tileSize, null, null, backgroundColor
+                mipWidth, mipHeight, TileStoreConfig.tileSize, null, null, backgroundColor,
+                solidTiles = true
             )
             mipDirty.set(0, 0, width, height)
         }
@@ -925,11 +1009,18 @@ class DrawingEngine(val width: Int, val height: Int) {
                 if (x1 <= x0 || y1 <= y0) continue
                 if (x1 <= doc.left || x0 >= doc.right || y1 <= doc.top || y0 >= doc.bottom) continue
                 src.set(x0, y0, x1, y1)
-                readCompositeInto(patch, src)
                 val mx0 = mtx * ts
                 val my0 = mty * ts
                 val mw = min(ts, mipWidth - mx0)
                 val mh = min(ts, mipHeight - my0)
+                // Every composite tile under it one and the same flat colour:
+                // the downscale is that colour, no 1024 px read and filter.
+                val flat = flatComposite(src)
+                if (flat >= 0L && mw == min(ts, mipWidth - mx0) && mx0 + mw <= mipWidth) {
+                    st.putSolidTile(mtx, mty, flat.toInt())
+                    continue
+                }
+                readCompositeInto(patch, src)
                 st.editTile(mtx, mty) { c ->
                     c.drawBitmap(
                         patch,
@@ -941,6 +1032,23 @@ class DrawingEngine(val width: Int, val height: Int) {
             }
         }
         return true
+    }
+
+    /** The single flat colour of composite area [r] (tile aligned), or -1. */
+    private fun flatComposite(r: Rect): Long {
+        val st = compositeTiles ?: return -1L
+        val ts = st.tileSize
+        var colour = -1L
+        for (ty in r.top / ts..(r.bottom - 1) / ts) {
+            for (tx in r.left / ts..(r.right - 1) / ts) {
+                val c = st.flatColourAt(tx, ty)
+                if (c < 0L || (colour >= 0L && c != colour)) return -1L
+                colour = c
+            }
+        }
+        // Only opaque colours: a translucent flat tile's filtered downscale is
+        // left to the real filter.
+        return if (colour >= 0L && (colour ushr 24) == 0xFFL) colour else -1L
     }
 
     /** The mip as one bitmap, for tests and thumbnails. */
@@ -1614,6 +1722,11 @@ class DrawingEngine(val width: Int, val height: Int) {
         if (tile == null) return null
         val w = clip.width()
         val h = clip.height()
+        // A whole shared solid is kept by reference: immutable, never
+        // recycled or spilled by the history, and costs no memory.
+        if (w == tile.width && h == tile.height && clip.left == tx0 && clip.top == ty0 && SolidTiles.isShared(tile)) {
+            return tile
+        }
         val slice = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         Canvas(slice).drawBitmap(
             tile,

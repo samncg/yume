@@ -256,6 +256,9 @@ object TileStoreConfig {
      */
     @Volatile var solidTiles: Boolean = true
 
+    /** Flat composite tiles take the one-pixel fast path (debug switch for timing). */
+    @Volatile var flatComposite: Boolean = true
+
     const val DEFAULT_TILE_SIZE: Int = TileStore.TILE_SIZE
 }
 
@@ -577,6 +580,7 @@ class SingleTileStore(
         }
 
         private fun decodeFull(file: File): Bitmap? = runCatching {
+            if (TileFile.isTileFile(file)) return TileFile.decodeFull(file)
             BitmapFactory.decodeFile(
                 file.absolutePath,
                 BitmapFactory.Options().apply {
@@ -644,6 +648,74 @@ class SparseTileStore(
     var cacheRole: String = if (defaultPixel == 0) "layer" else "mask"
 
     /** True when the tile exists, resident or evicted (no disk read). */
+    /**
+     * True when tile ([tx], [ty]) is one colour without reading pixels:
+     * missing (reads as the default) or a shared solid. An evicted tile is
+     * not known to be flat.
+     */
+    fun isFlatTile(tx: Int, ty: Int): Boolean {
+        // A layer still on disk has no tiles in memory yet: that is not
+        // "empty". Load it first (compositing would anyway).
+        ensureResident()
+        if (!materialized) return false
+        val k = key(tx, ty)
+        if (solids.containsKey(k)) return true
+        return !tiles.containsKey(k) && !(evicted.isNotEmpty() && k in evicted)
+    }
+
+    /** Recently used solids by colour and size (a flat composite reuses a few). */
+    private val solidCache = object : LinkedHashMap<Long, Pair<Bitmap, Int>?>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Pair<Bitmap, Int>?>?) = size > 48
+    }
+
+    /**
+     * Sets the whole tile ([tx], [ty]) to [color], as [fillRect] over the tile
+     * would (same bytes), reusing a recently built shared solid.
+     */
+    fun putSolidTile(tx: Int, ty: Int, color: Int) {
+        if (tx !in 0 until tileCountX || ty !in 0 until tileCountY) return
+        val tw = tileW(tx)
+        val th = tileH(ty)
+        val r = Rect(tx * tileSize, ty * tileSize, tx * tileSize + tw, ty * tileSize + th)
+        if (!solidTiles || color == defaultPixel) {
+            fillRect(r, color)
+            return
+        }
+        ensureResident()
+        val ck = (color.toLong() shl 32) or ((tw.toLong() and 0xFFFFL) shl 16) or (th.toLong() and 0xFFFFL)
+        val solid = if (solidCache.containsKey(ck)) solidCache[ck] else solidFrom(tw, th) {
+            Canvas(it).drawColor(color, BlendMode.SRC)
+        }.also { solidCache[ck] = it }
+        if (solid == null) {
+            fillRect(r, color)
+            return
+        }
+        val k = key(tx, ty)
+        if (tiles[k] !== solid.first) assignSolid(k, solid.first, solid.second)
+        markDirty(r)
+    }
+
+    /**
+     * The colour of tile ([tx], [ty]) when it is flat (a shared solid, or
+     * missing and so the default), as a non-negative Long; -1 otherwise.
+     */
+    fun flatColourAt(tx: Int, ty: Int): Long {
+        if (tx !in 0 until tileCountX || ty !in 0 until tileCountY) return -1L
+        ensureResident()
+        if (!materialized) return -1L
+        val k = key(tx, ty)
+        solids[k]?.let { return it.toLong() and 0xFFFFFFFFL }
+        if (tiles.containsKey(k) || (evicted.isNotEmpty() && k in evicted)) return -1L
+        return defaultPixel.toLong() and 0xFFFFFFFFL
+    }
+
+    /** The shared solid at ([tx], [ty]), or null when the tile is not one. */
+    fun sharedSolidAt(tx: Int, ty: Int): Bitmap? {
+        ensureResident()
+        val k = key(tx, ty)
+        return if (solids.containsKey(k)) tiles[k] else null
+    }
+
     fun hasTile(tx: Int, ty: Int): Boolean {
         val k = key(tx, ty)
         return tiles.containsKey(k) || (evicted.isNotEmpty() && k in evicted)
@@ -1256,6 +1328,107 @@ class SparseTileStore(
      * size and rows is that tile row's height. Default-only tiles are skipped,
      * uniform ones become solids, and the cache budget is kept while loading.
      */
+    /**
+     * Loads a [TileFile] with this store's size and tile grid. Returns false
+     * (nothing kept) when the file has another grid or cannot be read.
+     */
+    private fun loadTileFile(file: File): Boolean {
+        val head = TileFile.header(file) ?: return false
+        if (head.width != width || head.height != height || head.tileSize != tileSize ||
+            head.defaultPixel != defaultPixel
+        ) {
+            return false
+        }
+        // First tile of each distinct solid pattern and size: later ones share it.
+        val firstSolid = HashMap<Long, Long>()
+        val ok = TileFile.read(file) { tx, ty, kind, bytes ->
+            if (tx !in 0 until tileCountX || ty !in 0 until tileCountY) return@read
+            val k = key(tx, ty)
+            val tw = tileW(tx)
+            val th = tileH(ty)
+            if (kind == TileFile.KIND_SOLID) {
+                val pattern = (java.nio.ByteBuffer.wrap(bytes).int.toLong() shl 32) or
+                    ((tw.toLong() and 0xFFFFL) shl 16) or (th.toLong() and 0xFFFFL)
+                val first = firstSolid[pattern]
+                val shared = first?.let { tiles[it] }
+                val colour = first?.let { solids[it] }
+                if (shared != null && colour != null) {
+                    assignSolid(k, shared, colour)
+                    return@read
+                }
+            }
+            val tile = TilePool.acquire(tw, th)
+            if (kind == TileFile.KIND_SOLID) {
+                val full = ByteArray(tw * th * 4)
+                var i = 0
+                while (i < full.size) {
+                    full[i] = bytes[0]; full[i + 1] = bytes[1]; full[i + 2] = bytes[2]; full[i + 3] = bytes[3]
+                    i += 4
+                }
+                tile.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(full))
+            } else {
+                tile.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(bytes))
+            }
+            tiles[k] = tile
+            modCount++
+            if (solidTiles && compactTile(k) && kind == TileFile.KIND_SOLID) {
+                firstSolid[(java.nio.ByteBuffer.wrap(bytes).int.toLong() shl 32) or
+                    ((tw.toLong() and 0xFFFFL) shl 16) or (th.toLong() and 0xFFFFL)] = k
+            }
+            cache?.evictIfFarOver()
+        }
+        return ok != null
+    }
+
+    /** Raw first-pixel bytes of shared solids already seen by a save. */
+    private val solidBytes = java.util.WeakHashMap<Bitmap, ByteArray>()
+    private var saveScratch: java.nio.ByteBuffer? = null
+
+    /**
+     * One tile row as a [TileFile] writer wants it (call on the owner thread):
+     * default, a solid's 4 raw bytes, or a copy of the tile's raw bytes.
+     */
+    fun tileRowForSave(ty: Int): Array<TileFile.TileData> {
+        ensureResident()
+        return Array(tileCountX) { tx ->
+            val k = key(tx, ty)
+            val t = if (tiles.containsKey(k) || (evicted.isNotEmpty() && k in evicted)) tileAt(k) else null
+            when {
+                t == null -> TileFile.TileData(TileFile.KIND_DEFAULT, null)
+                k in solids -> {
+                    val b = solidBytes.getOrPut(t) {
+                        val buf = saveScratch?.takeIf { it.capacity() >= t.byteCount }
+                            ?: java.nio.ByteBuffer.allocate(t.byteCount).also { saveScratch = it }
+                        buf.clear()
+                        t.copyPixelsToBuffer(buf)
+                        byteArrayOf(buf.get(0), buf.get(1), buf.get(2), buf.get(3))
+                    }
+                    TileFile.TileData(TileFile.KIND_SOLID, b)
+                }
+                else -> {
+                    val arr = ByteArray(t.byteCount)
+                    t.copyPixelsToBuffer(java.nio.ByteBuffer.wrap(arr))
+                    TileFile.TileData(TileFile.KIND_PIXELS, arr)
+                }
+            }
+        }
+    }
+
+    /** Solids made while loading, by colour and size (one decode). */
+    private var bandSolids: HashMap<Long, Pair<Bitmap, Int>?>? = null
+
+    private fun uniformIn(px: IntArray, x0: Int, w: Int, tw: Int, th: Int, c0: Int): Boolean {
+        for (r in 0 until th) {
+            var i = r * w + x0
+            val end = i + tw
+            while (i < end) {
+                if (px[i] != c0) return false
+                i++
+            }
+        }
+        return true
+    }
+
     fun loadBand(y0: Int, rows: Int, px: IntArray, w: Int) {
         if (y0 % tileSize != 0) throw IllegalArgumentException("band not tile aligned")
         val ty = y0 / tileSize
@@ -1284,9 +1457,26 @@ class SparseTileStore(
                 r++
             }
             if (!any) continue
+            val k = key(tx, ty)
+            if (solidTiles) {
+                // One opaque colour throughout: straight to a shared solid,
+                // without allocating and filling a private tile first.
+                val c0 = px[x0]
+                if ((c0 ushr 24) == 255 && uniformIn(px, x0, w, tw, th, c0)) {
+                    val m = bandSolids ?: HashMap<Long, Pair<Bitmap, Int>?>().also { bandSolids = it }
+                    val sk = (c0.toLong() shl 32) or ((tw.toLong() and 0xFFFFL) shl 16) or (th.toLong() and 0xFFFFL)
+                    val solid = if (m.containsKey(sk)) m[sk] else solidFrom(tw, th) {
+                        it.eraseColor(c0)
+                    }.also { m[sk] = it }
+                    if (solid != null) {
+                        assignSolid(k, solid.first, solid.second)
+                        cache?.evictIfFarOver()
+                        continue
+                    }
+                }
+            }
             val tile = TilePool.acquire(tw, th)
             tile.setPixels(px, x0, w, 0, 0, tw, th)
-            val k = key(tx, ty)
             tiles[k] = tile
             modCount++
             if (solidTiles) compactTile(k)
@@ -1301,6 +1491,25 @@ class SparseTileStore(
             materialized = true
             return
         }
+        // Tile layer files load tile by tile: flat tiles cost nothing and
+        // pixel tiles inflate in parallel.
+        if (TileFile.isTileFile(file)) {
+            val ok = runCatching { loadTileFile(file) }.getOrElse {
+                android.util.Log.e("Yume", "tile file unreadable: ${file.name}", it)
+                false
+            }
+            if (ok) {
+                materialized = true
+                return
+            }
+            releaseAll()
+            TileFile.decodeFull(file)?.let { decoded ->
+                splitInto(decoded)
+                decoded.recycle()
+                materialized = true
+            }
+            return
+        }
         // Stage 3c: stream the PNG band by band into tiles, never holding the
         // whole layer. Formats the banded decoder does not handle (16-bit,
         // interlaced, colour profiles) and corrupt files fall back to the old
@@ -1310,6 +1519,7 @@ class SparseTileStore(
             val ok = runCatching {
                 BandedPng.decode(file, tileSize) { y0, rows, px -> loadBand(y0, rows, px, width) }
             }.getOrDefault(false)
+            bandSolids = null
             if (ok) {
                 materialized = true
                 return
@@ -1625,6 +1835,22 @@ class SparseTileStore(
         if (r.isEmpty) return
         ensureResident()
         val k = key(tx, ty)
+        val full = r.left == tx0 && r.top == ty0 && r.width() == tileW(tx) && r.height() == tileH(ty)
+        if (full && source == null) {
+            // The whole tile back to the default: just drop it.
+            if (tiles.containsKey(k) || (evicted.isNotEmpty() && k in evicted)) removeTile(k)
+            dirtyUnion(r.left, r.top, r.right, r.bottom)
+            return
+        }
+        if (full && source != null && solidTiles && source.width == r.width() && source.height == r.height()) {
+            // A shared solid (undo of a fill) is installed by reference.
+            val colour = SolidTiles.colourOf(source)
+            if (colour != null) {
+                assignSolid(k, source, colour)
+                dirtyUnion(r.left, r.top, r.right, r.bottom)
+                return
+            }
+        }
         if (source == null) {
             if (!tiles.containsKey(k) && (evicted.isEmpty() || k !in evicted)) return
             val c = canvasFor(k, writableTile(k, tx, ty))

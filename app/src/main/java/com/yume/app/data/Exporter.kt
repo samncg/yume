@@ -124,6 +124,26 @@ object Exporter {
      * merged image and a thumbnail. Masks are not part of OpenRaster and are
      * not applied to the layer images.
      */
+    /** Streams a tile layer file into [out] as a PNG, one tile row per band. */
+    private fun tilesAsPng(file: File, out: OutputStream) {
+        com.yume.app.engine.TileFile.RowReader(file).use { r ->
+            val band = android.graphics.Bitmap.createBitmap(r.width, r.tileSize, android.graphics.Bitmap.Config.ARGB_8888)
+            try {
+                com.yume.app.engine.BandedPng.encode(object : java.io.FilterOutputStream(out) {
+                    // The zip entry stays open for the caller.
+                    override fun close() = flush()
+                    override fun write(b: ByteArray, off: Int, len: Int) = out.write(b, off, len)
+                }, r.width, r.height, r.tileSize) { _, rows, px ->
+                    val got = r.nextRow(band)
+                    if (got != rows) throw java.io.IOException("tile file ended early")
+                    band.getPixels(px, 0, r.width, 0, 0, r.width, rows)
+                }
+            } finally {
+                band.recycle()
+            }
+        }
+    }
+
     fun writeOra(session: DrawingSession, projectDir: File, out: OutputStream, scratch: File): Boolean = runCatching {
         val manifest = JSONObject(File(projectDir, "manifest.json").readText())
         val layers = manifest.getJSONArray("layers")
@@ -165,7 +185,13 @@ object Exporter {
                 val src = "data/layer${n++}.png"
                 val f = File(projectDir, o.getString("file"))
                 zip.putNextEntry(ZipEntry(src))
-                f.inputStream().use { it.copyTo(zip) }
+                if (com.yume.app.engine.TileFile.isTileFile(f)) {
+                    // Tile layer file: stream it out as a PNG, one tile row at
+                    // a time, never as a whole-layer bitmap.
+                    tilesAsPng(f, zip)
+                } else {
+                    f.inputStream().use { it.copyTo(zip) }
+                }
                 zip.closeEntry()
                 return "<layer name=\"${esc(o.optString("name"))}\" src=\"$src\" x=\"0\" y=\"0\" " +
                     "opacity=\"${o.optDouble("opacity", 1.0)}\" visibility=\"${if (o.optBoolean("visible", true)) "visible" else "hidden"}\" " +

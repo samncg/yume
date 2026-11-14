@@ -70,21 +70,36 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private data class CanvasSize(val label: String, val width: Int, val height: Int)
+/** A canvas shape: [w]:[h] (A-series paper is 1 : sqrt 2). */
+private data class CanvasRatio(val label: String, val w: Float, val h: Float)
 
-private val CANVAS_SIZES = listOf(
-    CanvasSize("Square · 2048 × 2048", 2048, 2048),
-    CanvasSize("Square 4K · 4096 × 4096", 4096, 4096),
-    CanvasSize("Portrait 3:4 · 2048 × 2732", 2048, 2732),
-    CanvasSize("Landscape 4:3 · 2732 × 2048", 2732, 2048),
-    CanvasSize("A4 300dpi · 2480 × 3508", 2480, 3508),
-    CanvasSize("A3 300dpi · 3508 × 4961", 3508, 4961),
-    CanvasSize("HD 16:9 · 1920 × 1080", 1920, 1080),
-    CanvasSize("4K 16:9 · 3840 × 2160", 3840, 2160),
-    CanvasSize("Square 6K · 6144 × 6144", 6144, 6144),
-    CanvasSize("Square 8K · 8192 × 8192", 8192, 8192),
-    CanvasSize("Tall 9:16 · 2160 × 3840", 2160, 3840)
+private val CANVAS_RATIOS = listOf(
+    CanvasRatio("1:1", 1f, 1f),
+    CanvasRatio("3:4", 3f, 4f),
+    CanvasRatio("4:3", 4f, 3f),
+    CanvasRatio("2:3", 2f, 3f),
+    CanvasRatio("3:2", 3f, 2f),
+    CanvasRatio("9:16", 9f, 16f),
+    CanvasRatio("16:9", 16f, 9f),
+    CanvasRatio("A paper", 1f, 1.41421356f),
+    CanvasRatio("A wide", 1.41421356f, 1f),
+    CanvasRatio("4:5", 4f, 5f)
 )
+
+/** Long-edge resolutions offered for every ratio. */
+private val CANVAS_LONG_EDGES = listOf(2048, 4096, 6144, 8192, 12288, 16384)
+private val CANVAS_EDGE_LABELS = listOf("2K", "4K", "6K", "8K", "12K", "16K")
+
+private const val CANVAS_MIN_EDGE = 64
+private const val CANVAS_MAX_EDGE = MemoryBudget.MAX_SPARSE_EDGE
+
+/** Width and height of [ratio] with its long edge at [longEdge]. */
+private fun sizeFor(ratio: CanvasRatio, longEdge: Int): Pair<Int, Int> =
+    if (ratio.w >= ratio.h) {
+        longEdge to (longEdge * ratio.h / ratio.w).toInt().coerceAtLeast(CANVAS_MIN_EDGE)
+    } else {
+        (longEdge * ratio.w / ratio.h).toInt().coerceAtLeast(CANVAS_MIN_EDGE) to longEdge
+    }
 
 @Composable
 fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
@@ -464,18 +479,29 @@ private fun NewCanvasDialog(
     onCreate: (String, Int, Int) -> Unit
 ) {
     var name by remember { mutableStateOf(defaultName) }
+    var ratioIndex by remember { mutableIntStateOf(0) }
+    var edgeIndex by remember { mutableIntStateOf(0) }
     var widthText by remember { mutableStateOf("2048") }
     var heightText by remember { mutableStateOf("2048") }
+    fun applyPreset(r: Int, e: Int) {
+        ratioIndex = r
+        edgeIndex = e
+        if (r >= 0 && e >= 0) {
+            val (w, h) = sizeFor(CANVAS_RATIOS[r], CANVAS_LONG_EDGES[e])
+            widthText = w.toString()
+            heightText = h.toString()
+        }
+    }
 
-    val width = widthText.toIntOrNull()?.coerceIn(64, 8192) ?: 2048
-    val height = heightText.toIntOrNull()?.coerceIn(64, 8192) ?: 2048
+    val width = widthText.toIntOrNull()?.coerceIn(CANVAS_MIN_EDGE, CANVAS_MAX_EDGE) ?: 2048
+    val height = heightText.toIntOrNull()?.coerceIn(CANVAS_MIN_EDGE, CANVAS_MAX_EDGE) ?: 2048
     val mbPerLayer = (width.toLong() * height * 4L) / (1024L * 1024L)
     val maxLayers = MemoryBudget.maxLayersFor(width, height)
     val fits = MemoryBudget.fitsDocument(width, height, 1)
     val sparseTiles = com.yume.app.engine.TileStoreConfig.useSparseLayers
 
     Dialog(onDismissRequest = onDismiss) {
-        PanelCard(Modifier.width(380.dp)) {
+        PanelCard(Modifier.width(420.dp)) {
             PanelHeader("New canvas", onClose = onDismiss)
             OutlinedTextField(
                 value = name,
@@ -484,11 +510,61 @@ private fun NewCanvasDialog(
                 label = { Text("Name") },
                 modifier = Modifier.fillMaxWidth()
             )
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(12.dp))
+            SectionLabel("Shape")
+            Spacer(Modifier.height(6.dp))
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                maxItemsInEachRow = 5
+            ) {
+                CANVAS_RATIOS.forEachIndexed { i, r ->
+                    val selected = i == ratioIndex
+                    Column(
+                        Modifier
+                            .width(70.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) YumeColors.accentSoft else YumeColors.panelAlt)
+                            .clickable { applyPreset(i, if (edgeIndex >= 0) edgeIndex else 0) }
+                            .padding(vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        // The shape itself, fitted in a 26 dp square.
+                        val long = maxOf(r.w, r.h)
+                        Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
+                            Box(
+                                Modifier
+                                    .size(26.dp * (r.w / long), 26.dp * (r.h / long))
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(if (selected) YumeColors.accent else Color(0x66FFFFFF))
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = r.label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (selected) YumeColors.accent else YumeColors.textDim
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            SectionLabel("Resolution (long edge)")
+            Spacer(Modifier.height(6.dp))
+            SegmentedRow(
+                options = CANVAS_EDGE_LABELS,
+                selectedIndex = edgeIndex,
+                onSelect = { e -> applyPreset(if (ratioIndex >= 0) ratioIndex else 0, e) }
+            )
+            Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
                     value = widthText,
-                    onValueChange = { widthText = it.filter(Char::isDigit).take(4) },
+                    onValueChange = {
+                        widthText = it.filter(Char::isDigit).take(5)
+                        ratioIndex = -1
+                        edgeIndex = -1
+                    },
                     singleLine = true,
                     label = { Text("Width") },
                     modifier = Modifier.weight(1f),
@@ -496,7 +572,11 @@ private fun NewCanvasDialog(
                 )
                 OutlinedTextField(
                     value = heightText,
-                    onValueChange = { heightText = it.filter(Char::isDigit).take(4) },
+                    onValueChange = {
+                        heightText = it.filter(Char::isDigit).take(5)
+                        ratioIndex = -1
+                        edgeIndex = -1
+                    },
                     singleLine = true,
                     label = { Text("Height") },
                     modifier = Modifier.weight(1f),
@@ -505,7 +585,7 @@ private fun NewCanvasDialog(
             }
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "$width × $height px  ·  ≈ $mbPerLayer MB per layer",
+                text = "$width × $height px  ·  ${"%.1f".format(width.toLong() * height / 1_000_000.0)} MP  ·  ≈ $mbPerLayer MB per full layer",
                 style = MaterialTheme.typography.bodySmall,
                 color = YumeColors.textDim
             )
@@ -515,7 +595,7 @@ private fun NewCanvasDialog(
                     if (sparseTiles) MemoryBudget.documentRefusal(width, height, 1)
                     else MemoryBudget.canvasRefusal(width, height)
                 } else if (sparseTiles) {
-                    "Sparse tiles: memory follows the painted area, layers are limited by storage"
+                    "Memory follows the painted area; flat and empty areas cost almost nothing"
                 } else if (maxLayers <= 4) {
                     "Tight fit: about $maxLayers layer${if (maxLayers == 1) "" else "s"} at this size"
                 } else {
@@ -524,38 +604,6 @@ private fun NewCanvasDialog(
                 style = MaterialTheme.typography.bodySmall,
                 color = if (!fits) YumeColors.danger else YumeColors.textDim
             )
-            Spacer(Modifier.height(12.dp))
-            SectionLabel("Presets")
-            Spacer(Modifier.height(6.dp))
-            Column(
-                Modifier
-                    .heightIn(max = 208.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                CANVAS_SIZES.forEach { size ->
-                    val selected = size.width == width && size.height == height
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(
-                                if (selected) YumeColors.accentSoft else Color.Transparent
-                            )
-                            .clickable {
-                                widthText = size.width.toString()
-                                heightText = size.height.toString()
-                            }
-                            .padding(horizontal = 10.dp, vertical = 9.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = size.label,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (selected) YumeColors.accent else YumeColors.text
-                        )
-                    }
-                }
-            }
             Spacer(Modifier.height(14.dp))
             Box(
                 Modifier

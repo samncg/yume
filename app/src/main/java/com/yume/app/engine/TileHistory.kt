@@ -32,9 +32,11 @@ class TileCapture(val store: TileStore) {
         // Pinned until release: an active stroke / transform / adjustment never
         // has its tiles evicted from under it.
         (store as? SparseTileStore)?.pinTile(tx, ty)
-        val copy = store.readTileCopy(tx, ty)
+        // A shared solid is immutable: keep it by reference, no copy.
+        val shared = (store as? SparseTileStore)?.sharedSolidAt(tx, ty)
+        val copy = shared ?: store.readTileCopy(tx, ty)
         before[k] = copy
-        if (copy != null) liveBytes += copy.byteCount.toLong()
+        if (copy != null && shared == null) liveBytes += copy.byteCount.toLong()
         extendBounds(tx, ty)
         if (CompositeProfile.enabled) CompositeProfile.captures++
     }
@@ -90,9 +92,9 @@ class TileCapture(val store: TileStore) {
         (store as? SparseTileStore)?.let { s ->
             for (k in before.keys) s.unpinTile((k ushr 32).toInt(), k.toInt())
         }
-        for ((_, tile) in before) if (tile != null) liveBytes -= tile.byteCount.toLong()
+        for ((_, tile) in before) if (tile != null && !SolidTiles.isShared(tile)) liveBytes -= tile.byteCount.toLong()
         for ((k, tile) in before) {
-            if (k in keep || tile == null) continue
+            if (k in keep || tile == null || SolidTiles.isShared(tile)) continue
             // Captured copies are exclusively owned by the capture, so they can
             // be reused instead of waiting for the collector.
             TilePool.release(tile)
@@ -187,8 +189,8 @@ class TilePixelAction(
         get() {
             var total = 0L
             for (c in changes) {
-                total += (c.before?.byteCount ?: 0).toLong()
-                total += (c.after?.byteCount ?: 0).toLong()
+                c.before?.let { if (!SolidTiles.isShared(it)) total += it.byteCount }
+                c.after?.let { if (!SolidTiles.isShared(it)) total += it.byteCount }
             }
             return total
         }
@@ -201,8 +203,9 @@ class TilePixelAction(
 
     internal fun releaseTiles(spill: HistorySpill? = null) {
         for (c in changes) {
-            c.before?.recycle()
-            c.after?.recycle()
+            // Shared solids belong to every store using them: never recycled.
+            c.before?.let { if (!SolidTiles.isShared(it)) it.recycle() }
+            c.after?.let { if (!SolidTiles.isShared(it)) it.recycle() }
             c.before = null
             c.after = null
             spill?.drop(c.beforeKey)
@@ -223,13 +226,13 @@ class TilePixelAction(
         var freed = 0L
         try {
             for (c in changes) {
-                c.before?.let { b ->
+                c.before?.takeIf { !SolidTiles.isShared(it) }?.let { b ->
                     c.beforeKey = spill.write(b)
                     freed += b.byteCount
                     b.recycle()
                     c.before = null
                 }
-                c.after?.let { b ->
+                c.after?.takeIf { !SolidTiles.isShared(it) }?.let { b ->
                     c.afterKey = spill.write(b)
                     freed += b.byteCount
                     b.recycle()

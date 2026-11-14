@@ -75,22 +75,45 @@ object BandedPng {
         val filtered = Array(5) { ByteArray(stride + 1) }
         val defBuf = ByteArray(1 shl 16)
         val band = IntArray(w * min(bandRows, h).coerceAtLeast(1))
+        // A row identical to the one above (flat colour, empty space) skips
+        // the conversion and the five trial filters: for such a row the
+        // heuristic always picks Up (all zeros), or None when the row itself
+        // is all zero bytes, so the filtered bytes are known.
+        val lastRow = IntArray(w)
+        var haveLast = false
+        var lastAllZero = false
+        val zeroRow = ByteArray(stride + 1)
         try {
             var y = 0
             while (y < h) {
                 val rows = min(bandRows, h - y)
                 reader.read(y, rows, band)
                 for (r in 0 until rows) {
+                    val start = r * w
+                    if (haveLast && rowEquals(band, start, lastRow, w)) {
+                        zeroRow[0] = if (lastAllZero) 0 else 2
+                        deflater.setInput(zeroRow, 0, stride + 1)
+                        while (!deflater.needsInput()) {
+                            val n = deflater.deflate(defBuf, 0, defBuf.size, Deflater.NO_FLUSH)
+                            if (n > 0) idat.write(defBuf, 0, n)
+                        }
+                        continue
+                    }
                     var o = 0
-                    var i = r * w
+                    var i = start
+                    var any = 0
                     for (x in 0 until w) {
                         val c = band[i++]
+                        any = any or c
                         cur[o] = (c ushr 16).toByte()
                         cur[o + 1] = (c ushr 8).toByte()
                         cur[o + 2] = c.toByte()
                         cur[o + 3] = (c ushr 24).toByte()
                         o += 4
                     }
+                    System.arraycopy(band, start, lastRow, 0, w)
+                    haveLast = true
+                    lastAllZero = any == 0
                     val best = filterRow(cur, prev, filtered, stride)
                     deflater.setInput(filtered[best], 0, stride + 1)
                     while (!deflater.needsInput()) {
@@ -113,6 +136,24 @@ object BandedPng {
             deflater.end()
         }
         writeChunk(out, "IEND", ByteArray(0), 0)
+    }
+
+    private fun rowEquals(a: IntArray, start: Int, b: IntArray, w: Int): Boolean {
+        var i = 0
+        while (i < w) {
+            if (a[start + i] != b[i]) return false
+            i++
+        }
+        return true
+    }
+
+    private fun zeroFrom(b: ByteArray, from: Int, to: Int): Boolean {
+        var i = from
+        while (i < to) {
+            if (b[i].toInt() != 0) return false
+            i++
+        }
+        return true
     }
 
     /**
@@ -260,11 +301,28 @@ object BandedPng {
                 var started = false
                 val crc = CRC32()
 
+                var lastOff = -1
                 fun emitRow() {
                     val f = cur[0].toInt()
-                    unfilter(f, cur, prev, stride, bpp)
                     val o = bandFill * w
+                    if (f == 2 && lastOff >= 0 && zeroFrom(cur, 1, stride + 1)) {
+                        // Up filter with no change: the row repeats the one
+                        // above, already converted in the band.
+                        if (lastOff != o) System.arraycopy(band, lastOff, band, o, w)
+                        lastOff = o
+                        bandFill++
+                        if (bandFill == min(bandRows, h - bandStart)) {
+                            sink.write(bandStart, bandFill, band)
+                            bandStart += bandFill
+                            bandFill = 0
+                        }
+                        // [prev] already holds this row's bytes.
+                        y++
+                        return
+                    }
+                    unfilter(f, cur, prev, stride, bpp)
                     toArgb(cur, o, band, w, colorType, palette, trns)
+                    lastOff = o
                     bandFill++
                     if (bandFill == min(bandRows, h - bandStart)) {
                         sink.write(bandStart, bandFill, band)

@@ -99,6 +99,7 @@ class Layer(
         /** Decodes at most roughly [maxPx] on the long edge, for thumbnails. */
         fun decodeSampled(file: File, maxPx: Int): Bitmap? {
             if (!file.exists()) return null
+            if (TileFile.isTileFile(file)) return TileFile.decodeSampled(file, maxPx)
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(file.absolutePath, bounds)
             if (bounds.outWidth <= 0) return null

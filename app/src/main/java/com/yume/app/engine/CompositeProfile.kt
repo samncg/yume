@@ -25,6 +25,8 @@ object CompositeProfile {
     var opacityHits: Long = 0L
     var cullScans: Long = 0L
     var groupDraws: Long = 0L
+    /** Composite tiles written as one flat colour (fast path). */
+    var flatTiles: Long = 0L
 
     var blitNanos: Long = 0L
     var lookupNanos: Long = 0L

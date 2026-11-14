@@ -315,6 +315,7 @@ class SurfaceRenderer(
             }
             if (engine.compositeIsSparse) {
                 val rect = documentViewport(view, engine.width, engine.height)
+                engine.priorityRect.set(rect)
                 if (view.scale < MIP_ZOOM_THRESHOLD) {
                     // Zoomed out far enough that a full-resolution blit would
                     // touch every visible tile: use the downscaled composite.

@@ -102,7 +102,7 @@ object MemoryBudget {
     // ------------------------------------------------------ sparse (Stage 3c)
 
     /** Largest canvas edge the sparse engine accepts. */
-    const val MAX_SPARSE_EDGE = 8192
+    const val MAX_SPARSE_EDGE = 16384
 
     /** Free storage always kept back for saves, journal and spill growth. */
     const val DISK_HEADROOM = 512L * 1024L * 1024L

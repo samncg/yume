@@ -57,8 +57,10 @@ Documents are plain PNG layers on disk and are saved automatically.
   brush, restored when you reopen the document, and individually deletable.
 - **Autosave** — changes are written shortly after you stop, every 25 seconds,
   when the app goes to the background and when you leave the document.
-- **8K canvases** — sparse tiled layers with a disk-backed tile cache accept
-  documents up to 8192 × 8192 (Stage 3c).
+- **Up to 16K canvases** — sparse tiled layers with a disk-backed tile cache
+  accept documents up to 16384 × 16384. Flat areas (fills, empty space) are
+  one shared tile each, so a fully filled 16K layer costs almost no memory,
+  composites, undoes and saves in a fraction of a second.
 - **QuickShape and the Shape tool** — hold the pen at the end of a stroke to
   snap it to a line, polyline, polygon, rectangle, ellipse or circle; or draw
   lines, rectangles, ellipses, polygons and stars directly.
@@ -85,9 +87,10 @@ Documents are plain PNG layers on disk and are saved automatically.
 The gallery lists one card per document, most recently saved first, with a
 rendered thumbnail, name, resolution, layer count and save time.
 
-- **New canvas** — pick a preset or type any width and height (up to 9999 px
-  per side). The dialog shows the exact pixel size and an estimate of how much
-  memory each layer will use.
+- **New canvas** — pick a shape (1:1, 3:4, 4:3, 2:3, 3:2, 9:16, 16:9, A paper
+  portrait or landscape, 4:5) and a resolution for its long edge (2K, 4K, 6K,
+  8K, 12K, 16K), or type any width and height up to 16384 px. The dialog
+  shows the exact size in pixels and megapixels.
 - **Open** — tap a card to enter the document.
 - **Card menu** — long-press a card to rename, duplicate or delete it.
   - *Rename* reopens the document under a new name.
@@ -400,8 +403,9 @@ Yume saves automatically, so there is no "unsaved changes" state to manage:
 - **When you leave the editor** or close the app.
 - **Save now** in the Actions panel forces an immediate save.
 
-Saves are atomic-ish flat files per document: the manifest, one PNG per layer,
-the thumbnail and the persistent history. A crash loses at most the last
+Saves are atomic-ish flat files per document: the manifest, one tile file per
+layer, the thumbnail and the persistent history. Only layers that changed are
+rewritten. A crash loses at most the last
 moment of work.
 
 ---
@@ -606,8 +610,8 @@ Each document is a directory under the app's private files:
 files/projects/<uuid>/
   manifest.json        name, size, background, layer order, opacity,
                        blend modes, active layer, symmetry settings
-  layer_0.png          one PNG per layer, full canvas size
-  layer_1.png
+  layer_0.ytl          one tile file per layer (mask_N.ytl for masks)
+  layer_1.ytl
   thumb.png            512 px gallery thumbnail
   history.json         the persisted undo run and its applied position
   history/
@@ -615,13 +619,17 @@ files/projects/<uuid>/
     h<id>_a.png
 ```
 
-Layers are stored uncompressed as ARGB PNGs, so the directory is inspectable
-and editable with ordinary image tools. Brush presets live separately in
-`SharedPreferences`, which keeps them shared across documents.
+A tile file ("YTL1") stores the layer's tile grid: per tile either nothing
+(the default pixel), one colour (4 bytes), or the tile's exact premultiplied
+pixels, deflated on their own. Flat and empty areas cost almost nothing to
+save or open, painted tiles compress and decompress in parallel, and a save
+and reload is lossless. Documents saved by earlier versions keep their PNG
+layers until the layer is next saved; OpenRaster export still packs PNGs.
+Brush presets live separately in `SharedPreferences`, which keeps them shared
+across documents.
 
-The on-disk format is unchanged by sparse layer storage: SparseTileStore keeps
-only *in-memory* tiles and always saves the full `layer_N.png` / `mask_N.png`,
-so documents written by either store open in the other and in the old build.
+The dense (debug) store still writes PNG layers; both stores read both
+formats.
 
 ---
 

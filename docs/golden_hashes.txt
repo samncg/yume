@@ -974,3 +974,16 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 # golden-evict 12/12 MATCH; fuzz / evict-fuzz all PASS; journal, history-spill,
 #   save-safety, lazy-open, sparse-persist PASS; cache-big and accept-8k reopen
 #   PASS (8K nativeHeapPeak 919 MB, was 1053 MB).
+
+# --- Performance pass: flat compositing, tile layer files, 16K (Nov 2026) ----
+# Flat composite tiles render one pixel through the normal path and become a
+# shared solid; undo history and captures keep shared solids by reference;
+# sparse layers save as YTL1 tile files (PNG still read); 16384 px edge.
+# dense vs this file: golden 59/59, features 30/30, wand oracle/stores and
+#   wand-legacy-delta identical to the polish gate (234 lines, 0 new).
+# sparse-persist, lazy-open, save-safety, png-parity, export-parity,
+#   cache-fail (incl. save-refuse), cache-big reopen, accept-8k reopen: PASS.
+# Timings (Xiaomi Pad, 3 flat layers + strokes): 8K save 27 s -> 0.08 s,
+#   8K reopen 5.4 s (PNG decode) -> tile file; 16K undo 30 ms + 0.17 s
+#   redraw, 16K reopen 1.8 s (pixel-identical);
+#   accept-8k save 270 s -> 22 s, cache-big save 97 s -> 22 s.

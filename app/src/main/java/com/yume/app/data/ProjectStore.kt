@@ -424,7 +424,15 @@ class ProjectStore(private val context: Context) {
         for (dir in dirs) {
             if (!dir.isDirectory) continue
             val manifest = File(dir, "manifest.json")
-            if (!manifest.exists()) continue
+            if (!manifest.exists()) {
+                // Leftover of a deleted project (undo history written after the
+                // delete): no document and no layer files, not being created.
+                val files = dir.listFiles().orEmpty()
+                val orphan = files.none { it.name.startsWith("layer_") || it.name.startsWith(TMP_PREFIX) } &&
+                    System.currentTimeMillis() - dir.lastModified() > 60_000L
+                if (orphan) runCatching { dir.deleteRecursively() }
+                continue
+            }
             val meta = runCatching { parseMeta(dir, manifest) }.getOrNull() ?: continue
             out.add(meta)
         }
@@ -479,10 +487,21 @@ class ProjectStore(private val context: Context) {
         // band-encoded from zeros; a sparse document opens it lazily, a dense
         // one still gets its full surface (the dense engine needs it anyway).
         val sparse = com.yume.app.engine.TileStoreConfig.useSparseLayers
-        val file0 = File(dir, "layer_0.png")
-        java.io.BufferedOutputStream(FileOutputStream(file0), 1 shl 16).use { out ->
-            com.yume.app.engine.BandedPng.encode(out, width, height, ENCODE_BAND) { _, rows, px ->
-                java.util.Arrays.fill(px, 0, rows * width, 0)
+        val file0: File
+        if (sparse) {
+            // An empty tile file: a few bytes per tile row, at any size.
+            file0 = File(dir, "layer_0.${com.yume.app.engine.TileFile.EXT}")
+            val ts = com.yume.app.engine.TileStoreConfig.tileSize
+            val cols = (width + ts - 1) / ts
+            com.yume.app.engine.TileFile.write(file0, width, height, ts, 0) { _ ->
+                Array(cols) { com.yume.app.engine.TileFile.TileData(com.yume.app.engine.TileFile.KIND_DEFAULT, null) }
+            }
+        } else {
+            file0 = File(dir, "layer_0.png")
+            java.io.BufferedOutputStream(FileOutputStream(file0), 1 shl 16).use { out ->
+                com.yume.app.engine.BandedPng.encode(out, width, height, ENCODE_BAND) { _, rows, px ->
+                    java.util.Arrays.fill(px, 0, rows * width, 0)
+                }
             }
         }
         val blank = if (sparse) null else Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -507,7 +526,7 @@ class ProjectStore(private val context: Context) {
             put("background", background)
             put("active", 0)
             put("updatedAt", System.currentTimeMillis())
-            put("layers", JSONArray().put(layerJson(layer, 0)))
+            put("layers", JSONArray().put(layerJson(layer, 0, file0.name)))
         }
         File(dir, "manifest.json").writeText(manifest.toString())
 
@@ -674,8 +693,18 @@ class ProjectStore(private val context: Context) {
         // temp -> final, applied only after every temp has been written.
         val pending = ArrayList<Pair<File, File>>()
 
+        val layerNames = HashMap<Int, String>()
+        val maskNames = HashMap<Int, String>()
         for ((index, layer) in snapshot.layers.withIndex()) {
-            val name = "layer_$index.png"
+            // Sparse layers are written as tile files; a layer still on disk
+            // keeps its file's format (copied as is); dense ones stay PNG.
+            val srcFile = layer.file ?: layer.sparse?.backingFile()
+            val tiled = layer.bitmap == null && (
+                (layer.sparse != null && layer.sparse.isResident) ||
+                    (srcFile != null && com.yume.app.engine.TileFile.isTileFile(srcFile))
+                )
+            val name = "layer_$index.${if (tiled) com.yume.app.engine.TileFile.EXT else "png"}"
+            layerNames[index] = name
             val target = File(dir, name)
             val key = "$id/${layer.id}"
             val unchanged = savedLayers[key] == (index to layer.revision) && target.exists()
@@ -704,7 +733,12 @@ class ProjectStore(private val context: Context) {
             }
             seen.add(name)
 
-            val maskName = "mask_$index.png"
+            val maskTiled = layer.mask == null && (
+                (layer.maskSparse != null && layer.maskSparse.isResident) ||
+                    (layer.maskFile != null && com.yume.app.engine.TileFile.isTileFile(layer.maskFile))
+                )
+            val maskName = "mask_$index.${if (maskTiled) com.yume.app.engine.TileFile.EXT else "png"}"
+            maskNames[index] = maskName
             val maskTarget = File(dir, maskName)
             val mask = layer.mask
             if (mask != null) {
@@ -764,7 +798,7 @@ class ProjectStore(private val context: Context) {
 
         val layersJson = JSONArray()
         snapshot.layers.forEachIndexed { index, layer ->
-            layersJson.put(layerJson(layer, index))
+            layersJson.put(layerJson(layer, index, layerNames[index] ?: "layer_$index.png", maskNames[index] ?: "mask_$index.png"))
         }
         val groupsJson = JSONArray()
         snapshot.groups.forEach { group ->
@@ -802,15 +836,20 @@ class ProjectStore(private val context: Context) {
         bases.keys.removeAll { it.startsWith("$id/") }
         snapshot.layers.forEachIndexed { index, layer ->
             if (layer.id in failedLayers) return@forEachIndexed
-            bases[baseKey(id, layer.id, false)] = "layer_$index.png"
+            bases[baseKey(id, layer.id, false)] = layerNames[index] ?: "layer_$index.png"
             val hasMask = layer.mask != null || layer.maskFile != null || layer.maskSparse != null
-            if (hasMask) bases[baseKey(id, layer.id, true)] = "mask_$index.png"
+            if (hasMask) bases[baseKey(id, layer.id, true)] = maskNames[index] ?: "mask_$index.png"
         }
         lastSaveComplete = complete
     }
 
-    private fun layerJson(layer: LayerSnapshotData, index: Int): JSONObject = JSONObject().apply {
-        put("file", "layer_$index.png")
+    private fun layerJson(
+        layer: LayerSnapshotData,
+        index: Int,
+        file: String = "layer_$index.png",
+        maskFile: String = "mask_$index.png"
+    ): JSONObject = JSONObject().apply {
+        put("file", file)
         put("name", layer.name)
         put("opacity", layer.opacity.toDouble())
         put("blend", layer.blend.name)
@@ -821,7 +860,7 @@ class ProjectStore(private val context: Context) {
         put("maskEnabled", layer.maskEnabled)
         put("group", layer.groupId)
         if (layer.mask != null || layer.maskFile != null || layer.maskSparse != null) {
-            put("mask", "mask_$index.png")
+            put("mask", maskFile)
         }
     }
 
@@ -909,6 +948,18 @@ class ProjectStore(private val context: Context) {
     ): String? {
         val w = store.width
         val h = store.height
+        val sparseStore = store as? com.yume.app.engine.SparseTileStore
+        if (sparseStore != null && com.yume.app.engine.TileFile.EXT == file.name.substringAfterLast('.')) {
+            return try {
+                val ok = com.yume.app.engine.TileFile.write(file, w, h, sparseStore.tileSize, sparseStore.defaultPixel) { ty ->
+                    var row: Array<com.yume.app.engine.TileFile.TileData>? = null
+                    if (onOwner { row = sparseStore.tileRowForSave(ty) }) row else null
+                }
+                if (ok) null else "Saving failed (timed out waiting for the canvas); kept the previous version"
+            } catch (e: java.io.IOException) {
+                "Saving failed (${e.message}); kept the previous version"
+            }
+        }
         val bandRows = if (store.isSparse) store.tileSize else ENCODE_BAND
         val band = Bitmap.createBitmap(w, minOf(bandRows, h), Bitmap.Config.ARGB_8888)
         val rect = Rect()
@@ -989,6 +1040,7 @@ class ProjectStore(private val context: Context) {
 
     /** Decodes a layer or mask file at full resolution, mutable. */
     private fun decodeLayerFile(file: File): Bitmap? = runCatching {
+        if (com.yume.app.engine.TileFile.isTileFile(file)) return com.yume.app.engine.TileFile.decodeFull(file)
         BitmapFactory.decodeFile(
             file.absolutePath,
             BitmapFactory.Options().apply {
@@ -1104,7 +1156,10 @@ class ProjectStore(private val context: Context) {
      * already exists for an action id is left alone (autosave stays cheap).
      */
     fun saveHistory(id: String, history: PersistedHistory) {
-        val dir = projectDir(id).apply { mkdirs() }
+        // A project deleted while its last save was still running must not
+        // come back as a folder of undo history with no document.
+        if (!File(projectDir(id), "manifest.json").exists()) return
+        val dir = projectDir(id)
         val hdir = File(dir, "history").apply { mkdirs() }
         val keep = HashSet<String>()
         val entriesJson = JSONArray()
