@@ -1714,6 +1714,64 @@ class DrawingSession(
 
     // -------------------------------------------------------------- tools
 
+    /** Tool settings as JSON, for carrying them to the next project. */
+    fun toolStateJson(): String = org.json.JSONObject().apply {
+        put("tool", tool.name)
+        put("activePresetId", activePresetId)
+        put("color", color)
+        put("assist", assist.toDouble())
+        put("quickShape", quickShapeEnabled)
+        put("fillTolerance", fillTolerance)
+        put("fillLayerOnly", fillLayerOnly)
+        put("fillSelection", fillSelection)
+        put("fillExpand", fillExpand)
+        put("wandTolerance", wandTolerance)
+        put("eyedropperLayerOnly", eyedropperLayerOnly)
+        put("selectionShape", selectionShape.name)
+        put("colorMode", colorMode.name)
+    }.toString()
+
+    /** Restores [toolStateJson]; unknown or missing values keep the current ones. */
+    fun applyToolState(json: String) {
+        val o = runCatching { org.json.JSONObject(json) }.getOrNull() ?: return
+        o.optString("activePresetId", "").takeIf { id -> presets.any { it.id == id } }?.let { selectPreset(it) }
+        Tool.entries.firstOrNull { it.name == o.optString("tool") }?.let { t ->
+            if (t != Tool.Transform) chooseTool(t)
+        }
+        if (o.has("color")) color = o.getInt("color")
+        assist = o.optDouble("assist", assist.toDouble()).toFloat().coerceIn(0f, 1f)
+        quickShapeEnabled = o.optBoolean("quickShape", quickShapeEnabled)
+        fillTolerance = o.optInt("fillTolerance", fillTolerance)
+        fillLayerOnly = o.optBoolean("fillLayerOnly", fillLayerOnly)
+        fillSelection = o.optBoolean("fillSelection", fillSelection)
+        fillExpand = o.optInt("fillExpand", fillExpand)
+        wandTolerance = o.optInt("wandTolerance", wandTolerance)
+        eyedropperLayerOnly = o.optBoolean("eyedropperLayerOnly", eyedropperLayerOnly)
+        SelectionShape.entries.firstOrNull { it.name == o.optString("selectionShape") }?.let { selectionShape = it }
+        ColorMode.entries.firstOrNull { it.name == o.optString("colorMode") }?.let { colorMode = it }
+        requestState()
+    }
+
+    /** A fresh session's tool settings from the user's defaults (Settings). */
+    fun applyDefaults(
+        tool0: Tool, brushId: String, eraserId: String, smudgeId: String,
+        color0: Int, assist0: Float, fillTolerance0: Int, quickShape0: Boolean
+    ) {
+        // The eraser and blender pick their default when first chosen.
+        defaultPresetFor[BrushCategory.Eraser] = eraserId
+        defaultPresetFor[BrushCategory.Smudge] = smudgeId
+        presets.firstOrNull { it.id == brushId && it.category == BrushCategory.Brush }?.let { activePresetId = it.id }
+        color = color0
+        assist = assist0.coerceIn(0f, 1f)
+        fillTolerance = fillTolerance0
+        quickShapeEnabled = quickShape0
+        if (tool0 != Tool.Brush && tool0 != Tool.Transform) chooseTool(tool0)
+        requestState()
+    }
+
+    /** Preset each brush family starts with when first chosen (id, empty = first). */
+    private val defaultPresetFor = HashMap<BrushCategory, String>()
+
     fun chooseTool(newTool: Tool) {
         if (newTool == tool) return
         // Leaving the transform tool commits what the user arranged.
@@ -1735,7 +1793,8 @@ class DrawingSession(
         if (newTool == Tool.Brush || newTool == Tool.Eraser || newTool == Tool.Smudge) {
             val list = presetsOf(category)
             if (list.none { it.id == activePresetId }) {
-                activePresetId = list.first().id
+                val wanted = defaultPresetFor[category]
+                activePresetId = list.firstOrNull { it.id == wanted }?.id ?: list.first().id
             }
         }
         if (newTool == Tool.Transform) {

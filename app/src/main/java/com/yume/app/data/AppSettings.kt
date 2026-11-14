@@ -23,7 +23,6 @@ object AppSettings {
         accent = p.getString("accent", accent) ?: accent
         motionFiltering = p.getFloat("motionFiltering", motionFiltering)
         prediction = p.getBoolean("prediction", prediction)
-        pressureCurve = p.getFloat("pressureCurve", pressureCurve)
         quickShapeHoldMs = p.getInt("quickShapeHoldMs", quickShapeHoldMs)
         eyedropperHoldMs = p.getInt("eyedropperHoldMs", eyedropperHoldMs)
         twoFingerUndo = p.getBoolean("twoFingerUndo", twoFingerUndo)
@@ -75,11 +74,6 @@ object AppSettings {
     var prediction by mutableStateOf(true)
         private set
     fun setPredictionValue(v: Boolean) { prediction = v; put { putBoolean("prediction", v) } }
-
-    /** Pressure response: output = pressure ^ curve (1 = linear, < 1 = lighter touch). */
-    var pressureCurve by mutableFloatStateOf(1f)
-        private set
-    fun setPressureCurveValue(v: Float) { pressureCurve = v.coerceIn(0.4f, 2.5f); put { putFloat("pressureCurve", pressureCurve) } }
 
     /** How long the pen rests before QuickShape snaps. */
     var quickShapeHoldMs by mutableIntStateOf(450)

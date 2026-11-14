@@ -113,6 +113,30 @@ class StrokePainter(private val engine: DrawingEngine) {
     /** Distance travelled in this stroke, drives the taper-in. */
     private var travel = 0f
 
+    /** The brush's pressure curve (null = linear). */
+    private var curve: PressureCurve? = null
+    /** Pen speed (document px per input sample, smoothed) for velocity dynamics. */
+    private var speed = 0f
+    private var velocityOn = false
+    /** Per-dab colour jitter: last colour and its filter, reused while equal. */
+    private var jitterFilterColor = 0
+    private var jitterFilter: android.graphics.ColorFilter? = null
+
+    // Wet bleed scratch: the patch under the brush, its pixels and the mask.
+    private var bleedPatch: Bitmap? = null
+    private var bleedMask: Bitmap? = null
+    private var bleedMaskCanvas: Canvas? = null
+    private var bleedPx = IntArray(0)
+    private var bleedM = IntArray(0)
+    private val bleedRect = Rect()
+    private val bleedDst = RectF()
+    private val bleedMaskPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+
+    private fun mapPressure(p: Float): Float {
+        val c = curve ?: return p
+        return c.map(p).coerceIn(0.02f, 1f)
+    }
+
     /** Input stabiliser strength (0..1) shared by all brushes. */
     private var assist = 0f
     private val assistXs = FloatArray(24)
@@ -136,6 +160,18 @@ class StrokePainter(private val engine: DrawingEngine) {
         preset = brush
         smudge = brush.category == BrushCategory.Smudge
         dab = BrushDab.dab(brush)
+        curve = PressureCurve.of(brush.pressureCurve)
+        velocityOn = brush.velocitySize != 0f || brush.velocityOpacity != 0f
+        speed = 0f
+        jitterFilter = null
+        // Per-stroke colour jitter: the whole stroke takes one varied colour.
+        val strokeColor = if (brush.category == BrushCategory.Brush &&
+            (brush.strokeHueJitter > 0f || brush.strokeSatJitter > 0f || brush.strokeLumJitter > 0f)
+        ) {
+            jitterColor(color, brush.strokeHueJitter, brush.strokeSatJitter, brush.strokeLumJitter)
+        } else {
+            color
+        }
         dirty.setEmpty()
         assist = assistStrength.coerceIn(0f, 1f)
         assistCount = 0
@@ -153,19 +189,20 @@ class StrokePainter(private val engine: DrawingEngine) {
             maskMode -> BlendMode.DST_OUT
             brush.category == BrushCategory.Eraser -> BlendMode.DST_OUT
             target.alphaLock -> BlendMode.SRC_ATOP
+            brush.category == BrushCategory.Brush -> BrushPreset.blendMode(brush.blend)
             else -> BlendMode.SRC_OVER
         }
         paint.colorFilter = when {
             maskMode && brush.category == BrushCategory.Eraser ->
                 PorterDuffColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN)
             maskMode -> null
-            brush.category == BrushCategory.Brush -> PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN)
+            brush.category == BrushCategory.Brush -> PorterDuffColorFilter(strokeColor, PorterDuff.Mode.SRC_IN)
             else -> null
         }
 
         baseAlpha = (brush.opacity * brush.flow).coerceIn(0.02f, 1f)
-        brushColor = color
-        mixColor = color
+        brushColor = strokeColor
+        mixColor = strokeColor
         mixFilter = null
         travelAngle = 0f
 
@@ -218,7 +255,7 @@ class StrokePainter(private val engine: DrawingEngine) {
         distanceSinceStamp = 0f
         // A drawn shape starts at full size: no taper where its ends meet.
         travel = if (startTaper) 0f else 1e9f
-        pressure = initialPressure.coerceIn(0.02f, 1f)
+        pressure = mapPressure(initialPressure.coerceIn(0.02f, 1f))
         tilt = initialTilt.coerceIn(0f, 1f)
         isActive = true
 
@@ -229,6 +266,10 @@ class StrokePainter(private val engine: DrawingEngine) {
         if (!isActive) return
         val brush = preset ?: return
 
+        if (velocityOn) {
+            val d = hypot(x - lastRawX, y - lastRawY)
+            speed += (d - speed) * 0.3f
+        }
         lastRawX = x
         lastRawY = y
 
@@ -261,12 +302,17 @@ class StrokePainter(private val engine: DrawingEngine) {
         smoothX += (targetX - smoothX) * max(k, 0.08f)
         smoothY += (targetY - smoothY) * max(k, 0.08f)
 
-        pressure += (pressureIn.coerceIn(0.02f, 1f) - pressure) * 0.45f
+        pressure += (mapPressure(pressureIn.coerceIn(0.02f, 1f)) - pressure) * 0.45f
         tilt += (tiltIn.coerceIn(0f, 1f) - tilt) * 0.3f
 
         val size = sizeFor(pressure, tilt)
-        // Smudge needs a coarser stamp interval: each stamp copies pixels.
-        val spacingFactor = if (smudge) max(0.06f, brush.spacing) else max(0.02f, brush.spacing)
+        // Smudge and wet bleed need a coarser stamp interval: each stamp
+        // reads and rewrites pixels.
+        val spacingFactor = when {
+            brush.bleeds -> max(0.1f, brush.spacing)
+            smudge -> max(0.06f, brush.spacing)
+            else -> max(0.02f, brush.spacing)
+        }
         val step = max(0.8f, size * spacingFactor)
 
         var dx = smoothX - lastX
@@ -329,8 +375,16 @@ class StrokePainter(private val engine: DrawingEngine) {
         val brush = preset ?: return 1f
         val p = 1f - brush.pressureSize.coerceIn(0f, 1f) * (1f - pressure)
         val t = 1f + brush.tiltSize.coerceIn(0f, 1f) * tilt * 2.2f
+        if (velocityOn && brush.velocitySize != 0f) {
+            val v = (1f + brush.velocitySize * speedFactor(brush)).coerceAtLeast(0.15f)
+            return max(1.2f, brush.size * p * t * v)
+        }
         return max(1.2f, brush.size * p * t)
     }
+
+    /** 0 (still) .. 1 (fast), relative to the brush size. */
+    private fun speedFactor(brush: BrushPreset): Float =
+        (speed / max(2f, brush.size * 0.35f)).coerceIn(0f, 1f)
 
     private fun alphaFor(pressure: Float, tilt: Float): Float {
         val brush = preset ?: return 1f
@@ -338,6 +392,10 @@ class StrokePainter(private val engine: DrawingEngine) {
         val to = brush.tiltOpacity.coerceIn(0f, 1f)
         // Leaning the pen shades lighter (exactly 1 when the brush ignores tilt).
         val t = if (to > 0f) 1f - to * tilt * 0.75f else 1f
+        if (velocityOn && brush.velocityOpacity != 0f) {
+            val v = (1f + brush.velocityOpacity * speedFactor(brush)).coerceIn(0.05f, 2f)
+            return (baseAlpha * p * t * v).coerceIn(0.004f, 1f)
+        }
         return (baseAlpha * p * t).coerceIn(0.004f, 1f)
     }
 
@@ -370,7 +428,16 @@ class StrokePainter(private val engine: DrawingEngine) {
     @Volatile var liveSize = 0f
         private set
 
-    private fun stampAt(x: Float, y: Float, size: Float, alpha: Float) {
+    private fun stampAt(x: Float, y: Float, size0: Float, alpha0: Float) {
+        var size = size0
+        var alpha = alpha0
+        val brush0 = preset
+        if (brush0 != null && brush0.taperIn > 0f) {
+            // Fade in over the first taperIn brush widths.
+            val f = (travel / max(1f, brush0.taperIn * brush0.size)).coerceIn(0f, 1f)
+            size *= 0.25f + 0.75f * f
+            alpha *= f
+        }
         val sized = taper(size)
         liveX = x
         liveY = y
@@ -489,21 +556,32 @@ class StrokePainter(private val engine: DrawingEngine) {
             sy += (random.nextFloat() - 0.5f) * brush.jitter * size * 2f
         }
 
-        val half = size * 0.5f
+        var sz = size
+        var al = alpha
+        var ang = angle
+        // Per-dab dynamics; nothing is drawn from the generator unless used.
+        if (brush.sizeJitter > 0f) sz *= 1f - brush.sizeJitter * 0.85f * random.nextFloat()
+        if (brush.opacityJitter > 0f) al *= 1f - brush.opacityJitter * random.nextFloat()
+        if (brush.angleJitter > 0f) ang += (random.nextFloat() - 0.5f) * 2f * brush.angleJitter
+
+        val half = sz * 0.5f
         if (half < 0.3f) return
 
         val profile = CompositeProfile.enabled
         val t0 = if (profile) System.nanoTime() else 0L
-        if (smudge) {
-            stampSmudge(d, brush, sx, sy, half)
-        } else {
-            if (brush.wetMix > 0.001f && brush.category == BrushCategory.Brush && !(layer?.editMask == true)) {
-                wetMixAt(sx, sy, brush)
+        var reachExtra = 0f
+        if (brush.sprayCount > 1) {
+            // Spray: several small particles scattered over the brush disc.
+            val pHalf = max(0.5f, half * brush.sprayParticle.coerceIn(0.05f, 1f))
+            val spread = half * (1f + brush.jitter)
+            for (k in 0 until brush.sprayCount) {
+                val a = random.nextFloat() * 6.2831855f
+                val r = spread * kotlin.math.sqrt(random.nextFloat())
+                dabOnce(d, brush, sx + kotlin.math.cos(a) * r, sy + kotlin.math.sin(a) * r, pHalf, al, ang)
             }
-            paint.alpha = (alpha * 255f).toInt().coerceIn(1, 255)
-            dabAngle = angle
-            drawDab(d, sx - half, sy - half, sx + half, sy + half, paint)
-            dabAngle = 0f
+            reachExtra = spread - half + pHalf
+        } else {
+            dabOnce(d, brush, sx, sy, half, al, ang)
         }
         if (profile) {
             CompositeProfile.paintNanos += System.nanoTime() - t0
@@ -511,7 +589,9 @@ class StrokePainter(private val engine: DrawingEngine) {
         }
 
         // A rotated stamp reaches past its square: up to the half-diagonal.
-        val reach = if (angle != 0f) half * 1.4143f else half
+        var reach = if (ang != 0f) half * 1.4143f else half
+        reach += reachExtra
+        if (brush.bleeds) reach = max(reach, half * (1f + brush.bleedSpread) + 1f)
         stampRect.set(
             (sx - reach).toInt() - 2,
             (sy - reach).toInt() - 2,
@@ -520,6 +600,141 @@ class StrokePainter(private val engine: DrawingEngine) {
         )
         engine.markDirty(stampRect)
         if (dirty.isEmpty) dirty.set(stampRect) else dirty.union(stampRect)
+    }
+
+    /** One dab: smudge, wet bleed, or paint (with colour jitter and wet mix). */
+    private fun dabOnce(d: Bitmap, brush: BrushPreset, sx: Float, sy: Float, half: Float, alpha: Float, angle: Float) {
+        val maskEdit = layer?.editMask == true
+        if (smudge) {
+            if (brush.bleeds && !maskEdit) {
+                stampBleed(d, brush, sx, sy, half, alpha, brush.bleed, brush.bleedPaint)
+            } else {
+                stampSmudge(d, brush, sx, sy, half)
+            }
+            return
+        }
+        if (brush.wetMix > 0.001f && brush.category == BrushCategory.Brush && !maskEdit) {
+            wetMixAt(sx, sy, brush)
+        }
+        if (brush.category == BrushCategory.Brush && !maskEdit &&
+            (brush.hueJitter > 0f || brush.satJitter > 0f || brush.lumJitter > 0f)
+        ) {
+            val base = if (brush.wetMix > 0.001f) mixColor else brushColor
+            val c = jitterColor(base, brush.hueJitter, brush.satJitter, brush.lumJitter)
+            if (jitterFilter == null || c != jitterFilterColor) {
+                jitterFilterColor = c
+                jitterFilter = PorterDuffColorFilter(c, PorterDuff.Mode.SRC_IN)
+            }
+            paint.colorFilter = jitterFilter
+        }
+        paint.alpha = (alpha * 255f).toInt().coerceIn(1, 255)
+        dabAngle = angle
+        drawDab(d, sx - half, sy - half, sx + half, sy + half, paint)
+        dabAngle = 0f
+        // A wet brush: the paint just laid down bleeds into its surroundings.
+        if (brush.bleeds && brush.category == BrushCategory.Brush && !maskEdit) {
+            stampBleed(d, brush, sx, sy, half, alpha, brush.bleed * 0.7f, brush.bleedPaint)
+        }
+    }
+
+    /** [c] with hue / saturation / lightness varied at random by the given amounts. */
+    private fun jitterColor(c: Int, h: Float, s: Float, l: Float): Int {
+        val hsv = FloatArray(3)
+        Color.colorToHSV(c, hsv)
+        if (h > 0f) hsv[0] = ((hsv[0] + (random.nextFloat() - 0.5f) * 2f * h * 180f) % 360f + 360f) % 360f
+        if (s > 0f) hsv[1] = (hsv[1] + (random.nextFloat() - 0.5f) * 2f * s * 0.6f).coerceIn(0f, 1f)
+        if (l > 0f) hsv[2] = (hsv[2] + (random.nextFloat() - 0.5f) * 2f * l * 0.5f).coerceIn(0f, 1f)
+        return Color.HSVToColor(c ushr 24, hsv)
+    }
+
+    /**
+     * Wet bleed under one dab ([WetBleed]): reads the pixels around the brush,
+     * diffuses them where the (widened) dab covers, and writes them back 1:1.
+     */
+    private fun stampBleed(
+        d: Bitmap, brush: BrushPreset, x: Float, y: Float, half: Float,
+        alpha: Float, strength: Float, paintAmount: Float
+    ) {
+        val target = layer ?: return
+        val reach = half * (1f + brush.bleedSpread)
+        val rect = bleedRect
+        rect.set(
+            floor(x - reach).toInt() - 1, floor(y - reach).toInt() - 1,
+            ceil(x + reach).toInt() + 1, ceil(y + reach).toInt() + 1
+        )
+        if (!rect.intersect(0, 0, engine.width, engine.height)) return
+        val sel = selectionClip
+        val selBounds = selectionBounds
+        if (sel != null && selBounds != null) {
+            dabBoundsF.set(rect)
+            if (!RectF.intersects(selBounds, dabBoundsF)) return
+        }
+        val w = rect.width()
+        val h = rect.height()
+        val n = w * h
+        val patch = bleedPatch?.takeIf { !it.isRecycled && it.width >= w && it.height >= h }
+            ?: Bitmap.createBitmap(max(w, bleedPatch?.width ?: 0), max(h, bleedPatch?.height ?: 0), Bitmap.Config.ARGB_8888)
+                .also { bleedPatch?.recycle(); bleedPatch = it }
+        val maskBmp = bleedMask?.takeIf { !it.isRecycled && it.width >= w && it.height >= h }
+            ?: Bitmap.createBitmap(patch.width, patch.height, Bitmap.Config.ARGB_8888)
+                .also { bleedMask?.recycle(); bleedMask = it; bleedMaskCanvas = Canvas(it) }
+        val mc = bleedMaskCanvas ?: Canvas(maskBmp).also { bleedMaskCanvas = it }
+        if (bleedPx.size < n) {
+            bleedPx = IntArray(n)
+            bleedM = IntArray(n)
+        }
+        // The layer under the brush, exactly as stored (both stores alike).
+        val sub = if (patch.width == w && patch.height == h) patch
+        else Bitmap.createBitmap(patch, 0, 0, w, h)
+        target.paintStore.readRectInto(rect, sub)
+        sub.getPixels(bleedPx, 0, w, 0, 0, w, h)
+        // The widened dab as the bleed mask, scaled by the stroke's alpha.
+        mc.drawColor(0, BlendMode.CLEAR)
+        bleedDst.set(x - reach - rect.left, y - reach - rect.top, x + reach - rect.left, y + reach - rect.top)
+        bleedMaskPaint.alpha = 255
+        mc.drawBitmap(d, null, bleedDst, bleedMaskPaint)
+        maskBmp.getPixels(bleedM, 0, w, 0, 0, w, h)
+        val k = alpha.coerceIn(0f, 1f) / max(0.02f, (brush.opacity * brush.flow).coerceIn(0.02f, 1f))
+        val scale = k.coerceIn(0f, 1f)
+        for (i in 0 until n) bleedM[i] = ((bleedM[i] ushr 24) * scale).toInt()
+        WetBleed.apply(
+            bleedPx, w, h, bleedM, rect.left, rect.top,
+            half, strength.coerceIn(0f, 1f),
+            brushColor, paintAmount.coerceIn(0f, 1f) * (brush.opacity * brush.flow).coerceIn(0f, 1f),
+            target.alphaLock
+        )
+        sub.setPixels(bleedPx, 0, w, 0, 0, w, h)
+        blitReplace(sub, rect)
+        if (sub !== patch) sub.recycle()
+    }
+
+    /** Writes [src] (its top-left [rect] size) over [rect] of the layer, 1:1, replacing. */
+    private fun blitReplace(src: Bitmap, rect: Rect) {
+        dabBlendPaint.reset()
+        dabBlendPaint.blendMode = BlendMode.SRC
+        dabBlendPaint.isAntiAlias = false
+        dabBlendPaint.isFilterBitmap = false
+        dabSrcRect.set(0, 0, rect.width(), rect.height())
+        dabDstRect.set(rect)
+        val st = store
+        if (st == null) {
+            val c = canvas ?: return
+            c.drawBitmap(src, dabSrcRect, dabDstRect, dabBlendPaint)
+            return
+        }
+        val sel = selectionClip
+        val tileSize = st.tileSize
+        val ty1 = (rect.bottom - 1) / tileSize
+        val tx1 = (rect.right - 1) / tileSize
+        for (ty in rect.top / tileSize..ty1) {
+            for (tx in rect.left / tileSize..tx1) {
+                tileCapture?.capture(tx, ty)
+                st.editTile(tx, ty) { tc ->
+                    if (sel != null) tc.clipPath(sel)
+                    tc.drawBitmap(src, dabSrcRect, dabDstRect, dabBlendPaint)
+                }
+            }
+        }
     }
 
     private fun drawDab(

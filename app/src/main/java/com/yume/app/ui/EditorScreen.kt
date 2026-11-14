@@ -364,9 +364,79 @@ fun EditorScreen(
             com.yume.app.input.PenGestures.onMenuAt = { x, y ->
                 penMenuAt = Offset(x + canvasOrigin.x, y + canvasOrigin.y)
             }
+            // Gestures, keyboard shortcuts and the pen button all run here.
+            com.yume.app.data.Customization.dispatcher = { action ->
+                fun openPanel(id: PanelId) {
+                    panelAnchorX = null
+                    showPanel(if (panel == id) null else id)
+                }
+                fun brushSize(f: Float) {
+                    penState.presets.firstOrNull { it.id == penState.activePresetId }?.let {
+                        session.setBrushSize((it.size * f).coerceIn(1f, 300f))
+                    }
+                }
+                fun brushOpacity(d: Float) {
+                    penState.presets.firstOrNull { it.id == penState.activePresetId }?.let {
+                        session.setBrushOpacity((it.opacity + d).coerceIn(0.02f, 1f))
+                    }
+                }
+                when (action) {
+                    com.yume.app.data.Customization.Action.None -> Unit
+                    com.yume.app.data.Customization.Action.Undo -> session.undo()
+                    com.yume.app.data.Customization.Action.Redo -> session.redo()
+                    com.yume.app.data.Customization.Action.ToggleUi -> session.toggleChrome()
+                    com.yume.app.data.Customization.Action.ShortcutMenu -> {
+                        penMenuAt = if (penMenuAt != null) null else {
+                            val px = com.yume.app.input.PenGestures.lastX
+                            val py = com.yume.app.input.PenGestures.lastY
+                            if (px < 0f) Offset(rootWidth / 2f, 600f)
+                            else Offset(px + canvasOrigin.x, py + canvasOrigin.y)
+                        }
+                    }
+                    com.yume.app.data.Customization.Action.Brush -> session.chooseTool(Tool.Brush)
+                    com.yume.app.data.Customization.Action.Eraser -> session.chooseTool(Tool.Eraser)
+                    com.yume.app.data.Customization.Action.Smudge -> session.chooseTool(Tool.Smudge)
+                    com.yume.app.data.Customization.Action.ToggleEraser -> {
+                        if (penState.tool == Tool.Eraser) {
+                            session.chooseTool(penPrevTool)
+                        } else {
+                            penPrevTool = penState.tool
+                            session.chooseTool(Tool.Eraser)
+                        }
+                    }
+                    com.yume.app.data.Customization.Action.Fill -> session.chooseTool(Tool.Fill)
+                    com.yume.app.data.Customization.Action.Selection -> session.chooseTool(Tool.Selection)
+                    com.yume.app.data.Customization.Action.Transform -> session.chooseTool(Tool.Transform)
+                    com.yume.app.data.Customization.Action.Eyedropper -> {
+                        // Picks the colour under the pen (where it last hovered).
+                        val px = com.yume.app.input.PenGestures.lastX
+                        val py = com.yume.app.input.PenGestures.lastY
+                        if (px >= 0f) {
+                            session.pushInput(com.yume.app.engine.InputEvent.PickStart(px, py))
+                            session.pushInput(com.yume.app.engine.InputEvent.PickEnd)
+                        }
+                    }
+                    com.yume.app.data.Customization.Action.BrushStudio -> openPanel(PanelId.Brush)
+                    com.yume.app.data.Customization.Action.Layers -> openPanel(PanelId.Layers)
+                    com.yume.app.data.Customization.Action.Colours -> openPanel(PanelId.Color)
+                    com.yume.app.data.Customization.Action.Adjustments -> openPanel(PanelId.Adjust)
+                    com.yume.app.data.Customization.Action.NewLayer -> session.addLayer()
+                    com.yume.app.data.Customization.Action.ClearLayer -> session.clearLayer()
+                    com.yume.app.data.Customization.Action.SelectAll -> session.selectAll()
+                    com.yume.app.data.Customization.Action.Deselect -> session.clearSelection()
+                    com.yume.app.data.Customization.Action.FitToScreen -> session.fitToScreen()
+                    com.yume.app.data.Customization.Action.ActualSize -> session.zoomActualSize()
+                    com.yume.app.data.Customization.Action.FlipView -> session.toggleMirrorView()
+                    com.yume.app.data.Customization.Action.SizeUp -> brushSize(1.15f)
+                    com.yume.app.data.Customization.Action.SizeDown -> brushSize(1f / 1.15f)
+                    com.yume.app.data.Customization.Action.OpacityUp -> brushOpacity(0.1f)
+                    com.yume.app.data.Customization.Action.OpacityDown -> brushOpacity(-0.1f)
+                }
+            }
             onDispose {
                 com.yume.app.input.PenGestures.listener = null
                 com.yume.app.input.PenGestures.onMenuAt = null
+                com.yume.app.data.Customization.dispatcher = null
             }
         }
         penMenuAt?.let { at ->
@@ -643,39 +713,12 @@ private fun EditorTopBar(
             )
     }
     val toolsPill: @Composable (Modifier) -> Unit = { modifier ->
+            // The order and the hidden tools are the user's (Settings, Layout).
             GlassToolCapsule(
-                listOf(
-                    CapsuleItem(Glyph.Select, "Select", selected = state.tool == Tool.Selection) {
-                        onTool(Tool.Selection, PanelId.Selection)
-                    },
-                    CapsuleItem(Glyph.Transform, "Transform", selected = state.tool == Tool.Transform) {
-                        onTool(Tool.Transform, null)
-                    },
-                    CapsuleItem(Glyph.Brush, "Paint", selected = state.tool == Tool.Brush) {
-                        onTool(Tool.Brush, PanelId.Brush)
-                    },
-                    CapsuleItem(Glyph.Smudge, "Smudge", selected = state.tool == Tool.Smudge) {
-                        onTool(Tool.Smudge, PanelId.Brush)
-                    },
-                    CapsuleItem(Glyph.Eraser, "Erase", selected = state.tool == Tool.Eraser) {
-                        onTool(Tool.Eraser, PanelId.Brush)
-                    },
-                    CapsuleItem(Glyph.Bucket, "Fill", selected = state.tool == Tool.Fill) {
-                        onTool(Tool.Fill, PanelId.Fill)
-                    },
-                    CapsuleItem(Glyph.Gradient, "Gradient", selected = state.tool == Tool.Gradient) {
-                        onTool(Tool.Gradient, PanelId.Gradient)
-                    },
-                    CapsuleItem(Glyph.Shape, "Shape", selected = state.tool == Tool.Shape) {
-                        onTool(Tool.Shape, PanelId.Shape)
-                    },
-                    CapsuleItem(Glyph.Liquify, "Liquify", selected = state.tool == Tool.Liquify) {
-                        onTool(Tool.Liquify, PanelId.Liquify)
-                    },
-                    CapsuleItem(Glyph.Text, "Text", selected = state.tool == Tool.Text) {
-                        onTool(Tool.Text, null)
-                    }
-                ),
+                com.yume.app.data.Customization.visibleTools.map { t ->
+                    val (glyph, label, toolPanel) = toolChrome(t)
+                    CapsuleItem(glyph, label, selected = state.tool == t) { onTool(t, toolPanel) }
+                },
                 onAnchor = onAnchor,
                 modifier = modifier
             )
@@ -912,3 +955,17 @@ private fun TransformBar(
 
 /** Narrower than this, the toolbar wraps the tools pill onto its own row. */
 private val TOOLBAR_ONE_ROW_MIN = 1000.dp
+
+/** Icon, name and settings panel of a tool, for the toolbar and Settings. */
+internal fun toolChrome(t: Tool): Triple<Glyph, String, PanelId?> = when (t) {
+    Tool.Selection -> Triple(Glyph.Select, "Select", PanelId.Selection)
+    Tool.Transform -> Triple(Glyph.Transform, "Transform", null)
+    Tool.Brush -> Triple(Glyph.Brush, "Paint", PanelId.Brush)
+    Tool.Smudge -> Triple(Glyph.Smudge, "Smudge", PanelId.Brush)
+    Tool.Eraser -> Triple(Glyph.Eraser, "Erase", PanelId.Brush)
+    Tool.Fill -> Triple(Glyph.Bucket, "Fill", PanelId.Fill)
+    Tool.Gradient -> Triple(Glyph.Gradient, "Gradient", PanelId.Gradient)
+    Tool.Shape -> Triple(Glyph.Shape, "Shape", PanelId.Shape)
+    Tool.Liquify -> Triple(Glyph.Liquify, "Liquify", PanelId.Liquify)
+    Tool.Text -> Triple(Glyph.Text, "Text", null)
+}

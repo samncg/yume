@@ -166,7 +166,12 @@ Textures, Elements, Erasers, Blending**, plus **Imported** and **Custom**.
 The group row also has **★ Favorites** (long-press any brush, or tap the star
 next to its name) and **Recent** (the last brushes you painted with). The studio stays compact: the brush grid shows two rows at a time and scrolls, and the stroke preview of the selected brush is always in view, with the settings scrolling below it.
 
-**Built-in presets (57)** — pencils from 2H to 6B and graphite shading,
+**Built-in presets (88)** — two new groups, **Watercolour** (wet-bleed
+blenders, bleeding watercolour, wet-edge and granulating washes, round, dry,
+glaze, splatter) and **Acrylic** (round, flat, dry brush, thick, palette knife,
+colour variance, blender), plus gouache, soft pastel, crayon, speed liner,
+tapered brush pen, multiply marker, screen / overlay / add light brushes,
+foliage, grass, star field, cloud and fur; and the earlier set: pencils from 2H to 6B and graphite shading,
 charcoal and pastel; fine liner, brush pen, crow quill, sumi and dry ink,
 ballpoint; flat nib, chisel marker, script and monoline calligraphy; round,
 flat, gouache, acrylic, impasto, oil and watercolour brushes, wet glaze; hard,
@@ -175,6 +180,40 @@ texture, hatching and grit; foliage, stars, clouds and rain; textured and
 pencil erasers; soft, textured and finger blenders. Their tips (flat nib,
 chalk, splatter, bristles, hatching, foliage, star) and grains (paper, canvas,
 sponge) are drawn by the app.
+
+**Brush dynamics** (More settings) — every brush has its own:
+
+- **Pressure curve** — a draggable Bézier curve (with Linear, Soft, Firm and
+  S presets) mapping pen pressure to what the brush receives. The curve lives
+  in the brush, not in the app settings, so a pencil and a wash can respond
+  differently.
+- **Speed** — speed → size and speed → opacity (either direction), and a
+  **start taper** that fades the stroke in over a number of brush widths.
+- **Jitter** — size, opacity and angle per dab; **spray** (several particles
+  per stamp, with their own size); **colour jitter** in hue, saturation and
+  lightness, on every dab and once per stroke.
+- **Wet edges** — the dab keeps its rim and thins its centre, so a stroke
+  dries with a darker border like pooled watercolour.
+- **Blend mode** — the stroke itself can Multiply, Screen, Overlay, Darken,
+  Lighten, Dodge, Burn, Add, Soft / Hard light, Difference, Hue, Saturation,
+  Colour or Luminosity onto its layer.
+- **Wet bleed** — the watercolour blender. Colours under the brush diffuse
+  into each other and creep outward with soft, irregular edges, pigment
+  pooling slightly darker at the rim (see below). On a Smudge brush it
+  replaces the smudge (a pure blender, like a wet bleeding blender); on a
+  paint brush it bleeds the paint as it goes down. **Spread** sets how far it
+  reaches past the brush and **Paint carried** how much brush colour goes in.
+
+Brushes saved before these existed keep painting exactly as they did: every
+new setting is neutral by default.
+
+*How wet bleed works* (`engine/WetBleed.kt`): for each dab the pixels around
+the brush are read from the layer, softly diffused (two box-blur passes on
+premultiplied colour), and fetched back through a slowly varying noise
+displacement fixed to the canvas, which makes the bleed front ragged instead
+of a clean circle; where pigment spreads into lighter or empty paper its edge
+is darkened a little. The result is written back 1:1, so dense and sparse
+layers give identical pixels (`bleedtest` harness).
 
 **Importing brushes from other apps** — *Import brushes…* (More settings)
 reads Yume's own `.yumebrush` files and:
@@ -425,17 +464,30 @@ rest; on very long histories this can take a moment.
 
 Open **Settings** from the gallery or from Actions.
 
+Settings has six tabs:
+
 - **Appearance** — background family (Graphite, Midnight, OLED black,
   Espresso, Forest, Slate), accent colour, and interface size (85–115 %).
 - **Drawing** — **motion filtering** (an adaptive filter that removes hand
   tremor from slow, careful lines while fast strokes stay sharp and on time),
-  **stroke tip prediction** (the line is drawn ahead to where the pen is
-  going, so it keeps up with the pen), the **pressure curve** (lighter or
-  firmer touch, with a live graph), and the QuickShape and eyedropper hold
-  times.
-- **Gestures** — turn two-finger undo, three-finger redo, four-finger
-  interface toggle and hold-or-slide undo / redo on or off. There are no
-  three-finger slides: HyperOS uses them for screenshots and minimising.
+  **stroke tip prediction**, and the QuickShape and eyedropper hold times.
+  Pressure curves are per brush (Brush Studio).
+- **Gestures** — choose what each gesture does: two-, three- and four-finger
+  tap, two-finger hold and the pen's side button. Any of them can undo, redo,
+  hide the interface, open the shortcut ring, switch tool, open a panel, add
+  or clear a layer, change the view or the brush size, or do nothing. The
+  side button can also erase while held (the default) or pick a colour.
+  Pen pinch / double-press settings are here too. There are no three-finger
+  slides: HyperOS uses them for screenshots and minimising.
+- **Shortcuts** — keyboard shortcuts for the same actions (Ctrl+Z, B, E,
+  [ and ], …): tap Set and press the keys; Clear removes one, Reset restores
+  the defaults. Shortcuts are ignored while a text field is being typed in.
+- **Layout** — the order of the tools in the toolbar (move up / down), which
+  tools are shown, the side of the size / opacity rail, interface size.
+- **Defaults** — the tool, brush, eraser, blender, colour, stroke assist, fill
+  tolerance and QuickShape a project starts with; or turn on **Keep tool
+  settings between projects** and every project opens with whatever was last
+  used.
 
 Long operations (fill, auto-select, adjustments, invert, merge…) show a
 **Working…** card with **Cancel**; cancelling puts back everything the

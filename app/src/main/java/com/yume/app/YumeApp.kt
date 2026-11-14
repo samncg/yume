@@ -28,6 +28,7 @@ class YumeApp : Application() {
         projectStore = ProjectStore(this)
         presetStore = PresetStore(this)
         com.yume.app.data.AppSettings.init(this)
+        com.yume.app.data.Customization.init(this)
         com.yume.app.data.BrushPrefs.init(this)
         paletteStore = com.yume.app.data.PaletteStore(this)
     }

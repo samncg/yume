@@ -36,7 +36,37 @@ object BrushDab {
         generate(
             preset.hardness.coerceIn(0f, 1f), preset.grain.coerceIn(0f, 1f), preset.glow,
             BrushAssets.shape(preset.shapeId), BrushAssets.grain(preset.grainId)
-        )
+        ).also { if (preset.wetEdges > 0f) applyWetEdges(it, preset.wetEdges.coerceIn(0f, 1f)) }
+    }
+
+    /**
+     * Wet edges: the dab's centre is thinned and its rim kept, so overlapping
+     * dabs build a stroke with a darker border, like watercolour drying with
+     * its pigment pushed to the edge.
+     */
+    private fun applyWetEdges(bmp: Bitmap, amount: Float) {
+        val w = bmp.width
+        val h = bmp.height
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        val cx = (w - 1) / 2f
+        val cy = (h - 1) / 2f
+        val rr = minOf(cx, cy).coerceAtLeast(1f)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val i = y * w + x
+                val a = px[i] ushr 24
+                if (a == 0) continue
+                val d = (kotlin.math.hypot(x - cx, y - cy) / rr).coerceIn(0f, 1f)
+                // 0 at the centre, rising to 1 over the outer third.
+                val rim = ((d - 0.45f) / 0.4f).coerceIn(0f, 1f)
+                val rimS = rim * rim * (3f - 2f * rim)
+                val f = 1f - amount * 0.9f * (1f - rimS)
+                val na = (a * f).toInt().coerceIn(0, 255)
+                px[i] = (na shl 24) or (px[i] and 0x00FFFFFF)
+            }
+        }
+        bmp.setPixels(px, 0, w, 0, 0, w, h)
     }
 
     private fun generate(

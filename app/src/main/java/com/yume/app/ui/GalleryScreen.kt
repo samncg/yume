@@ -192,13 +192,13 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
             // Staggered, so every thumbnail keeps its document's shape.
             androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid(
                 columns = androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells.Adaptive(230.dp),
-                contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = headerDp, bottom = 40.dp),
+                contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = headerDp + 20.dp, bottom = 40.dp),
                 horizontalArrangement = Arrangement.spacedBy(28.dp),
                 verticalItemSpacing = 30.dp,
                 modifier = Modifier
                     .fillMaxSize()
                     .navigationBarsPadding()
-                    .then(GalleryEdge.blurModifier(headerPx.toFloat()))
+                    .then(GalleryEdge.blurModifier(headerPx + with(density) { 20.dp.toPx() }))
             ) {
                 items(shownProjects.size, key = { shownProjects[it].id }) { idx ->
                     val meta = shownProjects[idx]
@@ -221,11 +221,15 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .height(headerDp + 24.dp)
+                    .height(headerDp + 20.dp)
                     .background(
+                        // Solid behind the logo and the buttons, so they read
+                        // against the background and never against a thumbnail;
+                        // the fade only starts under them.
                         androidx.compose.ui.graphics.Brush.verticalGradient(
-                            0f to bg.copy(alpha = 0.94f),
-                            0.55f to bg.copy(alpha = 0.72f),
+                            0f to bg,
+                            0.8f to bg.copy(alpha = 0.98f),
+                            0.9f to bg.copy(alpha = 0.8f),
                             1f to bg.copy(alpha = 0f)
                         )
                     )
@@ -295,7 +299,7 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     )
                 }
             }
-            Spacer(Modifier.height(26.dp))
+            Spacer(Modifier.height(6.dp))
         }
     }
 
@@ -700,7 +704,7 @@ private object GalleryEdge {
         half4 main(float2 p) {
             half4 c = content.eval(p);
             // 1 at the top, easing to 0 at the bottom of the header.
-            float t = 1.0 - smoothstep(edge * 0.25, edge, p.y);
+            float t = 1.0 - smoothstep(edge * 0.6, edge, p.y);
             return c * t;
         }
     """
@@ -720,7 +724,7 @@ private object GalleryEdge {
         cached?.let { if (cachedEdge == edgePx) return it }
         val shader = android.graphics.RuntimeShader(MASK)
         shader.setFloatUniform("edge", edgePx)
-        val blur = android.graphics.RenderEffect.createBlurEffect(22f, 22f, android.graphics.Shader.TileMode.CLAMP)
+        val blur = android.graphics.RenderEffect.createBlurEffect(48f, 48f, android.graphics.Shader.TileMode.CLAMP)
         val masked = android.graphics.RenderEffect.createChainEffect(
             android.graphics.RenderEffect.createRuntimeShaderEffect(shader, "content"),
             blur

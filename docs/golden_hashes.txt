@@ -1023,3 +1023,13 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 #   polish / performance gates. journal, png, cache-fail gates PASS.
 # stress16kq x2: native peak 826 / 819 MB (the intermittent 6.4 GB spike was
 #   Region.setPath in the wand), worst frame 0.16-0.46 s, reopen MATCH.
+
+# --- Brush dynamics, wet bleed, customisable settings (Nov 2026) -------------
+# Per-brush pressure curve (the global one is gone), speed / jitter / spray /
+# colour jitter / taper / wet edges / blend mode / wet bleed, 31 new presets.
+# Every new brush setting is neutral by default and draws nothing from the
+# random generator unless used, so existing strokes are bit-identical:
+# golden dense PASS (both sizes); sparse vs dense diff lines byte-identical to
+#   the previous gate; features 30/30 MATCH x4; journal, history-spill, png,
+#   sparse-persist, export-parity, lazy-open, save-safety, cache-fail PASS.
+# bleedtest (all new engines, dense vs sparse): 92ef41c0 = 92ef41c0 MATCH.

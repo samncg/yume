@@ -209,7 +209,26 @@ class CanvasView(
         lastY = event.y
         activePointerId = event.getPointerId(0)
 
-        val barrel = (event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+        val barrelDown = (event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+        // The pen's side button does what Settings says: erase while held (the
+        // default), pick a colour, or run an action instead of a stroke.
+        val custom = com.yume.app.data.Customization
+        val penAction = if (barrelDown && stylus) custom.actionFor(com.yume.app.data.Customization.Gesture.PenButton)
+        else com.yume.app.data.Customization.Action.None
+        val barrel = barrelDown && penAction == com.yume.app.data.Customization.Action.Eraser
+        if (penAction == com.yume.app.data.Customization.Action.Eyedropper) {
+            session.pushInput(InputEvent.PickStart(event.x, event.y))
+            mode = Mode.Pick
+            return
+        }
+        if (penAction != com.yume.app.data.Customization.Action.None &&
+            penAction != com.yume.app.data.Customization.Action.Eraser
+        ) {
+            custom.dispatch(penAction)
+            mode = Mode.None
+            twoFinger = false
+            return
+        }
 
         val target = when {
             session.tool == Tool.Selection -> Mode.Selection
@@ -368,14 +387,19 @@ class CanvasView(
             // More fingers land and lift less together: allow them more time.
             val limit = if (maxFingers >= 3) MULTI_TAP_MS else TWO_TAP_MS
             if (!menuHoldFired && !tapSlopExceeded && duration < limit) {
-                val s = com.yume.app.data.AppSettings
-                val allowed = when (maxFingers) {
-                    2 -> s.twoFingerUndo
-                    3 -> s.threeFingerRedo
-                    4 -> s.fourFingerUi
-                    else -> true
+                val c = com.yume.app.data.Customization
+                val gesture = when (maxFingers) {
+                    2 -> com.yume.app.data.Customization.Gesture.TwoFingerTap
+                    3 -> com.yume.app.data.Customization.Gesture.ThreeFingerTap
+                    4 -> com.yume.app.data.Customization.Gesture.FourFingerTap
+                    else -> null
                 }
-                if (allowed) session.pushInput(InputEvent.Tap(maxFingers))
+                if (gesture != null) {
+                    val action = c.actionFor(gesture)
+                    // Without an editor listening (harness), the classic taps.
+                    if (c.dispatcher == null) session.pushInput(InputEvent.Tap(maxFingers))
+                    else c.dispatch(action)
+                }
             }
             twoFinger = false
         } else {
@@ -491,10 +515,19 @@ class CanvasView(
         holdAngle = gestureAngle
         val action = Runnable {
             menuHoldAction = null
-            if (twoFinger && maxFingers == 2 && !holdDrifted()) {
+            val holdAction = com.yume.app.data.Customization.actionFor(
+                com.yume.app.data.Customization.Gesture.TwoFingerHold
+            )
+            if (twoFinger && maxFingers == 2 && !holdDrifted() &&
+                holdAction != com.yume.app.data.Customization.Action.None
+            ) {
                 menuHoldFired = true
                 performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
-                com.yume.app.input.PenGestures.onMenuAt?.invoke(gestureFocusX, gestureFocusY)
+                if (holdAction == com.yume.app.data.Customization.Action.ShortcutMenu) {
+                    com.yume.app.input.PenGestures.onMenuAt?.invoke(gestureFocusX, gestureFocusY)
+                } else {
+                    com.yume.app.data.Customization.dispatch(holdAction)
+                }
             }
         }
         menuHoldAction = action
@@ -671,11 +704,10 @@ class CanvasView(
         // A stylus reports ~0 pressure as it leaves the glass. Substituting 1.0
         // for that produced a fat blob at the end of every stroke, so stylus
         // pressures are used as-is with a small floor.
-        val curve = com.yume.app.data.AppSettings.pressureCurve
+        // The response curve is the brush's own (Brush Studio), applied in
+        // the stroke painter.
         return if (isStylus(event)) {
-            val p = raw.coerceIn(0.02f, 1f)
-            // The user's pressure curve (Settings): p ^ curve.
-            if (curve == 1f) p else Math.pow(p.toDouble(), curve.toDouble()).toFloat().coerceIn(0.02f, 1f)
+            raw.coerceIn(0.02f, 1f)
         } else if (raw <= 0.01f) {
             1f
         } else {

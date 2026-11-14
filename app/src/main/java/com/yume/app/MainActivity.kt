@@ -47,6 +47,11 @@ class MainActivity : ComponentActivity() {
     // pen's own input devices, not as touches.
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
         if (com.yume.app.input.PenGestures.handleKey(event, ::penHaptic)) return true
+        // Keyboard shortcuts (Settings), unless a text field is being typed in.
+        val typing = runCatching {
+            getSystemService(android.view.inputmethod.InputMethodManager::class.java)?.isAcceptingText == true
+        }.getOrDefault(false)
+        if (!typing && com.yume.app.data.Customization.handleKey(event)) return true
         return super.dispatchKeyEvent(event)
     }
 

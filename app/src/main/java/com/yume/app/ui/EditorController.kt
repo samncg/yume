@@ -137,6 +137,19 @@ class EditorController(
                 session.presets = presets
                 session.activePresetId = presets.firstOrNull { it.id == "studio-pen" }?.id
                     ?: presets.first().id
+                // Tool settings: the last project's (when they carry over), or
+                // the defaults chosen in Settings.
+                val custom = com.yume.app.data.Customization
+                val carried = custom.toolState
+                if (custom.persistToolSettings && carried != null) {
+                    session.applyToolState(carried)
+                } else {
+                    session.applyDefaults(
+                        custom.defaultTool, custom.defaultBrush, custom.defaultEraser, custom.defaultSmudge,
+                        custom.defaultColor, custom.defaultAssist, custom.defaultFillTolerance,
+                        custom.defaultQuickShape
+                    )
+                }
                 session.onPresetsChanged = { list -> schedulePresetSave(list) }
                 session.onMessage = { text -> _message.value = text }
                 project.recovery?.let { session.nextJournalSlot = it.maxSlot + 1 }
@@ -290,6 +303,9 @@ class EditorController(
     }
 
     private fun saveNowLocked(session: DrawingSession) {
+        if (com.yume.app.data.Customization.persistToolSettings) {
+            runCatching { com.yume.app.data.Customization.saveToolState(session.toolStateJson()) }
+        }
         // Undo history is read from the render thread: take it before the
         // (possibly long, at 8K) layer writes, while the editor is certainly
         // alive; written after the document.

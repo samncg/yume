@@ -187,6 +187,8 @@ object YumeHarness {
                     out.append(scoreCancel(app))
                 } else if (only == "hist16k") {
                     out.append(scoreHistory16k(app))
+                } else if (only == "bleedtest") {
+                    out.append(scoreBleedTest(app))
                 } else if (only == "motionuser") {
                     out.append(scoreMotionUser(app))
                 } else if (only == "make8k") {
@@ -3853,6 +3855,130 @@ object YumeHarness {
             out.append("motionuser: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
         } finally {
             cache?.close()
+        }
+        return out.toString()
+    }
+
+    /** A dense, slightly wobbly pen path from (x0,y0) to (x1,y1) with a pressure arc. */
+    private fun handLine(
+        x0: Float, y0: Float, x1: Float, y1: Float, seed: Int,
+        wobble: Float = 6f, pMin: Float = 0.35f, pMax: Float = 1f, step: Float = 7f
+    ): List<P> {
+        val rnd = java.util.Random(seed.toLong())
+        val len = kotlin.math.hypot(x1 - x0, y1 - y0)
+        val n = max(2, (len / step).toInt())
+        val nx = -(y1 - y0) / max(1f, len)
+        val ny = (x1 - x0) / max(1f, len)
+        val ph = rnd.nextFloat() * 6.28f
+        val fr = 1.5f + rnd.nextFloat() * 2f
+        val out = ArrayList<P>(n + 1)
+        for (i in 0..n) {
+            val t = i / n.toFloat()
+            val w = (kotlin.math.sin(t * fr * 6.28f + ph) * 0.6f + (rnd.nextFloat() - 0.5f) * 0.5f) * wobble
+            val pr = pMin + (pMax - pMin) * kotlin.math.sin(t * Math.PI).toFloat().coerceIn(0f, 1f)
+            out.add(P(x0 + (x1 - x0) * t + nx * w, y0 + (y1 - y0) * t + ny * w, pr.coerceIn(0.05f, 1f)))
+        }
+        return out
+    }
+
+    /**
+     * The new brush engines side by side, saved as files/bleedtest.png: colour
+     * blocks blended by the wet-bleed blender, bleeding watercolour, wet
+     * edges, glazing, splatter, foliage and jittered acrylic. Also checks that
+     * the dense and the sparse store give the same pixels.
+     */
+    private fun scoreBleedTest(app: YumeApp): String {
+        val out = StringBuilder()
+        val w = 1600
+        val h = 1100
+        val oldS = TileStoreConfig.useSparseLayers
+        val hashes = ArrayList<Int>()
+        try {
+            for (sparse in listOf(false, true)) {
+                TileStoreConfig.useSparseLayers = sparse
+                val engine = DrawingEngine(w, h)
+                engine.backgroundColor = 0xFFF6F1E7.toInt()
+                val session = DrawingSession("bt", "BT", engine, History())
+                identityView(session, w, h)
+                session.presets = com.yume.app.engine.BrushLibrary.defaults
+                session.assist = 0f
+                session.quickShapeEnabled = false
+                fun use(id: String, size: Float? = null) {
+                    val p = session.presets.first { it.id == id }
+                    pick(session, p, p.category)
+                    if (size != null) session.setBrushSize(size)
+                    session.runCommands()
+                }
+                var seed = 1
+                fun line(x0: Float, y0: Float, x1: Float, y1: Float, wob: Float = 6f) =
+                    session.stroke(handLine(x0, y0, x1, y1, seed++, wob))
+                // 1. Three acrylic blocks, then the wet-bleed blender across them.
+                val cols = intArrayOf(0xFFD8452E.toInt(), 0xFFF2C230.toInt(), 0xFF2F6FB5.toInt())
+                use("acr-thick", 70f)
+                for (k in 0 until 3) {
+                    session.color = cols[k]
+                    for (r in 0 until 5) line(80f + k * 230f, 90f + r * 52f, 300f + k * 230f, 90f + r * 52f, 3f)
+                }
+                use("wc-wet-bleed", 90f)
+                for (r in 0 until 3) line(120f, 130f + r * 80f, 740f, 150f + r * 80f, 14f)
+                for (k in 0 until 2) line(310f + k * 230f, 80f, 300f + k * 230f, 330f, 10f)
+                // 2. Bleeding watercolour, overlapping washes.
+                use("wc-bleed-paint", 80f)
+                session.color = 0xFFB03A6B.toInt()
+                line(880f, 110f, 1500f, 130f, 12f)
+                line(880f, 180f, 1500f, 200f, 12f)
+                session.color = 0xFF2E7D8C.toInt()
+                line(900f, 250f, 1500f, 180f, 12f)
+                line(900f, 320f, 1480f, 300f, 12f)
+                // 3. Wet-edge wash and glaze.
+                use("wc-wet-edge", 90f)
+                session.color = 0xFF3F5FA8.toInt()
+                line(90f, 470f, 720f, 480f, 10f)
+                line(90f, 560f, 720f, 550f, 10f)
+                use("wc-glaze", 110f)
+                session.color = 0xFFE08A2B.toInt()
+                line(200f, 430f, 620f, 620f, 10f)
+                use("wc-round", 22f)
+                session.color = 0xFF27304A.toInt()
+                line(110f, 660f, 700f, 640f, 5f)
+                // 4. Splatter, foliage, grass, colour-variance acrylic.
+                use("wc-splatter")
+                session.color = 0xFF8A2E5C.toInt()
+                line(900f, 450f, 1480f, 470f, 8f)
+                use("foliage")
+                session.color = 0xFF3E8A3A.toInt()
+                line(900f, 600f, 1480f, 580f, 20f)
+                use("grass")
+                session.color = 0xFF4E9A44.toInt()
+                line(900f, 720f, 1480f, 720f, 6f)
+                use("acr-variance", 46f)
+                session.color = 0xFFE06A3A.toInt()
+                for (r in 0 until 4) line(100f, 780f + r * 40f, 720f, 790f + r * 40f, 5f)
+                use("cloud")
+                session.color = 0xFFFFFFFF.toInt()
+                line(900f, 860f, 1480f, 840f, 14f)
+                use("wc-wet-bleed-soft", 130f)
+                line(120f, 820f, 700f, 900f, 12f)
+                session.runCommands()
+                engine.compositeAll()
+                val flat = engine.flatten()
+                val px = IntArray(w * h)
+                flat.getPixels(px, 0, w, 0, 0, w, h)
+                hashes.add(px.contentHashCode())
+                if (sparse) {
+                    java.io.FileOutputStream(File(app.filesDir, "bleedtest.png")).use {
+                        flat.compress(Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                }
+                flat.recycle()
+            }
+            out.append("bleedtest: dense=${"%08x".format(hashes[0])} sparse=${"%08x".format(hashes[1])} " +
+                (if (hashes[0] == hashes[1]) "MATCH" else "MISMATCH") + "\n")
+        } catch (t: Throwable) {
+            Log.e(TAG, "bleedtest failed", t)
+            out.append("bleedtest: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
         }
         return out.toString()
     }
