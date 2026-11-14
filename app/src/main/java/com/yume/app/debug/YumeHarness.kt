@@ -37,6 +37,7 @@ import com.yume.app.engine.SelectionUtil
 import com.yume.app.engine.SolidTiles
 import com.yume.app.engine.TileCache
 import com.yume.app.engine.LayerBlend as LB
+import com.yume.app.engine.SelectionShape
 import com.yume.app.engine.SparseTileStore
 import com.yume.app.engine.StrokePainter
 import com.yume.app.engine.TilePool
@@ -153,6 +154,13 @@ object YumeHarness {
                     out.append(scoreCanvasCopy(app))
                 } else if (only == "accept8k") {
                     out.append(scoreAcceptance8k(app))
+                } else if (only == "fill8k") {
+                    out.append(scoreFill8k(app))
+                } else if (only == "pickfresh") {
+                    out.append(line(scorePickFresh()))
+                } else if (only == "wand") {
+                    out.append(line(scoreWand()))
+                    out.append(line(scoreWandStores()))
                 } else if (only == "journal") {
                     out.append(scoreJournal(app))
                     out.append(line(scoreHistorySpill(app)))
@@ -3318,6 +3326,161 @@ object YumeHarness {
         return out.toString()
     }
 
+
+    /**
+     * Eyedropper after a held pen: a white soft stroke starts on black, the
+     * hold cancels it and picks. The pick must see black (the cancelled dab
+     * is gone), on the dense and the sparse store.
+     */
+    private fun scorePickFresh(): String {
+        val res = StringBuilder("pick-fresh:")
+        var ok = true
+        for (sparse in listOf(false, true)) {
+            val oldS = TileStoreConfig.useSparseLayers
+            TileStoreConfig.useSparseLayers = sparse
+            try {
+                val size = 512
+                val engine = DrawingEngine(size, size)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val session = DrawingSession("pf", "PF", engine, History())
+                identityView(session, size, size)
+                session.presets = presets
+                val l = engine.newLayer("Ink")
+                engine.selectLayer(l.id)
+                l.tiles.fillRect(Rect(0, 0, size, size), 0xFF000000.toInt())
+                l.touch()
+                engine.markDirtyAll()
+                engine.flush()
+                pick(session, soft, BrushCategory.Brush)
+                session.runCommands()
+                session.color = 0xFFFFFFFF.toInt()
+                session.pushInput(InputEvent.Down(0, 256f, 256f, 0.6f, 0f, true, false))
+                session.runInput()
+                session.pushInput(InputEvent.Move(0, floatArrayOf(257f), floatArrayOf(256f), floatArrayOf(0.6f), 0f))
+                session.runInput()
+                // The frame that would have shown the dab, then the hold fires.
+                engine.flush()
+                session.pushInput(InputEvent.Move(0, floatArrayOf(257.5f), floatArrayOf(256f), floatArrayOf(0.6f), 0f))
+                session.runInput()
+                session.pushInput(InputEvent.CancelStroke)
+                session.pushInput(InputEvent.PickStart(256f, 256f))
+                session.runInput()
+                val got = session.color
+                val pass = got == 0xFF000000.toInt()
+                if (!pass) ok = false
+                res.append(" ${if (sparse) "sparse" else "dense"}=${"%08x".format(got)}")
+            } finally {
+                TileStoreConfig.useSparseLayers = oldS
+            }
+        }
+        res.insert(0, if (ok) "PASS " else "FAIL ")
+        return res.toString()
+    }
+
+    /**
+     * Paint bucket and auto-select timings on an 8K, 4-layer document: a
+     * whole-canvas fill from the composite, a layer-only refill, an enclosed
+     * fill, a wand tap on the blank area, and undo / redo of the big fill.
+     */
+    private fun scoreFill8k(app: YumeApp): String {
+        val out = StringBuilder()
+        val size = 8192
+        val ps = app.projectStore
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = 256
+        val am = app.getSystemService(android.app.ActivityManager::class.java)
+        val budget = TileCache.defaultBudget(am)
+        var cache: TileCache? = null
+        val project = ps.createProject("harness-fill8k", size, size, BG)
+        fun ms(t0: Long) = "%.0f".format((System.nanoTime() - t0) / 1e6)
+        try {
+            cache = TileCache.open(app.cacheDir, project.id, budget)
+            val c0 = cache!!
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("f8k", "F8K", engine, History())
+            session.history.spill = com.yume.app.engine.HistorySpill(File(c0.dir, "history.spill"))
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            for (i in 0 until 3) {
+                val l = engine.newLayer("L$i")
+                engine.selectLayer(l.id)
+                session.color = 0xFF000000.toInt() or ((i * 0x135791) and 0xFFFFFF)
+                for (s in 0 until 3) {
+                    val y = 600f + ((i * 3 + s) * 811) % (size - 1200)
+                    session.stroke(listOf(P(300f, y), P(size * 0.5f, y + 700f), P(size - 300f, y)))
+                }
+            }
+            // An enclosed box on the line layer.
+            session.color = 0xFF101010.toInt()
+            session.stroke(listOf(P(1000f, 1000f), P(3000f, 1000f), P(3000f, 3000f), P(1000f, 3000f), P(1000f, 1000f)))
+            val top = engine.newLayer("Fill")
+            engine.selectLayer(top.id)
+            engine.markDirtyAll()
+            engine.flush()
+            c0.safePoint()
+            fun settle() {
+                var g = 0
+                while (engine.hasDirty() && g++ < 20000) {
+                    c0.adoptPrefetched()
+                    c0.blockingLoads = false
+                    try { engine.flush() } finally { c0.blockingLoads = true }
+                    c0.evictIfNeeded()
+                }
+                c0.safePoint()
+            }
+            fun op(name: String, block: () -> Unit) {
+                val t0 = System.nanoTime()
+                block()
+                session.runCommands()
+                val work = ms(t0)
+                settle()
+                out.append("fill-8k $name: ${work}ms (+composite ${ms(t0)}ms total) ${session.lastFillProfile}\n")
+                session.lastFillProfile = ""
+            }
+            session.chooseTool(Tool.Fill)
+            session.runCommands()
+            session.fillExpand = 1
+            session.fillTolerance = 30
+            session.fillLayerOnly = false
+            session.color = 0xFF3366CC.toInt()
+            op("whole canvas (composite)") { session.fillAt(50f, 50f) }
+            session.fillLayerOnly = true
+            session.color = 0xFF55AA33.toInt()
+            op("whole canvas refill (layer)") { session.fillAt(50f, 50f) }
+            op("undo") { session.undo() }
+            op("redo") { session.redo() }
+            session.fillLayerOnly = false
+            session.color = 0xFFEEBB22.toInt()
+            op("enclosed 2000px box") { session.fillAt(2000f, 2000f) }
+            session.chooseTool(Tool.Selection)
+            session.runCommands()
+            session.selectionShape = SelectionShape.Automatic
+            op("wand blank area") {
+                session.pushInput(InputEvent.Down(0, 100f, 8000f, 1f, 0f, true, false))
+                session.pushInput(InputEvent.Up(0))
+                session.runInput()
+            }
+            out.append("fill-8k memory: nativeHeap=${android.os.Debug.getNativeHeapAllocatedSize() shr 20}MB | ${c0.stats()}\n")
+            session.history.spill?.close()
+        } catch (t: Throwable) {
+            Log.e(TAG, "fill8k failed", t)
+            out.append("fill-8k: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
+            Runtime.getRuntime().gc()
+        }
+        return out.toString()
+    }
 
     // ============================================================ Stage 4
 

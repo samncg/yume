@@ -128,7 +128,7 @@ changed region each frame.
 | Two-finger tap | Undo |
 | Three-finger tap | Redo |
 | Four-finger tap | Show or hide the interface |
-| Long press at the start of a stroke | Eyedropper (sample the colour under the pen) |
+| Long press at the start of a brush, eraser or smudge stroke | Eyedropper (sample the colour under the pen) |
 | Hold still at the end of a stroke | QuickShape — snaps the stroke to a clean line, arc or shape |
 | Long press a layer row, then drag | Reorder layers (and drop into a group) |
 | Drag inside a selection | Move the selection outline |
@@ -286,7 +286,8 @@ includes:
 - **Tolerance** — with Auto the panel shows a tolerance slider (1–100%) that
   controls how far a pixel's colour may differ from the tapped one. Low values
   pick only near-identical pixels, high values swallow anti-aliased edges and
-  neighbouring tones.
+  neighbouring tones; 100% takes everything connected, so no soft stroke
+  outline is left behind. The paint bucket's tolerance works the same way.
 - **Combine modes** — New (replace), Add and Cut (subtract).
 - **Select all**, **invert** and **clear**.
 - Painting and erasing are **clipped to the selection**.

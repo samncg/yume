@@ -249,6 +249,27 @@ class DrawingEngine(val width: Int, val height: Int) {
     }
 
     /**
+     * The composite pixel as it is now, not as the last frame left it: damage
+     * not yet flushed (a stroke the eyedropper just cancelled, a deferred
+     * tile) is composited for that one pixel first.
+     */
+    fun currentCompositePixel(x: Int, y: Int): Int {
+        if (x !in 0 until width || y !in 0 until height) return 0
+        val p = Rect(x, y, x + 1, y + 1)
+        if (Rect.intersects(dirty, p) || pending.any { Rect.intersects(it, p) }) {
+            val cache = TileCache.active
+            val old = cache?.blockingLoads
+            if (cache != null) cache.blockingLoads = true
+            try {
+                compositeRegion(p)
+            } finally {
+                if (cache != null && old != null) cache.blockingLoads = old
+            }
+        }
+        return compositePixel(x, y)
+    }
+
+    /**
      * Colour grid for the streaming magic wand. It reads the composite on demand
      * and keeps only the cells the flood fill reaches, so auto-select no longer
      * materialises the whole document.

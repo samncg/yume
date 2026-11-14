@@ -82,6 +82,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.yume.app.BuildConfig
+import com.yume.app.engine.tolerancePercent
+import com.yume.app.engine.TOLERANCE_MAX
 import com.yume.app.engine.AdjustmentKind
 import com.yume.app.engine.BrushCategory
 import com.yume.app.engine.BrushDab
@@ -1896,10 +1898,10 @@ fun FillPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit
     PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
         PanelHeader("Paint bucket", onClose)
         YumeSlider(
-            value = state.fillTolerance / 100f,
-            onChange = { session.chooseFillTolerance((it * 100f).roundToInt()) },
+            value = state.fillTolerance / TOLERANCE_MAX.toFloat(),
+            onChange = { session.chooseFillTolerance((it * TOLERANCE_MAX).roundToInt()) },
             label = "Tolerance",
-            valueLabel = "${state.fillTolerance}%",
+            valueLabel = "${tolerancePercent(state.fillTolerance)}%",
             min = 0.01f,
             max = 1f
         )
@@ -2178,10 +2180,10 @@ fun SelectionPanel(state: EditorUiState, session: DrawingSession, onClose: () ->
         if (state.selectionShape == SelectionShape.Automatic) {
             Spacer(Modifier.height(4.dp))
             YumeSlider(
-                value = state.wandTolerance / 100f,
-                onChange = { session.chooseWandTolerance((it * 100f).roundToInt()) },
+                value = state.wandTolerance / TOLERANCE_MAX.toFloat(),
+                onChange = { session.chooseWandTolerance((it * TOLERANCE_MAX).roundToInt()) },
                 label = "Tolerance",
-                valueLabel = "${state.wandTolerance}%",
+                valueLabel = "${tolerancePercent(state.wandTolerance)}%",
                 min = 0.01f,
                 max = 1f
             )

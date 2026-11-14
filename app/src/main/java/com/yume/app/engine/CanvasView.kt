@@ -198,7 +198,9 @@ class CanvasView(
             else -> {
                 mode = Mode.Stroke
                 pushDown(event, 0, barrel)
-                scheduleLongPress()
+                // Holding still picks a colour only with the painting tools:
+                // liquify, shapes and the rest use a resting pen themselves.
+                if (session.tool in EYEDROPPER_TOOLS) scheduleLongPress()
             }
         }
     }
@@ -574,3 +576,6 @@ private const val QUICKSHAPE_HOLD_MS = 600L
 private const val QUICKSHAPE_SLOP_DP = 6f
 /** Holding a stroke this still for this long picks a colour instead. */
 private const val EYEDROPPER_HOLD_MS = 750L
+
+/** Tools where a pen held still turns into the eyedropper. */
+private val EYEDROPPER_TOOLS = setOf(Tool.Brush, Tool.Eraser, Tool.Smudge)

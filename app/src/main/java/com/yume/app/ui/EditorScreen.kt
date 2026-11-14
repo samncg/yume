@@ -363,17 +363,21 @@ fun EditorScreen(
 
         // Long operations (a big undo, an adjustment on an 8K layer…) show a
         // small working card after a moment, so the app never looks frozen.
-        val busy by session.busy.collectAsStateWithLifecycle()
+        // Any command or tool action on the render thread that runs past a
+        // quarter second (fill, auto-select, shapes, undo, adjustments…).
         var showBusy by remember { mutableStateOf(false) }
-        LaunchedEffect(busy) {
-            if (busy) {
-                delay(250)
-                showBusy = true
-            } else {
-                showBusy = false
+        LaunchedEffect(session) {
+            while (true) {
+                val b = session.workingMillis() >= 250L
+                if (b != showBusy) showBusy = b
+                delay(if (b) 50L else 90L)
             }
         }
-        if (showBusy) {
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showBusy,
+            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(160)),
+            exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120))
+        ) {
             Box(
                 Modifier
                     .fillMaxSize()

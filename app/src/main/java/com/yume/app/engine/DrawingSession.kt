@@ -189,7 +189,11 @@ class DrawingSession(
     /** Sample the active layer instead of the flattened composite. */
     @Volatile var eyedropperLayerOnly: Boolean = false
 
-    /** Colour tolerance for the automatic (magic wand) selection, 1..100. */
+    /**
+     * Colour tolerance for the automatic (magic wand) selection: the largest
+     * per-channel difference still selected, 1..[TOLERANCE_MAX] (255 takes
+     * everything, so soft stroke edges can be included).
+     */
     @Volatile var wandTolerance: Int = 30
 
     // Paint bucket / ColorDrop (Stage 4.1).
@@ -530,23 +534,45 @@ class DrawingSession(
     fun runCommands() {
         while (true) {
             val cmd = commands.poll() ?: break
+            workSince = android.os.SystemClock.uptimeMillis()
             try {
                 cmd()
             } catch (t: Throwable) {
                 android.util.Log.e("Yume", "command failed", t)
+            } finally {
+                workSince = 0L
             }
         }
+    }
+
+    /**
+     * When the command or input event the render thread is running started
+     * (0 when idle). Moves while drawing are left out: they are the stroke
+     * itself, never a wait. The editor shows its working card from this, so
+     * every slow tool (fill, auto-select, shapes, transform…) gets it.
+     */
+    @Volatile private var workSince = 0L
+
+    /** How long the current piece of work has been running, in ms. */
+    fun workingMillis(now: Long = android.os.SystemClock.uptimeMillis()): Long {
+        val s = workSince
+        return if (s == 0L) 0L else now - s
     }
 
     fun runInput(): Boolean {
         var changed = false
         while (true) {
             val event = inputs.poll() ?: break
+            val timed = event !is InputEvent.Move && event !is InputEvent.Hover &&
+                event !is InputEvent.PickMove && event !is InputEvent.Gesture
+            if (timed) workSince = android.os.SystemClock.uptimeMillis()
             changed = try {
                 handle(event) || changed
             } catch (t: Throwable) {
                 android.util.Log.e("Yume", "input failed: ${event.javaClass.simpleName}", t)
                 changed
+            } finally {
+                if (timed) workSince = 0L
             }
         }
         return changed
@@ -1688,7 +1714,7 @@ class DrawingSession(
         val sampled = if (eyedropperLayerOnly) {
             engine.activeLayer?.tiles?.getPixel(px, py) ?: return
         } else {
-            engine.compositePixel(px, py)
+            engine.currentCompositePixel(px, py)
         }
         if (Color.alpha(sampled) == 0) return
         color = sampled
@@ -1701,7 +1727,7 @@ class DrawingSession(
     }
 
     fun chooseFillTolerance(value: Int) {
-        fillTolerance = value.coerceIn(1, 100)
+        fillTolerance = value.coerceIn(1, TOLERANCE_MAX)
         requestState()
     }
 
@@ -1719,6 +1745,9 @@ class DrawingSession(
         fillExpand = value.coerceIn(0, 4)
         requestState()
     }
+
+    /** Where the last paint bucket spent its time (harness timing). */
+    @Volatile var lastFillProfile: String = ""
 
     /** Paint bucket at a document point (harness / programmatic use). */
     fun fillAt(x: Float, y: Float, color: Int = this.color) = post { fillAtInternal(x, y, color, false) }
@@ -1751,6 +1780,7 @@ class DrawingSession(
         val x = fx.toInt()
         val y = fy.toInt()
         if (x !in 0 until engine.width || y !in 0 until engine.height) return
+        val t0 = System.nanoTime()
         val store = layer.paintStore
         val mask = layer.editMask && layer.hasMask
         val sel = engine.selection
@@ -1791,8 +1821,8 @@ class DrawingSession(
         if (region.isEmpty) return
         val bounds = Rect(region.bounds)
         if (!bounds.intersect(0, 0, engine.width, engine.height)) return
+        val t1 = System.nanoTime()
         val capture = TileOps.capture(store, bounds)
-        val path = SelectionUtil.regionFillPath(region)
         val paint = android.graphics.Paint().apply {
             // Masks are alpha coverage (composited with DST_IN): a mask fill
             // hides, exactly like painting a mask (DST_OUT) does.
@@ -1804,15 +1834,47 @@ class DrawingSession(
                 else -> android.graphics.BlendMode.SRC_OVER
             }
         }
-        store.withWriteCanvas(bounds) { c ->
-            val save = c.save()
-            c.clipPath(path)
-            c.drawPaint(paint)
-            c.restoreToCount(save)
+        if (store.isSparse && !mask && !layer.alphaLock && Color.alpha(fillColor) == 255) {
+            // An opaque fill over anything is just the colour: tiles the region
+            // covers completely become one shared solid each (no pixels to
+            // draw or keep), and only the edge tiles are drawn, each clipped
+            // to its own part of the region. Same bytes as drawing it all.
+            val ts = store.tileSize
+            val tile = Rect()
+            val part = android.graphics.Region()
+            for (ty in bounds.top / ts..(bounds.bottom - 1) / ts) {
+                for (tx in bounds.left / ts..(bounds.right - 1) / ts) {
+                    tile.set(tx * ts, ty * ts, min(engine.width, (tx + 1) * ts), min(engine.height, (ty + 1) * ts))
+                    part.set(region)
+                    if (!part.op(tile, android.graphics.Region.Op.INTERSECT) || part.isEmpty) continue
+                    if (part.isRect && part.bounds == tile) {
+                        store.fillRect(tile, fillColor)
+                    } else {
+                        val partPath = SelectionUtil.regionFillPath(part)
+                        store.withWriteCanvas(Rect(part.bounds)) { c ->
+                            val save = c.save()
+                            c.clipPath(partPath)
+                            c.drawPaint(paint)
+                            c.restoreToCount(save)
+                        }
+                    }
+                }
+            }
+        } else {
+            val path = SelectionUtil.regionFillPath(region)
+            store.withWriteCanvas(bounds) { c ->
+                val save = c.save()
+                c.clipPath(path)
+                c.drawPaint(paint)
+                c.restoreToCount(save)
+            }
         }
+        val t2 = System.nanoTime()
         engine.makeTilePatch(
-            layer, capture, bounds, "Fill", EditKind.LayerFill, "Tolerance $fillTolerance%", fillColor
+            layer, capture, bounds, "Fill", EditKind.LayerFill, "Tolerance ${tolerancePercent(fillTolerance)}%", fillColor
         )?.let { history.push(it) }
+        val t3 = System.nanoTime()
+        lastFillProfile = "[${SelectionUtil.lastProfile}] region=${(t1 - t0) / 1_000_000}ms paint=${(t2 - t1) / 1_000_000}ms history=${(t3 - t2) / 1_000_000}ms"
         layer.touch()
         engine.markDirty(bounds)
         if (!mask) addRecent(fillColor)
@@ -1903,7 +1965,7 @@ class DrawingSession(
     }
 
     fun chooseWandTolerance(value: Int) {
-        wandTolerance = value.coerceIn(1, 100)
+        wandTolerance = value.coerceIn(1, TOLERANCE_MAX)
         requestState()
     }
 
@@ -3405,3 +3467,9 @@ private const val MORPH_POINTS = 160
 private const val MORPH_MS = 240L
 /** Liquify modes repeat this often while the pen rests. */
 private const val LIQUIFY_HOLD_MS = 33L
+
+/** Largest wand / paint bucket tolerance: a full channel difference. */
+const val TOLERANCE_MAX = 255
+
+/** A tolerance as the percentage the sliders show (100% = everything). */
+fun tolerancePercent(tolerance: Int): Int = (tolerance * 100 + TOLERANCE_MAX / 2) / TOLERANCE_MAX
