@@ -51,9 +51,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.KeyboardType
@@ -161,12 +163,79 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
         thumbs = loaded
     }
 
+    // The header floats over the grid: cards scroll up under it, where they
+    // blur more and more and fade into the background.
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    var headerPx by remember { mutableIntStateOf(0) }
+    val headerDp = with(density) { headerPx.toDp() }
     Box(Modifier.fillMaxSize().background(YumeColors.bg)) {
+        if (projects.isEmpty()) {
+            Box(
+                Modifier.fillMaxSize().padding(top = headerDp).navigationBarsPadding(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "Start your first painting",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = YumeColors.text
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "Tap New canvas to pick a size.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = YumeColors.textDim
+                    )
+                }
+            }
+        } else {
+            // Staggered, so every thumbnail keeps its document's shape.
+            androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid(
+                columns = androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells.Adaptive(230.dp),
+                contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = headerDp, bottom = 40.dp),
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
+                verticalItemSpacing = 30.dp,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .navigationBarsPadding()
+                    .then(GalleryEdge.blurModifier(headerPx.toFloat()))
+            ) {
+                items(shownProjects.size, key = { shownProjects[it].id }) { idx ->
+                    val meta = shownProjects[idx]
+                    ProjectCard(
+                        meta = meta,
+                        thumb = thumbs[meta.id],
+                        saving = meta.id in savingIds,
+                        pinned = pins.isPinned(meta.id).also { pinTick },
+                        // Pinning slides cards to their new places.
+                        modifier = Modifier.animateItem(),
+                        onOpen = { onOpenProject(meta.id) },
+                        onMenu = { menuTarget = meta }
+                    )
+                }
+            }
+        }
+        // The fade: solid behind the title, clear a little below the header.
+        if (headerPx > 0) {
+            val bg = YumeColors.bg
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(headerDp + 24.dp)
+                    .background(
+                        androidx.compose.ui.graphics.Brush.verticalGradient(
+                            0f to bg.copy(alpha = 0.94f),
+                            0.55f to bg.copy(alpha = 0.72f),
+                            1f to bg.copy(alpha = 0f)
+                        )
+                    )
+            )
+        }
         Column(
             Modifier
-                .fillMaxSize()
+                .fillMaxWidth()
+                .onSizeChanged { headerPx = it.height }
                 .statusBarsPadding()
-                .navigationBarsPadding()
                 .padding(horizontal = 32.dp)
         ) {
             Spacer(Modifier.height(28.dp))
@@ -227,47 +296,6 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                 }
             }
             Spacer(Modifier.height(26.dp))
-
-            if (projects.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "Start your first painting",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = YumeColors.text
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            text = "Tap New canvas to pick a size.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = YumeColors.textDim
-                        )
-                    }
-                }
-            } else {
-                // Staggered, so every thumbnail keeps its document's shape.
-                androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid(
-                    columns = androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells.Adaptive(230.dp),
-                    contentPadding = PaddingValues(bottom = 40.dp),
-                    horizontalArrangement = Arrangement.spacedBy(28.dp),
-                    verticalItemSpacing = 30.dp,
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    items(shownProjects.size, key = { shownProjects[it].id }) { idx ->
-                        val meta = shownProjects[idx]
-                        ProjectCard(
-                            meta = meta,
-                            thumb = thumbs[meta.id],
-                            saving = meta.id in savingIds,
-                            pinned = pins.isPinned(meta.id).also { pinTick },
-                            // Pinning slides cards to their new places.
-                            modifier = Modifier.animateItem(),
-                            onOpen = { onOpenProject(meta.id) },
-                            onMenu = { menuTarget = meta }
-                        )
-                    }
-                }
-            }
         }
     }
 
@@ -656,5 +684,53 @@ private fun formatDate(millis: Long): String {
         now.get(java.util.Calendar.YEAR) == then.get(java.util.Calendar.YEAR) ->
             SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(millis))
         else -> SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(millis))
+    }
+}
+
+/**
+ * The gallery's top edge: cards passing under the header blur gradually
+ * (sharp below it, fully blurred at the top of the screen). Android 13+ does
+ * it on the GPU: the grid's layer is blurred, masked by a ramp in an AGSL
+ * shader, and laid over the sharp layer. Older versions only get the fade.
+ */
+private object GalleryEdge {
+    private const val MASK = """
+        uniform shader content;
+        uniform float edge;
+        half4 main(float2 p) {
+            half4 c = content.eval(p);
+            // 1 at the top, easing to 0 at the bottom of the header.
+            float t = 1.0 - smoothstep(edge * 0.25, edge, p.y);
+            return c * t;
+        }
+    """
+
+    fun blurModifier(edgePx: Float): Modifier {
+        if (edgePx <= 0f || android.os.Build.VERSION.SDK_INT < 33) return Modifier
+        return Modifier.graphicsLayer {
+            renderEffect = effect(edgePx)
+        }
+    }
+
+    private var cachedEdge = -1f
+    private var cached: androidx.compose.ui.graphics.RenderEffect? = null
+
+    @androidx.annotation.RequiresApi(33)
+    private fun effect(edgePx: Float): androidx.compose.ui.graphics.RenderEffect {
+        cached?.let { if (cachedEdge == edgePx) return it }
+        val shader = android.graphics.RuntimeShader(MASK)
+        shader.setFloatUniform("edge", edgePx)
+        val blur = android.graphics.RenderEffect.createBlurEffect(22f, 22f, android.graphics.Shader.TileMode.CLAMP)
+        val masked = android.graphics.RenderEffect.createChainEffect(
+            android.graphics.RenderEffect.createRuntimeShaderEffect(shader, "content"),
+            blur
+        )
+        // Sharp grid underneath, the masked blur over it.
+        val sharp = android.graphics.RenderEffect.createOffsetEffect(0f, 0f)
+        val out = android.graphics.RenderEffect.createBlendModeEffect(sharp, masked, android.graphics.BlendMode.SRC_OVER)
+            .asComposeRenderEffect()
+        cached = out
+        cachedEdge = edgePx
+        return out
     }
 }

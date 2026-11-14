@@ -1,5 +1,7 @@
 package com.yume.app.ui
 
+import androidx.compose.ui.draw.drawBehind
+
 import androidx.compose.foundation.layout.offset
 
 import androidx.compose.ui.layout.onSizeChanged
@@ -819,7 +821,7 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
     var showSaveDialog by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf("") }
     val preset = state.presets.firstOrNull { it.id == state.activePresetId }
-    PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
+    PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
         PanelHeader("Brush Studio", onClose)
         SegmentedRow(
             options = listOf("Brush", "Eraser", "Smudge"),
@@ -880,9 +882,14 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                 modifier = Modifier.padding(vertical = 10.dp)
             )
         }
-        // A plain column, not a lazy grid: a nested lazy list swallows vertical
-        // drags and stops the whole panel from scrolling.
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        // Two rows of brushes at a time; the grid scrolls on its own so the
+        // stroke preview below always stays in view.
+        Column(
+            Modifier
+                .heightIn(max = 148.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             shown.chunked(4).forEach { chunk ->
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     chunk.forEach { item ->
@@ -925,6 +932,8 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
             Spacer(Modifier.height(6.dp))
             BrushStrokePreview(preset, state.color)
             Spacer(Modifier.height(8.dp))
+            // Only the settings scroll; everything above stays put.
+            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
             YumeSlider(
                 value = state.assist,
                 onChange = { session.updateAssist(it) },
@@ -1045,6 +1054,7 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                 }
             }
             Spacer(Modifier.height(4.dp))
+            }
         }
     }
 
@@ -2023,21 +2033,87 @@ fun FillPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit
 
 @Composable
 fun GradientPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {
-    PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
+    PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
         PanelHeader("Gradient", onClose)
         SegmentedRow(
             options = com.yume.app.engine.Gradients.Kind.entries.map { it.label },
             selectedIndex = state.gradientKind.ordinal,
             onSelect = { session.chooseGradientKind(com.yume.app.engine.Gradients.Kind.entries[it]) }
         )
+        Spacer(Modifier.height(12.dp))
+        // The gradient as it will be drawn: start (the current colour) on the
+        // left, the end colour on the right, over a checkerboard so a
+        // transparent end shows.
+        val start = Color(state.color)
+        val end = Color(state.gradientSecond)
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(34.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .drawBehind {
+                    val cell = 8.dp.toPx()
+                    var y = 0f
+                    var row = 0
+                    while (y < size.height) {
+                        var x = if (row % 2 == 0) 0f else cell
+                        while (x < size.width) {
+                            drawRect(Color(0xFF9A9AA2), androidx.compose.ui.geometry.Offset(x, y), androidx.compose.ui.geometry.Size(cell, cell))
+                            x += cell * 2
+                        }
+                        y += cell
+                        row++
+                    }
+                }
+                .background(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(start, end)))
+        )
+        Spacer(Modifier.height(4.dp))
+        Row(Modifier.fillMaxWidth()) {
+            Text("Start: current colour", style = MaterialTheme.typography.labelSmall, color = YumeColors.textDim)
+            Spacer(Modifier.weight(1f))
+            Text("End", style = MaterialTheme.typography.labelSmall, color = YumeColors.textDim)
+        }
         Spacer(Modifier.height(10.dp))
         SectionLabel("End colour")
-        Spacer(Modifier.height(6.dp))
-        val transparent = (state.gradientSecond ushr 24) == 0
+        Spacer(Modifier.height(8.dp))
+        // A full picker for the end colour, right here.
+        val endHsv = remember(state.gradientSecond) {
+            FloatArray(3).also { android.graphics.Color.colorToHSV(state.gradientSecond or 0xFF000000.toInt(), it) }
+        }
+        var endHue by remember { mutableFloatStateOf(endHsv[0]) }
+        var endSat by remember { mutableFloatStateOf(endHsv[1]) }
+        var endVal by remember { mutableFloatStateOf(endHsv[2]) }
+        val endAlpha = state.gradientSecond ushr 24
+        // Changed from outside (Swap, a swatch, White / Black): follow it.
+        // A colour this picker emitted itself matches and keeps its hue.
+        val pickerRgb = android.graphics.Color.HSVToColor(floatArrayOf(endHue, endSat, endVal)) or 0xFF000000.toInt()
+        if (endAlpha != 0 && pickerRgb != state.gradientSecond) {
+            endHue = endHsv[0]
+            endSat = endHsv[1]
+            endVal = endHsv[2]
+        }
+        fun emitEnd() {
+            val rgb = android.graphics.Color.HSVToColor(floatArrayOf(endHue, endSat, endVal))
+            // Picking a colour makes the end opaque again.
+            session.chooseGradientSecond(rgb or 0xFF000000.toInt())
+        }
+        SvSquare(endHue, endSat, endVal, 96.dp) { sv, vv ->
+            endSat = sv
+            endVal = vv
+            emitEnd()
+        }
+        Spacer(Modifier.height(8.dp))
+        HueBar(endHue) { h ->
+            endHue = h
+            emitEnd()
+        }
+        Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SmallButton(if (transparent) "• Transparent" else "Transparent") {
+            SmallButton(if (endAlpha == 0) "• Transparent" else "Transparent") {
                 session.chooseGradientSecond(state.color and 0x00FFFFFF)
             }
+            SmallButton("White") { session.chooseGradientSecond(0xFFFFFFFF.toInt()) }
+            SmallButton("Black") { session.chooseGradientSecond(0xFF000000.toInt()) }
             SmallButton("Swap") { session.swapGradientColors() }
         }
         if (state.recentColors.isNotEmpty()) {
