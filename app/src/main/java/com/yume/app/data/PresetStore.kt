@@ -27,7 +27,11 @@ class PresetStore(context: Context) {
                     ?: BrushLibrary.defaults.first()
                 out.add(BrushPreset.fromJson(o, base))
             }
-            out.ifEmpty { BrushLibrary.defaults }
+            if (out.isEmpty()) return@runCatching BrushLibrary.defaults
+            // Built-ins added by a newer version join the saved library.
+            val have = out.mapTo(HashSet()) { it.id }
+            val added = BrushLibrary.defaults.filter { it.id !in have }
+            out + added
         }.getOrDefault(BrushLibrary.defaults)
     }
 

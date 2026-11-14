@@ -219,7 +219,7 @@ class SurfaceRenderer(
         )
         val c = glassCanvas
         c.setBitmap(bmp)
-        c.drawColor(0xFF0C0C0E.toInt())
+        c.drawColor(surroundColor())
         c.save()
         c.scale(1f / s, 1f / s)
         val engine = session.engine
@@ -266,6 +266,11 @@ class SurfaceRenderer(
         }
     }
 
+    /** The area around the canvas: the UI theme's background. */
+    private fun surroundColor(): Int = com.yume.app.ui.YumeThemes.current.bg.let {
+        android.graphics.Color.argb(255, (it.red * 255).toInt(), (it.green * 255).toInt(), (it.blue * 255).toInt())
+    }
+
     private fun lockCanvas(): Canvas? {
         if (hardware) {
             try {
@@ -303,7 +308,7 @@ class SurfaceRenderer(
                         "rotation=${view.rotationDeg} t=(${view.tx},${view.ty}) doc=${view.docWidth}x${view.docHeight}"
                 )
             }
-            canvas.drawColor(0xFF0C0C0E.toInt())
+            canvas.drawColor(surroundColor())
             val engine = session.engine
             val matrix = view.matrix
 
@@ -356,6 +361,7 @@ class SurfaceRenderer(
             drawSymmetry(canvas, matrix, engine.width, engine.height)
             drawSelection(canvas, matrix)
             drawGradientGuide(canvas, matrix)
+            drawPrediction(canvas, matrix)
             drawHover(canvas, matrix)
             recordFrame()
         } catch (t: Throwable) {
@@ -637,6 +643,30 @@ class SurfaceRenderer(
         overlay.style = Paint.Style.FILL
         canvas.drawCircle(pts[0], pts[1], 5f * density, overlay)
         canvas.drawCircle(pts[2], pts[3], 5f * density, overlay)
+    }
+
+    private val predictPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.STROKE
+        strokeCap = android.graphics.Paint.Cap.ROUND
+    }
+
+    /**
+     * The stroke's predicted leading tip: from the newest painted dab to where
+     * the pen is expected to be now, in the brush colour and width. It is
+     * replaced by real paint as the samples arrive, so the line on screen
+     * keeps up with the pen instead of trailing behind it.
+     */
+    private fun drawPrediction(canvas: Canvas, matrix: Matrix) {
+        val tip = session.predictedTip ?: return
+        if (!session.strokeInProgress) return
+        val live = session.liveCursor() ?: return
+        val from = floatArrayOf(live[0], live[1])
+        matrix.mapPoints(from)
+        val w = max(1f, live[2] * session.view.scale)
+        predictPaint.strokeWidth = w
+        predictPaint.color = session.color
+        predictPaint.alpha = (255 * session.brushOpacity.coerceIn(0.05f, 1f) * 0.85f).toInt()
+        canvas.drawLine(from[0], from[1], tip[0], tip[1], predictPaint)
     }
 
     private fun drawHover(canvas: Canvas, matrix: Matrix) {

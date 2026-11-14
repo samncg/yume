@@ -10,34 +10,63 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-/** Procreate-adjacent palette: warm charcoal, paper white, one amber accent. */
+/** One background family of the UI (Settings → Appearance). */
+data class YumeTheme(
+    val id: String,
+    val label: String,
+    val bg: Color,
+    val bar: Color,
+    val panel: Color,
+    val panelAlt: Color,
+    val track: Color
+)
+
+/** An accent colour (Settings → Appearance). */
+data class YumeAccent(val id: String, val label: String, val color: Color)
+
+object YumeThemes {
+    val themes = listOf(
+        YumeTheme("graphite", "Graphite", Color(0xFF0C0C0E), Color(0xFF141418), Color(0xF51A1A1F), Color(0xFF23232A), Color(0xFF2E2E36)),
+        YumeTheme("midnight", "Midnight", Color(0xFF090C13), Color(0xFF10151F), Color(0xF5141A27), Color(0xFF1D2535), Color(0xFF283245)),
+        YumeTheme("oled", "OLED black", Color(0xFF000000), Color(0xFF080808), Color(0xF50E0E10), Color(0xFF19191C), Color(0xFF26262A)),
+        YumeTheme("espresso", "Espresso", Color(0xFF100D0B), Color(0xFF191411), Color(0xF51E1815), Color(0xFF2A221D), Color(0xFF382E27)),
+        YumeTheme("forest", "Forest", Color(0xFF0A0F0C), Color(0xFF111813), Color(0xF5151E18), Color(0xFF1E2A22), Color(0xFF29382E)),
+        YumeTheme("slate", "Slate", Color(0xFF1A1C21), Color(0xFF22252B), Color(0xF5282B32), Color(0xFF32363E), Color(0xFF41464F))
+    )
+
+    val accents = listOf(
+        YumeAccent("amber", "Amber", Color(0xFFE9A13B)),
+        YumeAccent("coral", "Coral", Color(0xFFF07A5A)),
+        YumeAccent("rose", "Rose", Color(0xFFEC7398)),
+        YumeAccent("violet", "Violet", Color(0xFFA98BF5)),
+        YumeAccent("sky", "Sky", Color(0xFF5DA9F2)),
+        YumeAccent("teal", "Teal", Color(0xFF3CC4B2)),
+        YumeAccent("lime", "Lime", Color(0xFFA8D24C)),
+        YumeAccent("pearl", "Pearl", Color(0xFFE4E4EA))
+    )
+
+    /** The theme in use (reads settings state, so the UI follows changes). */
+    val current: YumeTheme
+        get() = themes.firstOrNull { it.id == com.yume.app.data.AppSettings.theme } ?: themes[0]
+
+    val accent: Color
+        get() = (accents.firstOrNull { it.id == com.yume.app.data.AppSettings.accent } ?: accents[0]).color
+}
+
+/** The UI palette: background family and accent come from Settings. */
 object YumeColors {
-    val bg = Color(0xFF0C0C0E)
-    val bar = Color(0xFF141418)
-    val panel = Color(0xF51A1A1F)
-    val panelAlt = Color(0xFF23232A)
-    val track = Color(0xFF2E2E36)
+    val bg: Color get() = YumeThemes.current.bg
+    val bar: Color get() = YumeThemes.current.bar
+    val panel: Color get() = YumeThemes.current.panel
+    val panelAlt: Color get() = YumeThemes.current.panelAlt
+    val track: Color get() = YumeThemes.current.track
     val hairline = Color(0x1FFFFFFF)
     val text = Color(0xFFEDEDF1)
     val textDim = Color(0xFF8C8C96)
-    val accent = Color(0xFFE9A13B)
-    val accentSoft = Color(0x33E9A13B)
+    val accent: Color get() = YumeThemes.accent
+    val accentSoft: Color get() = YumeThemes.accent.copy(alpha = 0.2f)
     val danger = Color(0xFFC64F4F)
 }
-
-private val YumeScheme = darkColorScheme(
-    primary = YumeColors.accent,
-    onPrimary = Color(0xFF1A1206),
-    secondary = YumeColors.accent,
-    background = YumeColors.bg,
-    onBackground = YumeColors.text,
-    surface = YumeColors.panel,
-    onSurface = YumeColors.text,
-    surfaceVariant = YumeColors.panelAlt,
-    onSurfaceVariant = YumeColors.textDim,
-    outline = YumeColors.hairline,
-    error = YumeColors.danger
-)
 
 private val YumeType = Typography(
     titleLarge = TextStyle(
@@ -80,9 +109,28 @@ private val YumeType = Typography(
 
 @Composable
 fun YumeTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = YumeScheme,
-        typography = YumeType,
-        content = content
+    val scheme = darkColorScheme(
+        primary = YumeColors.accent,
+        onPrimary = Color(0xFF1A1206),
+        secondary = YumeColors.accent,
+        background = YumeColors.bg,
+        onBackground = YumeColors.text,
+        surface = YumeColors.panel,
+        onSurface = YumeColors.text,
+        surfaceVariant = YumeColors.panelAlt,
+        onSurfaceVariant = YumeColors.textDim,
+        outline = YumeColors.hairline,
+        error = YumeColors.danger
     )
+    // UI size (Settings): every dp in the interface scales with it.
+    val base = androidx.compose.ui.platform.LocalDensity.current
+    val scale = com.yume.app.data.AppSettings.uiScale
+    val density = androidx.compose.ui.unit.Density(base.density * scale, base.fontScale)
+    androidx.compose.runtime.CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides density) {
+        MaterialTheme(
+            colorScheme = scheme,
+            typography = YumeType,
+            content = content
+        )
+    }
 }

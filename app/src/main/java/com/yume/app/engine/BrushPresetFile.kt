@@ -58,7 +58,8 @@ object BrushPresetFile {
                     builtIn = false,
                     // Asset ids pass through the same sanitiser as the files.
                     shapeId = p.shapeId.filter { it.isLetterOrDigit() || it == '-' }.take(40),
-                    grainId = p.grainId.filter { it.isLetterOrDigit() || it == '-' }.take(40)
+                    grainId = p.grainId.filter { it.isLetterOrDigit() || it == '-' }.take(40),
+                    group = if (p.group.isEmpty() || p.group == "Custom") "Imported" else p.group
                 )
             )
         }

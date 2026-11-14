@@ -1,5 +1,7 @@
 package com.yume.app.ui
 
+import androidx.compose.foundation.layout.offset
+
 import androidx.compose.ui.layout.onSizeChanged
 
 import androidx.compose.foundation.verticalScroll
@@ -837,15 +839,62 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
             }
         )
         Spacer(Modifier.height(10.dp))
+        // Library groups of this tool's brushes, plus Favourites and Recent.
+        val prefs = com.yume.app.data.BrushPrefs
+        val present = state.presets.map { it.group.ifEmpty { "Custom" } }.toSet()
+        val groups = listOf(com.yume.app.data.BrushPrefs.FAVORITES, com.yume.app.data.BrushPrefs.RECENT, com.yume.app.data.BrushPrefs.ALL) +
+            com.yume.app.engine.BrushLibrary.groupOrder.filter { it in present } +
+            present.filter { it !in com.yume.app.engine.BrushLibrary.groupOrder }.sorted()
+        val group = prefs.group.takeIf { it in groups } ?: com.yume.app.data.BrushPrefs.ALL
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            groups.forEach { g ->
+                val sel = g == group
+                Text(
+                    text = g,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (sel) YumeColors.accent else YumeColors.textDim,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(if (sel) YumeColors.accentSoft else YumeColors.panelAlt)
+                        .clickable { prefs.chooseGroup(g) }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        val shown = when (group) {
+            com.yume.app.data.BrushPrefs.FAVORITES -> state.presets.filter { it.id in prefs.favorites }
+            com.yume.app.data.BrushPrefs.RECENT -> prefs.recents.mapNotNull { id -> state.presets.firstOrNull { it.id == id } }
+            com.yume.app.data.BrushPrefs.ALL -> state.presets
+            else -> state.presets.filter { it.group.ifEmpty { "Custom" } == group }
+        }
+        if (shown.isEmpty()) {
+            Text(
+                text = if (group == com.yume.app.data.BrushPrefs.FAVORITES) "Long-press any brush to add it to Favorites."
+                else "Brushes you paint with show up here.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YumeColors.textDim,
+                modifier = Modifier.padding(vertical = 10.dp)
+            )
+        }
         // A plain column, not a lazy grid: a nested lazy list swallows vertical
         // drags and stops the whole panel from scrolling.
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            state.presets.chunked(4).forEach { chunk ->
+            shown.chunked(4).forEach { chunk ->
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     chunk.forEach { item ->
                         Box(Modifier.weight(1f)) {
-                            BrushChip(item, item.id == state.activePresetId) {
+                            BrushChip(
+                                item,
+                                item.id == state.activePresetId,
+                                favorite = item.id in prefs.favorites,
+                                onLongClick = { prefs.toggleFavorite(item.id) }
+                            ) {
                                 session.selectPreset(item.id)
+                                prefs.noteUsed(item.id)
                             }
                         }
                     }
@@ -855,6 +904,25 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
         }
         DividerLine()
         if (preset != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = preset.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = YumeColors.text,
+                    modifier = Modifier.weight(1f)
+                )
+                val fav = preset.id in com.yume.app.data.BrushPrefs.favorites
+                Text(
+                    text = if (fav) "★ Favorite" else "☆ Favorite",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (fav) YumeColors.accent else YumeColors.textDim,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable { com.yume.app.data.BrushPrefs.toggleFavorite(preset.id) }
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                )
+            }
+            Spacer(Modifier.height(6.dp))
             BrushStrokePreview(preset, state.color)
             Spacer(Modifier.height(8.dp))
             YumeSlider(
@@ -1021,8 +1089,15 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun BrushChip(preset: BrushPreset, selected: Boolean, onClick: () -> Unit) {
+private fun BrushChip(
+    preset: BrushPreset,
+    selected: Boolean,
+    favorite: Boolean = false,
+    onLongClick: () -> Unit = {},
+    onClick: () -> Unit
+) {
     val preview = remember(preset.dabKey, preset.size.roundToInt()) {
         BrushDab.cachedPreview(preset, 72)
     }
@@ -1030,8 +1105,8 @@ private fun BrushChip(preset: BrushPreset, selected: Boolean, onClick: () -> Uni
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(if (selected) YumeColors.accentSoft else Color(0xFF23232A))
-            .clickable(onClick = onClick)
+            .background(if (selected) YumeColors.accentSoft else YumeColors.panelAlt)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(vertical = 7.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -1042,6 +1117,14 @@ private fun BrushChip(preset: BrushPreset, selected: Boolean, onClick: () -> Uni
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Fit
             )
+            if (favorite) {
+                Text(
+                    "★",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = YumeColors.accent,
+                    modifier = Modifier.align(Alignment.TopEnd).offset(x = 14.dp, y = (-6).dp)
+                )
+            }
         }
         Spacer(Modifier.height(3.dp))
         Text(
@@ -2230,7 +2313,8 @@ fun ActionsPanel(
     onReference: () -> Unit = {},
     onRemoveReference: (() -> Unit)? = null,
     onSave: () -> Unit,
-    onCanvasCopy: (width: Int, height: Int, scale: Boolean, center: Boolean) -> Unit = { _, _, _, _ -> }
+    onCanvasCopy: (width: Int, height: Int, scale: Boolean, center: Boolean) -> Unit = { _, _, _, _ -> },
+    onSettings: () -> Unit = {}
 ) {
     var sizeDialog by remember { mutableStateOf(false) }
     if (sizeDialog) {
@@ -2294,9 +2378,13 @@ fun ActionsPanel(
         MenuRow(Glyph.Save, "Save now") { onSave() }
         DividerLine()
         MenuRow(Glyph.Fit, "Fit to screen") { session.fitToScreen() }
+        MenuRow(Glyph.ZoomIn, "Actual size (100%)") { session.zoomActualSize() }
+        ToggleRow(Glyph.FlipH, "Mirror view", session.viewMirrored) { session.toggleMirrorView() }
         MenuRow(Glyph.Rotate, "Reset rotation") { session.resetRotation() }
         MenuRow(Glyph.ZoomIn, "Zoom in") { session.zoomBy(1.25f) }
         MenuRow(Glyph.ZoomOut, "Zoom out") { session.zoomBy(1f / 1.25f) }
+        DividerLine()
+        MenuRow(Glyph.Sliders, "Settings…") { onSettings() }
         DividerLine()
         PenGestureSettings()
         if (BuildConfig.DEBUG) {

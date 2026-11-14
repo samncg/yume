@@ -192,6 +192,14 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     )
                 }
                 Spacer(Modifier.weight(1f))
+                PressableRow(onClick = { SettingsHost.open = true }) {
+                    Text(
+                        text = "Settings",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = YumeColors.textDim
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
                 PressableRow(onClick = { restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream")) }) {
                     Text(
                         text = "Restore…",

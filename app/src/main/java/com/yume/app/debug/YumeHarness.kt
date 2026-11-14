@@ -165,6 +165,26 @@ object YumeHarness {
                     out.append("# flat fast path ON\n").append(scoreCompositeBig(app, 8192))
                 } else if (only == "comp16k") {
                     out.append(scoreCompositeBig(app, 16384))
+                } else if (only == "brushimport") {
+                    val dir = File(app.filesDir, "brushtest")
+                    for (f in dir.listFiles().orEmpty().sortedBy { it.name }) {
+                        val r = com.yume.app.engine.ForeignBrushes.import(f.readBytes(), f.name, app.cacheDir)
+                        out.append("brush-import ${f.name}: ${r.presets.size} preset(s) | ${r.note}")
+                        for (p in r.presets) {
+                            val shape = com.yume.app.engine.BrushAssets.shape(p.shapeId)
+                            var cov = 0L
+                            if (shape != null) {
+                                val px = IntArray(shape.width * shape.height)
+                                shape.getPixels(px, 0, shape.width, 0, 0, shape.width, shape.height)
+                                for (c in px) cov += (c ushr 24)
+                                cov /= px.size
+                            }
+                            out.append(" [${p.name} spacing=${"%.2f".format(p.spacing)} opacity=${"%.2f".format(p.opacity)} rot=${p.rotationMode} shape=${if (shape != null) "${shape.width}x${shape.height} meanCov=$cov" else "round"} grain=${p.grainId.isNotEmpty()}]")
+                        }
+                        out.append("\n")
+                    }
+                } else if (only == "cancel") {
+                    out.append(scoreCancel(app))
                 } else if (only == "pickfresh") {
                     out.append(line(scorePickFresh()))
                 } else if (only == "wand") {
@@ -3575,6 +3595,93 @@ object YumeHarness {
             TileStoreConfig.useSparseLayers = oldS
             TileStoreConfig.tileSize = oldT
             Runtime.getRuntime().gc()
+        }
+        return out.toString()
+    }
+
+    /**
+     * Cancel: a long fill and a long blur on an 8K layer are cancelled from
+     * another thread part-way through. The layer and history must come back
+     * exactly as they were, and the next operation must run normally.
+     */
+    private fun scoreCancel(app: YumeApp): String {
+        val out = StringBuilder()
+        val size = 8192
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = 256
+        var cache: TileCache? = null
+        val ps = app.projectStore
+        val project = ps.createProject("harness-cancel", 64, 64, BG)
+        try {
+            val am = app.getSystemService(android.app.ActivityManager::class.java)
+            cache = TileCache.open(app.cacheDir, project.id, TileCache.defaultBudget(am))
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("cx", "CX", engine, History())
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            val l = engine.newLayer("Ink")
+            engine.selectLayer(l.id)
+            val noise = noiseTile(77, 256, opaque = true)
+            for (ty in 0 until 32 step 3) for (tx in 0 until 32 step 2) {
+                l.tiles.writeRect(Rect(tx * 256, ty * 256, tx * 256 + 256, ty * 256 + 256), noise, Rect(0, 0, 256, 256))
+            }
+            l.touch()
+            engine.markDirtyAll()
+            engine.flush()
+            fun state() = hashLayer(l) + " hist=" + session.history.totalCount
+            // Like the UI: Cancel exists only once a cancellable step runs.
+            fun cancelAfter(ms: Long) = Thread {
+                var waited = 0
+                while (!com.yume.app.engine.OpCancel.armed && waited < 120_000) { Thread.sleep(5); waited += 5 }
+                Thread.sleep(ms)
+                com.yume.app.engine.OpCancel.requested = true
+            }.apply { start() }
+            fun check(name: String, delayMs: Long, op: () -> Unit) {
+                val before = state()
+                val t = cancelAfter(delayMs)
+                val t0 = System.nanoTime()
+                op()
+                val ms = (System.nanoTime() - t0) / 1_000_000
+                t.join()
+                val after = state()
+                out.append("cancel $name after ${delayMs}ms: ${if (before == after) "RESTORED" else "CHANGED"} in ${ms}ms\n")
+            }
+            session.chooseTool(Tool.Fill)
+            session.runCommands()
+            session.fillLayerOnly = false
+            session.color = 0xFF3366CC.toInt()
+            check("fill 8K", 250) { session.fillAt(4000f, 100f); session.runCommands() }
+            session.chooseTool(Tool.Brush)
+            session.runCommands()
+            check("blur 8K", 300) {
+                session.previewAdjustment(com.yume.app.engine.AdjustmentKind.Blur, 0.5f)
+                session.consumePendingPreview()
+                session.commitAdjustment()
+                session.runCommands()
+            }
+            // Not cancelled: a normal fill afterwards still lands.
+            val before = state()
+            session.chooseTool(Tool.Fill)
+            session.runCommands()
+            session.fillAt(4000f, 100f)
+            session.runCommands()
+            out.append("cancel then normal fill: ${if (state() != before) "APPLIED" else "MISSING"}\n")
+            noise.recycle()
+        } catch (t: Throwable) {
+            Log.e(TAG, "cancel test failed", t)
+            out.append("cancel: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
         }
         return out.toString()
     }

@@ -98,6 +98,28 @@ object BrushAssets {
         return scaled
     }
 
+    /**
+     * Stores a ready coverage map (white, coverage in alpha) as a shape
+     * ([square], fitted and centred) or a grain (aspect kept); returns its id.
+     */
+    fun storeCoverage(kind: String, coverage: Bitmap, square: Boolean): String? {
+        val w: Int
+        val h: Int
+        if (square) {
+            w = RES; h = RES
+        } else {
+            val s = RES.toFloat() / max(coverage.width, coverage.height)
+            w = max(1, (coverage.width * s).toInt()); h = max(1, (coverage.height * s).toInt())
+        }
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val p = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+        val sc = if (square) min(w.toFloat() / coverage.width, h.toFloat() / coverage.height) else w.toFloat() / coverage.width
+        val dw = coverage.width * sc
+        val dh = coverage.height * sc
+        Canvas(out).drawBitmap(coverage, null, RectF((w - dw) / 2f, (h - dh) / 2f, (w + dw) / 2f, (h + dh) / 2f), p)
+        return store(kind, out)
+    }
+
     /** Stores an imported image as a stamp shape; returns its id. */
     fun importShape(source: Bitmap): String? = store("shapes", toCoverage(source, square = true))
 

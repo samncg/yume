@@ -111,6 +111,7 @@ object TileOps {
     ) {
         for (ty in tileRangeY(store, bounds)) {
             for (tx in tileRangeX(store, bounds)) {
+                OpCancel.check()
                 if (skip.isNotEmpty() && ((tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL)) in skip) continue
                 val tile = tileRect(store, tx, ty)
                 if (tile.isEmpty) continue
@@ -182,6 +183,7 @@ object TileOps {
                 // Everything the blur reads here is empty, or one and the same
                 // opaque solid: a box blur of a constant is that constant, so
                 // the tile (still the captured one) stays exactly as it is.
+                OpCancel.check()
                 if (uniformSnapshot(capture, pad)) continue
                 val patch = scratch(pad.width(), pad.height())
                 readSnapshot(capture, pad, patch)
@@ -349,6 +351,7 @@ object TileOps {
     fun mergeInto(dest: TileStore, source: TileStore, bounds: Rect, paint: Paint) {
         for (ty in tileRangeY(dest, bounds)) {
             for (tx in tileRangeX(dest, bounds)) {
+                OpCancel.check()
                 val tile = tileRect(dest, tx, ty)
                 if (tile.isEmpty) continue
                 if (tile.right <= bounds.left || tile.left >= bounds.right ||
@@ -373,6 +376,7 @@ object TileOps {
         val rect = Rect(0, 0, source.width, source.height)
         for (ty in tileRangeY(source, rect)) {
             for (tx in tileRangeX(source, rect)) {
+                OpCancel.check()
                 if (source.isTileEmpty(tx, ty)) continue
                 val tile = source.getTile(tx, ty) ?: continue
                 dest.putTile(tx, ty, tile)

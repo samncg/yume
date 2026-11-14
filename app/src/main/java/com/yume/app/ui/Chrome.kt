@@ -1,5 +1,7 @@
 package com.yume.app.ui
 
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+
 import androidx.compose.ui.layout.layout
 
 import androidx.compose.ui.layout.positionInRoot
@@ -356,8 +358,8 @@ fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f
                     )
                 }
                 Spacer(Modifier.height(6.dp))
-                YumeIconButton(Glyph.Undo, { session.undo() }, enabled = state.canUndo, size = 44.dp, label = "Undo")
-                YumeIconButton(Glyph.Redo, { session.redo() }, enabled = state.canRedo, size = 44.dp, label = "Redo")
+                RepeatButton(Glyph.Undo, "Undo", state.canUndo) { session.undo() }
+                RepeatButton(Glyph.Redo, "Redo", state.canRedo) { session.redo() }
                 Spacer(Modifier.height(4.dp))
                 Row {
                     YumeIconButton(
@@ -415,5 +417,44 @@ fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> U
                 SmallButton("Rename", enabled = text.isNotBlank()) { onRename(text) }
             }
         }
+    }
+}
+
+/**
+ * Undo / redo button: a tap steps once; held (Settings: on by default) it
+ * keeps stepping, faster the longer it is held.
+ */
+@androidx.compose.runtime.Composable
+internal fun RepeatButton(glyph: Glyph, label: String, enabled: Boolean, action: () -> Unit) {
+    val act = androidx.compose.runtime.rememberUpdatedState(action)
+    val on = androidx.compose.runtime.rememberUpdatedState(enabled)
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    if (!com.yume.app.data.AppSettings.holdToRepeatUndo) {
+        YumeIconButton(glyph, action, enabled = enabled, size = 44.dp, label = label)
+        return
+    }
+    androidx.compose.foundation.layout.Box(
+        Modifier.pointerInput(Unit) {
+            awaitEachGesture {
+                val down = awaitFirstDown(pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                if (!on.value) return@awaitEachGesture
+                down.consume()
+                var fired = 0
+                val job = scope.launch {
+                    kotlinx.coroutines.delay(420L)
+                    while (on.value) {
+                        act.value()
+                        fired++
+                        kotlinx.coroutines.delay(maxOf(45L, 190L - fired * 14L))
+                    }
+                }
+                val up = waitForUpOrCancellation(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                up?.consume()
+                job.cancel()
+                if (fired == 0 && up != null) act.value()
+            }
+        }
+    ) {
+        YumeIconButton(glyph, {}, enabled = enabled, size = 44.dp, label = label)
     }
 }

@@ -163,16 +163,25 @@ fun BrushExtras(preset: BrushPreset, session: DrawingSession) {
     }
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
-            val list = withContext(Dispatchers.IO) {
-                runCatching {
-                    context.contentResolver.openInputStream(uri)?.use { BrushPresetFile.import(it.readBytes().decodeToString()) }
-                }.getOrNull().orEmpty()
+            val (list, message) = withContext(Dispatchers.IO) {
+                val bytes = runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                }.getOrNull() ?: return@withContext emptyList<BrushPreset>() to "That file could not be opened."
+                // Yume's own brush file first, then other apps' formats.
+                val own = runCatching { BrushPresetFile.import(bytes.decodeToString()) }.getOrNull().orEmpty()
+                if (own.isNotEmpty()) return@withContext own to "Imported ${own.size} brush${if (own.size == 1) "" else "es"}."
+                val name = runCatching {
+                    context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                        ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+                }.getOrNull() ?: uri.lastPathSegment ?: "Imported"
+                val r = com.yume.app.engine.ForeignBrushes.import(bytes, name, context.cacheDir)
+                r.presets to r.note
             }
-            if (list.isEmpty()) note = "That file is not a Yume brush."
-            else {
+            if (list.isNotEmpty()) {
                 session.importPresets(list)
-                note = "Imported ${list.size} brush${if (list.size == 1) "" else "es"}."
+                com.yume.app.data.BrushPrefs.chooseGroup("Imported")
             }
+            note = message
         }
     }
 

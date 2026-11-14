@@ -79,7 +79,9 @@ object SelectionUtil {
         // and below. The result is the seed's 4-connected component, exactly
         // what the per-pixel scanline produced.
         push(seedYi * w + seedXi)
+        var visits = 0
         while (top > 0) {
+            if (++visits and 1023 == 0) OpCancel.check()
             val seed = stack[--top]
             val sy = seed / w
             val sx = seed % w

@@ -59,6 +59,20 @@ class CanvasView(
     private var commitAction: Runnable? = null
     /** The next gesture event starts a new multi-finger gesture. */
     private var gestureFresh = false
+
+    /** Tremor filter and tip predictor for the current stroke. */
+    private val motionFilter = com.yume.app.input.MotionFilter()
+    private val predictor = com.yume.app.input.StrokePredictor()
+    private val filtered = FloatArray(2)
+    private var filterStroke = false
+    private var predictStroke = false
+
+    /** Three-finger sideways scrub through history. */
+    private var scrubStartX = 0f
+    private var scrubStartY = 0f
+    private var scrubDecided = false
+    private var scrubbing = false
+    private var scrubSteps = 0
     private var activePointerId = -1
     private var twoFinger = false
     /** A stylus is currently in contact — fingers are treated as palms. */
@@ -205,6 +219,16 @@ class CanvasView(
             rebaseGesture(event, -1)
             return
         }
+        // Tremor filtering and tip prediction apply to painting strokes.
+        filterStroke = target == Mode.Stroke
+        motionFilter.strength = if (filterStroke) com.yume.app.data.AppSettings.motionFiltering else 0f
+        motionFilter.reset(event.x, event.y, event.eventTime)
+        predictor.reset()
+        predictStroke = stylus && target == Mode.Stroke && session.tool == Tool.Brush &&
+            com.yume.app.data.AppSettings.prediction
+        session.predictedTip = null
+        // The pen's samples reach us as they arrive, not batched per frame.
+        if (stylus && android.os.Build.VERSION.SDK_INT >= 30) requestUnbufferedDispatch(event)
         val down = downEvent(event, 0, barrel)
         if (stylus) {
             mode = target
@@ -227,7 +251,7 @@ class CanvasView(
         // shapes and the rest use a resting pen themselves.
         if (mode == Mode.Stroke && session.tool in EYEDROPPER_TOOLS) {
             val elapsed = android.os.SystemClock.uptimeMillis() - downTime
-            scheduleLongPress((EYEDROPPER_HOLD_MS - elapsed).coerceAtLeast(0L))
+            scheduleLongPress((com.yume.app.data.AppSettings.eyedropperHoldMs - elapsed).coerceAtLeast(0L))
         }
     }
 
@@ -269,7 +293,15 @@ class CanvasView(
         mode = Mode.None
         twoFinger = true
         gestureFresh = true
+        session.predictedTip = null
         rebaseGesture(event, -1)
+        if (event.pointerCount == 3) {
+            scrubStartX = gestureFocusX
+            scrubStartY = gestureFocusY
+            scrubDecided = false
+            scrubbing = false
+            scrubSteps = 0
+        }
         if (event.pointerCount == 2 && maxFingers == 2) scheduleMenuHold() else cancelMenuHold()
     }
 
@@ -278,6 +310,9 @@ class CanvasView(
 
         if (twoFinger) {
             if (menuHoldFired) return
+            if (event.pointerCount == 3 && maxFingers == 3 && com.yume.app.data.AppSettings.threeFingerScrub) {
+                if (handleScrub(event)) return
+            }
             if (event.pointerCount >= 2) {
                 sendGesture(event)
                 // Panning, pinching or rotating cancels the hold. Measured from
@@ -298,7 +333,11 @@ class CanvasView(
         }
 
         // Holding still at the end of a stroke straightens it (QuickShape).
-        if (mode == Mode.Stroke && !twoFinger) scheduleQuickShape(event.x, event.y)
+        // Measured on the filtered path, so tremor does not restart the wait.
+        if (mode == Mode.Stroke && !twoFinger) {
+            if (filterStroke) scheduleQuickShape(motionFilter.lastX, motionFilter.lastY)
+            else scheduleQuickShape(event.x, event.y)
+        }
     }
 
     private fun onPointerUp(event: MotionEvent) {
@@ -317,11 +356,20 @@ class CanvasView(
         cancelQuickShape()
         cancelMenuHold()
 
+        session.predictedTip = null
         if (twoFinger) {
             val duration = event.eventTime - downTime
-            if (!menuHoldFired && duration < 420L && moved < 26f * density) {
-                session.pushInput(InputEvent.Tap(maxFingers))
+            if (!menuHoldFired && !scrubbing && duration < 420L && moved < 26f * density) {
+                val s = com.yume.app.data.AppSettings
+                val allowed = when (maxFingers) {
+                    2 -> s.twoFingerUndo
+                    3 -> s.threeFingerRedo
+                    4 -> s.fourFingerUi
+                    else -> true
+                }
+                if (allowed) session.pushInput(InputEvent.Tap(maxFingers))
             }
+            scrubbing = false
             twoFinger = false
         } else {
             when (mode) {
@@ -339,6 +387,7 @@ class CanvasView(
     }
 
     private fun cancelEverything() {
+        session.predictedTip = null
         dropPending()
         cancelScheduledLongPress()
         cancelQuickShape()
@@ -369,17 +418,69 @@ class CanvasView(
         val ys = FloatArray(count)
         val ps = FloatArray(count)
         for (h in 0 until event.historySize) {
-            xs[h] = event.getHistoricalX(index, h)
-            ys[h] = event.getHistoricalY(index, h)
+            sample(event.getHistoricalX(index, h), event.getHistoricalY(index, h), event.getHistoricalEventTime(h))
+            xs[h] = filtered[0]
+            ys[h] = filtered[1]
             ps[h] = pressureAt(event, index)
         }
-        xs[count - 1] = event.getX(index)
-        ys[count - 1] = event.getY(index)
+        sample(event.getX(index), event.getY(index), event.eventTime)
+        xs[count - 1] = filtered[0]
+        ys[count - 1] = filtered[1]
         ps[count - 1] = pressureAt(event, index)
+        if (predictStroke && mode == Mode.Stroke) {
+            val tip = FloatArray(2)
+            session.predictedTip = if (predictor.predict(PREDICT_AHEAD_MS, PREDICT_MAX_DP * density, tip)) tip else null
+        }
         return InputEvent.Move(activePointerId, xs, ys, ps, tiltAt(event, index), orientationAt(event, index))
     }
 
-    private fun scheduleLongPress(delay: Long = EYEDROPPER_HOLD_MS) {
+    /** One pen sample through the tremor filter (into [filtered]) and the predictor. */
+    private fun sample(x: Float, y: Float, t: Long) {
+        if (filterStroke) motionFilter.filter(x, y, t, filtered) else {
+            filtered[0] = x
+            filtered[1] = y
+        }
+        if (predictStroke) predictor.add(filtered[0], filtered[1], t)
+    }
+
+    /**
+     * Three fingers dragged sideways step through history: every
+     * [SCRUB_STEP_DP] to the left is one undo, back to the right redoes.
+     * Returns true while the gesture is a scrub (no pan).
+     */
+    private fun handleScrub(event: MotionEvent): Boolean {
+        val fx = focusX(event, -1)
+        val fy = focusY(event, -1)
+        val dx = fx - scrubStartX
+        val dy = fy - scrubStartY
+        if (!scrubDecided) {
+            val slop = 28f * density
+            if (kotlin.math.abs(dx) < slop && kotlin.math.abs(dy) < slop) return true
+            scrubDecided = true
+            scrubbing = kotlin.math.abs(dx) > 1.8f * kotlin.math.abs(dy)
+            if (!scrubbing) {
+                // A pan or pinch with three fingers: continue as a gesture.
+                rebaseGesture(event, -1)
+                return false
+            }
+            scrubStartX = fx
+        }
+        if (!scrubbing) return false
+        val target = (-(fx - scrubStartX) / (SCRUB_STEP_DP * density)).toInt()
+        while (scrubSteps < target) {
+            session.undo()
+            scrubSteps++
+            performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+        }
+        while (scrubSteps > target) {
+            session.redo()
+            scrubSteps--
+            performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+        }
+        return true
+    }
+
+    private fun scheduleLongPress(delay: Long = com.yume.app.data.AppSettings.eyedropperHoldMs.toLong()) {
         val action = Runnable {
             if (mode == Mode.Stroke && moved < 9f * density) {
                 session.pushInput(InputEvent.CancelStroke)
@@ -445,6 +546,8 @@ class CanvasView(
      * move event; otherwise it would never fire with a pen.
      */
     private fun scheduleQuickShape(x: Float, y: Float) {
+        // The wait restarts only when the pen leaves a small circle around
+        // where it came to rest (pressure wobble and drift stay inside it).
         if (quickShapeAction != null && hypot(x - holdAnchorX, y - holdAnchorY) < QUICKSHAPE_SLOP_DP * density) return
         holdAnchorX = x
         holdAnchorY = y
@@ -456,7 +559,7 @@ class CanvasView(
             }
         }
         quickShapeAction = action
-        handler.postDelayed(action, QUICKSHAPE_HOLD_MS)
+        handler.postDelayed(action, com.yume.app.data.AppSettings.quickShapeHoldMs.toLong())
     }
 
     private fun cancelQuickShape() {
@@ -596,8 +699,11 @@ class CanvasView(
         // A stylus reports ~0 pressure as it leaves the glass. Substituting 1.0
         // for that produced a fat blob at the end of every stroke, so stylus
         // pressures are used as-is with a small floor.
+        val curve = com.yume.app.data.AppSettings.pressureCurve
         return if (isStylus(event)) {
-            raw.coerceIn(0.02f, 1f)
+            val p = raw.coerceIn(0.02f, 1f)
+            // The user's pressure curve (Settings): p ^ curve.
+            if (curve == 1f) p else Math.pow(p.toDouble(), curve.toDouble()).toFloat().coerceIn(0.02f, 1f)
         } else if (raw <= 0.01f) {
             1f
         } else {
@@ -624,8 +730,14 @@ private const val MENU_HOLD_SLOP_DP = 14f
 private const val MENU_HOLD_TURN_DEG = 6.0
 
 /** How long the pen rests before QuickShape snaps, and how still it must be. */
-private const val QUICKSHAPE_HOLD_MS = 600L
-private const val QUICKSHAPE_SLOP_DP = 6f
+private const val QUICKSHAPE_SLOP_DP = 11f
+
+/** Tip prediction: how far ahead, and never further than this from the pen. */
+private const val PREDICT_AHEAD_MS = 22f
+private const val PREDICT_MAX_DP = 40f
+
+/** Three-finger scrub: sideways distance per history step. */
+private const val SCRUB_STEP_DP = 36f
 /**
  * How long a lone finger is held back before it reaches the tool: two-finger
  * pans land their fingers well within this, a finger stroke loses nothing
@@ -634,7 +746,6 @@ private const val QUICKSHAPE_SLOP_DP = 6f
 private const val FINGER_COMMIT_MS = 110L
 
 /** Holding a stroke this still for this long picks a colour instead. */
-private const val EYEDROPPER_HOLD_MS = 750L
 
 /** Tools where a pen held still turns into the eyedropper. */
 private val EYEDROPPER_TOOLS = setOf(Tool.Brush, Tool.Eraser, Tool.Smudge)

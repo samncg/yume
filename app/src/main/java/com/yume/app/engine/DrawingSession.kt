@@ -253,6 +253,31 @@ class DrawingSession(
         }
     }
 
+    /**
+     * Runs [block] so the user can stop it from the working card. On a cancel
+     * [onCancel] puts back whatever was already changed. False when cancelled.
+     */
+    private inline fun cancellable(onCancel: () -> Unit, block: () -> Unit): Boolean {
+        OpCancel.arm()
+        try {
+            block()
+            return true
+        } catch (e: OperationCancelled) {
+            runCatching(onCancel)
+            onMessage?.invoke("Cancelled")
+            requestState()
+            return false
+        } finally {
+            OpCancel.disarm()
+        }
+    }
+
+    /**
+     * Where the pen is predicted to be a few ms ahead (view px), drawn as the
+     * stroke's leading tip until the real samples arrive. Set by the view.
+     */
+    @Volatile var predictedTip: FloatArray? = null
+
     /** True while a brush / eraser / smudge stroke is being painted. */
     val strokeInProgress: Boolean get() = painter.isActive
 
@@ -537,6 +562,7 @@ class DrawingSession(
 
     /** Brush diameter in document pixels, used for the hover cursor. */
     val brushSize: Float get() = activePreset.size
+    val brushOpacity: Float get() = activePreset.opacity
 
     val transformActive: Boolean get() = transform != null
 
@@ -900,7 +926,8 @@ class DrawingSession(
 
             InputEvent.QuickShape -> {
                 val length = hypot(strokeLastX - strokeStartX, strokeLastY - strokeStartY)
-                if (quickShapeEnabled && length > 30f && painter.isActive &&
+                // Long enough on screen (not in document px, which depends on zoom).
+                if (quickShapeEnabled && length * view.scale > 24f && painter.isActive &&
                     strokePreset != null && !quickShaping && !shapeDragging
                 ) {
                     // What did the user mean? A line, polyline, polygon or
@@ -1593,6 +1620,10 @@ class DrawingSession(
 
     /** Runs the deferred magic wand for a completed tap. */
     private fun runAutoSelect() {
+        cancellable({}) { runAutoSelectWork() }
+    }
+
+    private fun runAutoSelectWork() {
         if (!autoSelectPending) return
         autoSelectPending = false
         autoSelectCanMove = false
@@ -1734,7 +1765,8 @@ class DrawingSession(
         val created = source.copy(
             id = id,
             name = name.ifBlank { "Custom" },
-            builtIn = false
+            builtIn = false,
+            group = "Custom"
         )
         val index = presets.indexOfFirst { it.id == source.id }
         val list = presets.toMutableList()
@@ -1863,6 +1895,51 @@ class DrawingSession(
         fillAtInternal(doc[0], doc[1], color, true)
     }
 
+    // ColorDrop with a threshold: drop and hold, then slide to adjust.
+    private var dropX = 0f
+    private var dropY = 0f
+    private var dropVersion = -1
+    @Volatile private var dropPendingTolerance = -1
+
+    /** The chip was held still over the canvas: fill there and remember it. */
+    fun colorDropBegin(vx: Float, vy: Float) = post {
+        val doc = FloatArray(2)
+        view.toDocument(vx, vy, doc)
+        dropX = doc[0]
+        dropY = doc[1]
+        val before = history.version
+        fillAtInternal(dropX, dropY, color, true)
+        dropVersion = if (history.version != before) history.version else -1
+    }
+
+    /**
+     * The finger slides while held: refill the same spot at [tolerance]
+     * (the previous preview fill is undone first). Calls coalesce: only the
+     * latest value is applied.
+     */
+    fun colorDropAdjust(tolerance: Int) {
+        val first = dropPendingTolerance < 0
+        dropPendingTolerance = tolerance.coerceIn(1, TOLERANCE_MAX)
+        if (!first) return
+        post {
+            val t = dropPendingTolerance
+            dropPendingTolerance = -1
+            if (t < 0 || t == fillTolerance && dropVersion == history.version) return@post
+            if (dropVersion >= 0 && dropVersion == history.version) doUndo()
+            fillTolerance = t
+            val before = history.version
+            fillAtInternal(dropX, dropY, color, true)
+            dropVersion = if (history.version != before) history.version else -1
+            requestState()
+        }
+    }
+
+    /** The finger lifted: keep the last fill (and its tolerance for next time). */
+    fun colorDropEnd() = post {
+        dropVersion = -1
+        requestState()
+    }
+
     /**
      * Flood-fills the region around (x, y) on the active layer (or its mask).
      *
@@ -1874,6 +1951,17 @@ class DrawingSession(
      * exact and identical on the dense and the sparse store.
      */
     private fun fillAtInternal(fx: Float, fy: Float, fillColor: Int, compositeOnly: Boolean) {
+        var cap: TileCapture? = null
+        cancellable({
+            cap?.let {
+                it.restore()
+                it.release()
+                engine.markDirtyAll()
+            }
+        }) { fillAtWork(fx, fy, fillColor, compositeOnly) { cap = it } }
+    }
+
+    private fun fillAtWork(fx: Float, fy: Float, fillColor: Int, compositeOnly: Boolean, onCapture: (TileCapture) -> Unit) {
         val layer = engine.activeLayer ?: return
         if (!editable(layer)) return
         if (adjusting) commitAdjustmentInternal()
@@ -1923,6 +2011,7 @@ class DrawingSession(
         if (!bounds.intersect(0, 0, engine.width, engine.height)) return
         val t1 = System.nanoTime()
         val capture = TileOps.capture(store, bounds)
+        onCapture(capture)
         val paint = android.graphics.Paint().apply {
             // Masks are alpha coverage (composited with DST_IN): a mask fill
             // hides, exactly like painting a mask (DST_OUT) does.
@@ -1944,6 +2033,7 @@ class DrawingSession(
             val part = android.graphics.Region()
             for (ty in bounds.top / ts..(bounds.bottom - 1) / ts) {
                 for (tx in bounds.left / ts..(bounds.right - 1) / ts) {
+                    OpCancel.check()
                     tile.set(tx * ts, ty * ts, min(engine.width, (tx + 1) * ts), min(engine.height, (ty + 1) * ts))
                     part.set(region)
                     if (!part.op(tile, android.graphics.Region.Op.INTERSECT) || part.isEmpty) continue
@@ -2241,7 +2331,10 @@ class DrawingSession(
             return
         }
         val before = engine.snapshotState()
-        if (engine.mergeDown(id)) {
+        var merged = false
+        // The merged layer is built on the side: a cancel changes nothing.
+        cancellable({ engine.markDirtyAll() }) { merged = engine.mergeDown(id) }
+        if (merged) {
             // Replayable: redo recomputes the merge from the restored layers.
             history.push(MergeAction(before, upperId = id, label = "Merge down"))
             engine.markDirtyAll()
@@ -2765,10 +2858,17 @@ class DrawingSession(
             return
         }
         val capture = TileOps.capture(store, bounds)
-        TileOps.forEachTile(store, bounds, 0) { patch, pad, tile ->
-            block(patch)
-            TileOps.writePart(store, patch, pad, tile)
+        val done = cancellable({
+            capture.restore()
+            capture.release()
+            engine.markDirtyAll()
+        }) {
+            TileOps.forEachTile(store, bounds, 0) { patch, pad, tile ->
+                block(patch)
+                TileOps.writePart(store, patch, pad, tile)
+            }
         }
+        if (!done) return
         engine.makeTilePatch(layer, capture, bounds, label, EditKind.Adjust)?.let { history.push(it) }
         layer.touch()
         engine.markDirtyAll()
@@ -2957,7 +3057,22 @@ class DrawingSession(
         }
         val work = if (adjustWork.isEmpty) bounds else Rect(adjustWork)
         val actions = ArrayList<HistoryAction>()
+        var inFlight: TileCapture? = capture
+        val baked = cancellable({
+            // The layer being baked goes back from its capture; finished
+            // layers are undone.
+            inFlight?.let {
+                it.restore()
+                it.release()
+            }
+            for (a in actions.asReversed()) {
+                a.undo(engine)
+                history.discard(a)
+            }
+            engine.markDirtyAll()
+        }) {
         bakeAdjustment(layer, capture, dense, bounds, work, kind, amount)?.let { actions.add(it) }
+        inFlight = null
         layer.touch()
         if (adjustAllLayers) {
             // Same adjustment on every other visible, unlocked layer, each from
@@ -2973,10 +3088,14 @@ class DrawingSession(
                 val w = if (halo > 0) growBounds(base, halo) else base
                 val cap = if (store.isSparse) TileOps.capture(store, b) else null
                 val snap = if (store.isSparse) null else store.readRect(full)
+                inFlight = cap
                 bakeAdjustment(other, cap, snap, b, w, kind, amount)?.let { actions.add(it) }
+                inFlight = null
                 other.touch()
             }
         }
+        }
+        if (!baked) return
         when (actions.size) {
             0 -> Unit
             1 -> history.push(actions[0])
@@ -3129,6 +3248,29 @@ class DrawingSession(
     fun fitToScreen() = post {
         view.fit()
         requestState()
+    }
+
+    /** Mirrors the view left-right, to check a drawing with fresh eyes. */
+    fun toggleMirrorView() = post {
+        // Keep the document point at the screen centre where it is.
+        val c = FloatArray(2)
+        view.toDocument(view.viewWidth / 2f, view.viewHeight / 2f, c)
+        view.mirrored = !view.mirrored
+        view.update()
+        val m = FloatArray(2)
+        view.toScreen(c[0], c[1], m)
+        view.pan(view.viewWidth / 2f - m[0], view.viewHeight / 2f - m[1])
+        requestState()
+    }
+
+    val viewMirrored: Boolean get() = view.mirrored
+
+    /** Zoom to 100 % (one document pixel per screen pixel) around the screen centre. */
+    fun zoomActualSize() = post {
+        if (view.scale > 0f) {
+            view.applyGesture(view.viewWidth / 2f, view.viewHeight / 2f, 1f / view.scale, 0f, 0f, 0f)
+            requestState()
+        }
     }
 
     fun resetRotation() = post {

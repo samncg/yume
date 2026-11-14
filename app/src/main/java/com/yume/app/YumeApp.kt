@@ -21,11 +21,14 @@ class YumeApp : Application() {
         super.onCreate()
         MemoryBudget.configure(getSystemService(ActivityManager::class.java))
         com.yume.app.engine.BrushAssets.root = filesDir
+        runCatching { com.yume.app.engine.BuiltinBrushAssets.ensure(filesDir) }
         // Tile caches are scratch: anything left over is from a crash.
         com.yume.app.engine.TileCache.removeStale(cacheDir)
         MemoryBudget.diskRoot = cacheDir
         projectStore = ProjectStore(this)
         presetStore = PresetStore(this)
+        com.yume.app.data.AppSettings.init(this)
+        com.yume.app.data.BrushPrefs.init(this)
         paletteStore = com.yume.app.data.PaletteStore(this)
     }
 }

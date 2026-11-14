@@ -130,7 +130,10 @@ changed region each frame.
 | Two fingers | Pan, pinch to zoom, twist to rotate |
 | Two-finger tap | Undo |
 | Three-finger tap | Redo |
+| Three fingers dragged sideways | Scrub history: each step left undoes, back right redoes |
+| Hold the undo / redo button | Keep stepping, faster the longer it is held |
 | Four-finger tap | Show or hide the interface |
+| Drag the colour chip onto the canvas | ColorDrop fill; rest before lifting, then slide sideways to set the threshold |
 | Long press at the start of a brush, eraser or smudge stroke | Eyedropper (sample the colour under the pen) |
 | Hold still at the end of a stroke | QuickShape — snaps the stroke to a clean line, arc or shape |
 | Long press a layer row, then drag | Reorder layers (and drop into a group) |
@@ -154,15 +157,33 @@ bucket and text tool act when the touch lifts. A stylus is never held back.
 ![Brush Studio](docs/04-brush.png)
 
 The Brush Studio opens from the brush, smudge or eraser button. It has three
-families — **Brush**, **Eraser** and **Smudge** — each with its own list of
-presets.
+families — **Brush**, **Eraser** and **Smudge** — each with its library
+sorted into groups: **Sketching, Inking, Calligraphy, Painting, Airbrushing,
+Textures, Elements, Erasers, Blending**, plus **Imported** and **Custom**.
+The group row also has **★ Favorites** (long-press any brush, or tap the star
+next to its name) and **Recent** (the last brushes you painted with).
 
-**Built-in presets (15)**
+**Built-in presets (57)** — pencils from 2H to 6B and graphite shading,
+charcoal and pastel; fine liner, brush pen, crow quill, sumi and dry ink,
+ballpoint; flat nib, chisel marker, script and monoline calligraphy; round,
+flat, gouache, acrylic, impasto, oil and watercolour brushes, wet glaze; hard,
+fine and soft airbrushes, mist and glow; splatter, stipple, sponge, canvas
+texture, hatching and grit; foliage, stars, clouds and rain; textured and
+pencil erasers; soft, textured and finger blenders. Their tips (flat nib,
+chalk, splatter, bristles, hatching, foliage, star) and grains (paper, canvas,
+sponge) are drawn by the app.
 
-- Brushes: Studio Pen, Technical Pen, Gel Pen, 6B Pencil, Soft Brush, Airbrush,
-  Charcoal, Ink Bleed, Watercolor, Oil Paint, Marker, Spray Paint.
-- Erasers: Soft Eraser, Hard Eraser.
-- Smudge: Smudge.
+**Importing brushes from other apps** — *Import brushes…* (More settings)
+reads Yume's own `.yumebrush` files and:
+
+- **Procreate** `.brush` and `.brushset`: tip and grain images, name, spacing,
+  size, opacity, jitter, streamline, pressure response and rotation.
+- **Photoshop** `.abr` (versions 1, 2 and 6–10): every sampled tip.
+- **Clip Studio Paint** `.sut`: the brush name and any embedded tip image (a
+  tip stored in Clip Studio's own image format comes in as a round tip).
+- **GIMP** `.gbr`, and any PNG, JPEG or WebP image as a stamp shape.
+
+Imported brushes land in the **Imported** group.
 
 **Per-brush settings**
 
@@ -390,6 +411,29 @@ Behaviour:
 
 Delete requires the render thread to rewind, drop that action and replay the
 rest; on very long histories this can take a moment.
+
+---
+
+## Settings
+
+Open **Settings** from the gallery or from Actions.
+
+- **Appearance** — background family (Graphite, Midnight, OLED black,
+  Espresso, Forest, Slate), accent colour, and interface size (85–115 %).
+- **Drawing** — **motion filtering** (an adaptive filter that removes hand
+  tremor from slow, careful lines while fast strokes stay sharp and on time),
+  **stroke tip prediction** (the line is drawn ahead to where the pen is
+  going, so it keeps up with the pen), the **pressure curve** (lighter or
+  firmer touch, with a live graph), and the QuickShape and eyedropper hold
+  times.
+- **Gestures** — turn two-finger undo, three-finger redo, three-finger history
+  scrub, four-finger interface toggle and hold-to-repeat undo on or off.
+
+Long operations (fill, auto-select, adjustments, invert, merge…) show a
+**Working…** card with **Cancel**; cancelling puts back everything the
+operation had already changed. Actions also has **Actual size (100 %)** and
+**Mirror view**, which flips the view (not the drawing) to check it with fresh
+eyes.
 
 ---
 
@@ -812,6 +856,18 @@ formats.
 ---
 
 ## Known limitations
+
+- **Painting and layer compositing run on the CPU.** The screen itself is
+  drawn on the GPU (hardware canvas: zoom, pan, rotate and the composite
+  blit), but brush stamping and blending stay on the CPU, where every store
+  gives bit-identical results and the golden tests hold. A GPU paint engine
+  is a separate project.
+- **Latency: no front-buffer rendering yet.** Stylus events are delivered
+  unbatched and the stroke tip is predicted ahead of the pen, but frames
+  still go through the normal double-buffered surface.
+- **Clip Studio brushes:** tips stored in Clip Studio's own image format
+  (rather than an embedded PNG) come in as a round tip. Krita `.kpp` presets
+  are not read.
 
 - **Groups cannot be nested.** A group holds layers, not other groups. The
   compositor renders groups with one scratch surface and the layer model is

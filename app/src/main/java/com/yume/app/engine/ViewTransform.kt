@@ -74,10 +74,13 @@ class ViewTransform {
         update()
     }
 
+    /** The view is mirrored left-right (the document is not changed). */
+    var mirrored = false
+
     fun update() {
         matrix.reset()
         matrix.postTranslate(-docWidth / 2f, -docHeight / 2f)
-        matrix.postScale(scale, scale)
+        matrix.postScale(if (mirrored) -scale else scale, scale)
         matrix.postRotate(rotationDeg)
         matrix.postTranslate(tx, ty)
         matrix.invert(inverse)

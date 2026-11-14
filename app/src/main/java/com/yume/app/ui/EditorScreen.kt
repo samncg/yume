@@ -1,5 +1,9 @@
 package com.yume.app.ui
 
+import androidx.compose.foundation.gestures.awaitFirstDown
+
+import androidx.compose.foundation.gestures.awaitEachGesture
+
 import androidx.compose.ui.layout.positionInRoot
 
 import androidx.compose.ui.layout.layout
@@ -166,6 +170,9 @@ fun EditorScreen(
     // Where the canvas sits in the window: ColorDrop maps through it, and the
     // glass backdrop aligns the canvas proxy with it.
     val canvasOriginState = remember { mutableStateOf(Offset.Zero) }
+    // ColorDrop in progress: the floating colour dot and the live threshold.
+    var dropDot by remember { mutableStateOf<Offset?>(null) }
+    var dropTolerance by remember { mutableStateOf<Int?>(null) }
     var canvasOrigin by canvasOriginState
     val glassVersion = com.yume.app.engine.CanvasGlass.version.collectAsStateWithLifecycle()
     val glassBackdrop = remember { CanvasProxyBackdrop(glassVersion, canvasOriginState) }
@@ -223,8 +230,18 @@ fun EditorScreen(
                     },
                     onPanel = { id -> showPanel(if (panel == id) null else id) },
                     onAnchor = { x -> panelAnchorX = x },
-                    onColorDrop = { window ->
-                        session.colorDropAt(window.x - canvasOrigin.x, window.y - canvasOrigin.y)
+                    onColorDrop = object : ColorDropHandler {
+                        override fun dragging(window: Offset?, tolerance: Int?) {
+                            dropDot = window
+                            dropTolerance = tolerance
+                        }
+                        override fun drop(window: Offset) =
+                            session.colorDropAt(window.x - canvasOrigin.x, window.y - canvasOrigin.y)
+                        override fun begin(window: Offset) =
+                            session.colorDropBegin(window.x - canvasOrigin.x, window.y - canvasOrigin.y)
+                        override fun startTolerance(): Int = state.fillTolerance
+                        override fun adjust(tolerance: Int) = session.colorDropAdjust(tolerance)
+                        override fun end() = session.colorDropEnd()
                     }
                 )
                 }
@@ -361,15 +378,60 @@ fun EditorScreen(
             )
         }
 
+        // ColorDrop: the dragged colour follows the finger (lifted above it so
+        // it stays visible), with the live threshold while adjusting.
+        var overlayOrigin by remember { mutableStateOf(Offset.Zero) }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .onGloballyPositioned { overlayOrigin = it.positionInWindow() }
+        ) {
+            dropDot?.let { p ->
+                Column(
+                    Modifier.offset {
+                        IntOffset(
+                            (p.x - overlayOrigin.x - 60.dp.toPx()).roundToInt(),
+                            (p.y - overlayOrigin.y - 104.dp.toPx()).roundToInt()
+                        )
+                    }.width(120.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    val t = dropTolerance
+                    Text(
+                        text = if (t != null) "Threshold ${com.yume.app.engine.tolerancePercent(t)}%" else " ",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(if (t != null) Color(0xB3000000) else Color.Transparent)
+                            .padding(horizontal = 10.dp, vertical = 3.dp)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Box(
+                        Modifier
+                            .size(46.dp)
+                            .clip(CircleShape)
+                            .background(Color(state.color))
+                            .border(2.5.dp, Color.White, CircleShape)
+                    )
+                }
+            }
+        }
+
         // Long operations (a big undo, an adjustment on an 8K layer…) show a
         // small working card after a moment, so the app never looks frozen.
         // Any command or tool action on the render thread that runs past a
         // quarter second (fill, auto-select, shapes, undo, adjustments…).
         var showBusy by remember { mutableStateOf(false) }
+        var canCancel by remember { mutableStateOf(false) }
+        var cancelling by remember { mutableStateOf(false) }
         LaunchedEffect(session) {
             while (true) {
                 val b = session.workingMillis() >= 250L
                 if (b != showBusy) showBusy = b
+                val c = com.yume.app.engine.OpCancel.armed
+                if (c != canCancel) canCancel = c
+                if (!b) cancelling = false
                 delay(if (b) 50L else 90L)
             }
         }
@@ -390,9 +452,21 @@ fun EditorScreen(
                         .padding(horizontal = 28.dp, vertical = 18.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text("Working…", style = MaterialTheme.typography.titleSmall, color = YumeColors.text)
+                    Text(
+                        if (cancelling) "Cancelling…" else "Working…",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = YumeColors.text
+                    )
                     Spacer(Modifier.height(12.dp))
                     ProgressLine()
+                    if (canCancel && !cancelling) {
+                        Spacer(Modifier.height(14.dp))
+                        // Stops the operation; everything it changed is put back.
+                        SmallButton("Cancel") {
+                            cancelling = true
+                            com.yume.app.engine.OpCancel.requested = true
+                        }
+                    }
                 }
             }
         }
@@ -499,6 +573,7 @@ private fun PanelHost(
             onImport = onImport,
             onReference = onReference,
             onRemoveReference = if (hasReference) ({ controller.clearReference() }) else null,
+            onSettings = { SettingsHost.open = true },
             onExport = onExportDialog,
             onSave = { controller.save() },
             onCanvasCopy = { w, h, scale, center ->
@@ -521,7 +596,7 @@ private fun EditorTopBar(
     onTool: (Tool, PanelId?) -> Unit,
     onPanel: (PanelId) -> Unit,
     onAnchor: (Float) -> Unit = {},
-    onColorDrop: (Offset) -> Unit = {}
+    onColorDrop: ColorDropHandler? = null
 ) {
     // Floating glass capsules, grouped by intent: the document, then tools
     // that change what is there, then tools that put paint down, then layers
@@ -622,7 +697,7 @@ private fun EditorTopBar(
                                 onAnchor(chipX)
                                 onPanel(PanelId.Color)
                             },
-                            onDrop = onColorDrop
+                            dropHandler = onColorDrop
                         )
                     }
                 }
@@ -692,37 +767,96 @@ private fun CapsuleDivider() {
     )
 }
 
+/** What the colour chip tells the editor while it is dragged (ColorDrop). */
+interface ColorDropHandler {
+    /** The chip is being dragged to [window] (null: drag over); [tolerance] while adjusting. */
+    fun dragging(window: Offset?, tolerance: Int?)
+    /** Released without holding: a plain fill at [window]. */
+    fun drop(window: Offset)
+    /** Held still at [window]: fill now, then follow [adjust] until [end]. */
+    fun begin(window: Offset)
+    fun startTolerance(): Int
+    fun adjust(tolerance: Int)
+    fun end()
+}
+
 @Composable
 private fun ColorChip(
     color: Int,
     selected: Boolean,
     onClick: () -> Unit,
-    onDrop: (Offset) -> Unit = {}
+    dropHandler: ColorDropHandler? = null
 ) {
     // ColorDrop: drag the chip onto the canvas and release to fill the region
-    // under the finger. A tap still opens the colour panel.
+    // under the finger. Hold still before releasing to fill right away, then
+    // slide sideways to change the threshold live; lift to keep it. A tap
+    // still opens the colour panel.
     var origin by remember { mutableStateOf(Offset.Zero) }
-    var dragAt by remember { mutableStateOf<Offset?>(null) }
+    val handler = androidx.compose.runtime.rememberUpdatedState(dropHandler)
+    val tap = androidx.compose.runtime.rememberUpdatedState(onClick)
     Box(
         Modifier
             .size(40.dp)
             .clip(RoundedCornerShape(13.dp))
             .onGloballyPositioned { origin = it.positionInWindow() }
             .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { dragAt = origin + it },
-                    onDrag = { change, amount ->
-                        change.consume()
-                        dragAt = (dragAt ?: origin) + amount
-                    },
-                    onDragEnd = {
-                        dragAt?.let(onDrop)
-                        dragAt = null
-                    },
-                    onDragCancel = { dragAt = null }
-                )
-            }
-            .clickable(onClick = onClick),
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val start = origin + down.position
+                    var pos = start
+                    var dragging = false
+                    var holding = false
+                    var stillAt = start
+                    var stillSince = down.uptimeMillis
+                    var holdX = 0f
+                    var tol0 = 0
+                    var tol = 0
+                    val slop = viewConfiguration.touchSlop
+                    val stillRadius = 10.dp.toPx()
+                    val perFull = 260.dp.toPx()
+                    while (true) {
+                        val ev = withTimeoutOrNull(60L) { awaitPointerEvent() }
+                        if (ev == null) {
+                            // Resting: after a moment the drop happens here.
+                            val h = handler.value
+                            if (dragging && !holding && h != null &&
+                                android.os.SystemClock.uptimeMillis() - stillSince > COLOR_DROP_HOLD_MS
+                            ) {
+                                holding = true
+                                holdX = pos.x
+                                tol0 = h.startTolerance()
+                                tol = tol0
+                                h.begin(pos)
+                                h.dragging(pos, tol)
+                            }
+                            continue
+                        }
+                        val ch = ev.changes.firstOrNull { it.id == down.id } ?: ev.changes.first()
+                        if (!ch.pressed) break
+                        val p = origin + ch.position
+                        if (!dragging && (p - start).getDistance() > slop) dragging = true
+                        if (dragging) {
+                            ch.consume()
+                            pos = p
+                            if (holding) {
+                                tol = (tol0 + (p.x - holdX) / perFull * 255f).roundToInt().coerceIn(1, 255)
+                                handler.value?.adjust(tol)
+                            } else if ((p - stillAt).getDistance() > stillRadius) {
+                                stillAt = p
+                                stillSince = ch.uptimeMillis
+                            }
+                            handler.value?.dragging(pos, if (holding) tol else null)
+                        }
+                    }
+                    val h = handler.value
+                    when {
+                        !dragging -> tap.value()
+                        holding -> h?.end()
+                        else -> h?.drop(pos)
+                    }
+                    h?.dragging(null, null)
+                }
+            },
         contentAlignment = Alignment.Center
     ) {
         Box(
@@ -738,6 +872,9 @@ private fun ColorChip(
         )
     }
 }
+
+/** How long the dragged colour must rest before the drop happens in place. */
+private const val COLOR_DROP_HOLD_MS = 380L
 
 @Composable
 private fun TransformBar(
