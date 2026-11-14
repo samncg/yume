@@ -187,6 +187,12 @@ object YumeHarness {
                     out.append(scoreCancel(app))
                 } else if (only == "hist16k") {
                     out.append(scoreHistory16k(app))
+                } else if (only == "motionuser") {
+                    out.append(scoreMotionUser(app))
+                } else if (only == "make8k") {
+                    out.append(makeTest8k(app))
+                } else if (only == "motion8k") {
+                    out.append(scoreMotion8k(app))
                 } else if (only == "gpu") {
                     out.append(scoreGpu())
                 } else if (only == "stress16k" || only == "stress16kq") {
@@ -3766,6 +3772,235 @@ object YumeHarness {
     }
 
     /**
+     * Read-only: loads the user's 8K image project (never saved back, own
+     * tile cache) and builds the motion-blur preview on its top Image layer
+     * at 19 px / -5 degrees, saving the preview and the layer at preview size.
+     */
+    private fun scoreMotionUser(app: YumeApp): String {
+        val out = StringBuilder()
+        val id = "20dc8b68-315e-4a63-b5da-5e78c4e63a41"
+        val ps = app.projectStore
+        var cache: TileCache? = null
+        try {
+            val am = app.getSystemService(android.app.ActivityManager::class.java)
+            cache = TileCache.open(app.cacheDir, "harness-motionuser", TileCache.defaultBudget(am))
+            val loaded = ps.loadProject(id) ?: return "motionuser: load failed\n"
+            val engine = DrawingEngine(loaded.width, loaded.height)
+            engine.backgroundColor = loaded.background
+            for (dl in loaded.layers) {
+                val l = engine.newLayer(name = dl.name, bitmap = dl.bitmap, backingFile = dl.file)
+                l.adoptMask(dl.mask, dl.maskFile)
+                l.opacity = dl.opacity
+                l.blend = dl.blend
+                l.visible = dl.visible
+            }
+            val session = DrawingSession("mu", "MU", engine, History())
+            identityView(session, loaded.width, loaded.height)
+            val target = engine.layers.last { it.name == "Image" }
+            engine.selectLayer(target.id)
+            out.append("motionuser: ${loaded.width}x${loaded.height} layers=${engine.layers.size} target=${engine.layers.indexOf(target)} sparse=${target.tiles.isSparse} tileSize=${target.tiles.tileSize}\n")
+            session.chooseMotionAngle(-5f)
+            session.previewAdjustment(com.yume.app.engine.AdjustmentKind.MotionBlur, 0.2f)
+            session.runCommands()
+            session.consumePendingPreview()
+            val proxy = engine.preview?.proxy
+            if (proxy == null) return out.append("motionuser: NO PREVIEW\n").toString()
+            java.io.FileOutputStream(File(app.filesDir, "mu_gpu.png")).use { proxy.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            val small = Bitmap.createBitmap(proxy.width, proxy.height, Bitmap.Config.ARGB_8888)
+            val sc = android.graphics.Canvas(small)
+            sc.scale(proxy.width.toFloat() / loaded.width, proxy.height.toFloat() / loaded.height)
+            target.tiles.drawInto(sc, android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+            java.io.FileOutputStream(File(app.filesDir, "mu_layer.png")).use { small.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            // What the screen shows: the composite (full resolution, drawn
+            // scaled) and the mip, both with the preview in place.
+            // Frames the way the renderer runs them: non-blocking loads, the
+            // frame budget, eviction between frames.
+            run {
+                val c0 = cache!!
+                engine.priorityRect.set(0, 0, loaded.width, loaded.height)
+                var frames = 0
+                while (engine.hasDirty() && frames < 100000) {
+                    c0.adoptPrefetched()
+                    c0.blockingLoads = false
+                    try { engine.flush() } finally { c0.blockingLoads = true }
+                    c0.evictIfNeeded()
+                    frames++
+                }
+                out.append("motionuser: settled in $frames frames, cache=${c0.residentBytes() shr 20}MB\n")
+            }
+            val view = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888)
+            run {
+                val vc = android.graphics.Canvas(view)
+                vc.scale(1024f / loaded.width, 1024f / loaded.height)
+                engine.drawComposite(vc, Rect(0, 0, loaded.width, loaded.height))
+            }
+            java.io.FileOutputStream(File(app.filesDir, "mu_composite.png")).use { view.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            engine.enableMip()
+            var g = 0
+            while (engine.hasMipDirty && g++ < 100000) engine.updateMip()
+            run {
+                val vc = android.graphics.Canvas(view)
+                vc.drawColor(0, android.graphics.BlendMode.CLEAR)
+                vc.scale(1024f / loaded.width, 1024f / loaded.height)
+                engine.drawMip(vc)
+            }
+            java.io.FileOutputStream(File(app.filesDir, "mu_mip.png")).use { view.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            out.append("motionuser: proxy ${proxy.width}x${proxy.height} config=${proxy.config}\n")
+            session.cancelAdjustment()
+            session.runCommands()
+        } catch (t: Throwable) {
+            Log.e(TAG, "motionuser failed", t)
+            out.append("motionuser: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            cache?.close()
+        }
+        return out.toString()
+    }
+
+    /** Saves an 8K canvas with strokes, kept in the gallery for UI checks. */
+    private fun makeTest8k(app: YumeApp): String {
+        val size = 8192
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        val ps = app.projectStore
+        val project = ps.createProject("test-8k-motion (delete me)", size, size, BG)
+        var cache: TileCache? = null
+        try {
+            val am = app.getSystemService(android.app.ActivityManager::class.java)
+            cache = TileCache.open(app.cacheDir, project.id, TileCache.defaultBudget(am))
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("t8", "T8", engine, History())
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            val l = engine.layers.first()
+            engine.selectLayer(l.id)
+            session.color = 0xFF202020.toInt()
+            for (k in 0 until 6) {
+                val y = 1000f + k * 1200f
+                session.stroke(listOf(P(800f, y), P(4000f, y + 700f), P(7400f, y)))
+            }
+            session.color = 0xFFCC3344.toInt()
+            for (k in 0 until 6) {
+                val x = 1000f + k * 1200f
+                session.stroke(listOf(P(x, 600f), P(x + 500f, 4000f), P(x, 7600f)))
+            }
+            session.runCommands()
+            ps.saveProject(project.id, session.snapshotNow())
+            return "make8k: saved ${project.id}\n"
+        } finally {
+            cache?.close()
+            TileStoreConfig.useSparseLayers = oldS
+        }
+    }
+
+    /**
+     * The live GPU preview of sharpen / motion blur / blur at 8K against the
+     * CPU bake, scaled to the preview's size: mean difference, and PNGs of
+     * both in files/ for a look.
+     */
+    private fun scoreMotion8k(app: YumeApp): String {
+        val out = StringBuilder()
+        val size = 8192
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = 256
+        var cache: TileCache? = null
+        val ps = app.projectStore
+        val project = ps.createProject("harness-motion8k", size, size, BG)
+        try {
+            val am = app.getSystemService(android.app.ActivityManager::class.java)
+            cache = TileCache.open(app.cacheDir, project.id, TileCache.defaultBudget(am))
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("m8", "M8", engine, History())
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            // A picture imported the way the editor does (one big draw).
+            val pic = Bitmap.createBitmap(1600, 1000, Bitmap.Config.ARGB_8888)
+            run {
+                val pc = android.graphics.Canvas(pic)
+                val pp = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+                pp.shader = android.graphics.LinearGradient(0f, 0f, 1600f, 1000f, 0xFF88AACC.toInt(), 0xFF223344.toInt(), android.graphics.Shader.TileMode.CLAMP)
+                pc.drawRect(0f, 0f, 1600f, 1000f, pp)
+                pp.shader = null
+                val rnd = java.util.Random(3)
+                for (i in 0 until 60) {
+                    pp.color = rnd.nextInt() or 0xFF000000.toInt()
+                    pc.drawCircle(rnd.nextFloat() * 1600f, rnd.nextFloat() * 1000f, 20f + rnd.nextFloat() * 90f, pp)
+                }
+            }
+            session.addImageLayer(pic, "Image")
+            session.runCommands()
+            val l = engine.activeLayer!!
+            for ((kind, angle) in listOf(
+                com.yume.app.engine.AdjustmentKind.MotionBlur to -5f,
+                com.yume.app.engine.AdjustmentKind.MotionBlur to 0f,
+                com.yume.app.engine.AdjustmentKind.MotionBlur to 45f,
+                com.yume.app.engine.AdjustmentKind.Sharpen to 0f
+            )) {
+                session.chooseMotionAngle(angle)
+                session.previewAdjustment(kind, 0.2f)
+                session.runCommands()
+                session.consumePendingPreview()
+                val proxy = engine.preview?.proxy
+                if (proxy == null) {
+                    out.append("motion8k ${kind.label} $angle: NO PREVIEW\n")
+                    session.cancelAdjustment(); session.runCommands()
+                    continue
+                }
+                val pv = proxy.copy(Bitmap.Config.ARGB_8888, false)
+                session.commitAdjustment()
+                session.runCommands()
+                val small = Bitmap.createBitmap(pv.width, pv.height, Bitmap.Config.ARGB_8888)
+                val sc = android.graphics.Canvas(small)
+                sc.scale(pv.width.toFloat() / size, pv.height.toFloat() / size)
+                l.tiles.drawInto(sc, android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+                var sum = 0L
+                var cnt = 0L
+                var opaque = 0L
+                val ra = IntArray(pv.width)
+                val rb = IntArray(pv.width)
+                for (y in 0 until pv.height step 3) {
+                    pv.getPixels(ra, 0, pv.width, 0, y, pv.width, 1)
+                    small.getPixels(rb, 0, pv.width, 0, y, pv.width, 1)
+                    for (x in 0 until pv.width) {
+                        if ((ra[x] ushr 24) > 0) opaque++
+                        for (sh in intArrayOf(0, 8, 16, 24)) sum += kotlin.math.abs(((ra[x] ushr sh) and 255) - ((rb[x] ushr sh) and 255))
+                        cnt += 4
+                    }
+                }
+                val tag = "${kind.name.lowercase()}_${angle.toInt()}"
+                java.io.FileOutputStream(File(app.filesDir, "m8_${tag}_gpu.png")).use { pv.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                java.io.FileOutputStream(File(app.filesDir, "m8_${tag}_cpu.png")).use { small.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                out.append("motion8k ${kind.label} $angle: preview ${pv.width}x${pv.height} meanDiff=${"%.2f".format(sum.toDouble() / cnt)}/255 coveredPx=$opaque\n")
+                pv.recycle()
+                small.recycle()
+                session.undo()
+                session.runCommands()
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "motion8k failed", t)
+            out.append("motion8k: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
+        }
+        return out.toString()
+    }
+
+    /**
      * GPU filters against the CPU ones on a 4096 x 4096 painted proxy (the
      * blur preview's size for a 16K canvas): time and mean difference.
      */
@@ -3847,11 +4082,20 @@ object YumeHarness {
         val sampling = java.util.concurrent.atomic.AtomicBoolean(true)
         var javaPeak = 0L
         var nativePeak = 0L
+        val dumped = java.util.concurrent.atomic.AtomicBoolean(false)
         val sampler = Thread {
             while (sampling.get()) {
                 javaPeak = max(javaPeak, rt.totalMemory() - rt.freeMemory())
-                nativePeak = max(nativePeak, android.os.Debug.getNativeHeapAllocatedSize())
-                Thread.sleep(15)
+                val nh = android.os.Debug.getNativeHeapAllocatedSize()
+                nativePeak = max(nativePeak, nh)
+                // Who is allocating: every thread's stack, once, past 1.5 GB.
+                if (nh > 1536L * 1024L * 1024L && !dumped.getAndSet(true)) {
+                    for ((t, st) in Thread.getAllStackTraces()) {
+                        if (st.isEmpty()) continue
+                        Log.w(TAG, "spike ${nh shr 20}MB thread ${t.name}:\n" + st.take(18).joinToString("\n") { "    at $it" })
+                    }
+                }
+                Thread.sleep(5)
             }
         }.apply { isDaemon = true; start() }
         fun ms(t0: Long) = "%.0f".format((System.nanoTime() - t0) / 1e6)

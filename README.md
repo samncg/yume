@@ -703,8 +703,14 @@ formats.
 - Bucket fills work tile by tile for every colour and blend mode. A fill
   over a fragmented region (around noise or texture) used to become one
   gigantic clip path: 6.4 GB of native memory at 16K, now under 0.9 GB.
+  The flood fill behind the bucket and the magic wand builds its region in
+  bands of 64 rows merged pairwise; one path for the whole region could take
+  6 GB to turn into a region.
   A fully covered flat tile gets the exact blended colour as a shared solid.
-- The downscaled (mip) view refreshes at most 6 ms per frame and the tile
+- The downscaled (mip) view refreshes at most 6 ms per frame (a row cut short
+  resumes exactly where it stopped) and keeps showing its previous tiles
+  meanwhile, never falling back to a full-resolution redraw of the whole
+  canvas; the first build is done in one go. The tile
   cache writes a bounded number of tiles per frame until it is twice over
   budget, so a whole-canvas change at 16K catches up over a few seconds
   instead of freezing frames for seconds (worst frame 7.3 s → 0.3 s in the

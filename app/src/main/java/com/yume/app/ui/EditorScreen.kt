@@ -306,7 +306,11 @@ fun EditorScreen(
                                             .coerceIn(margin, (areaW - p.width - margin).coerceAtLeast(margin))
                                         layout(c.maxWidth, p.height) { p.place(x.roundToInt(), 0) }
                                     }
-                                    .padding(top = 8.dp)
+                                    // Clear of the gesture bar, so a tall
+                                    // panel's last row (Apply / Cancel) can
+                                    // always be scrolled into view.
+                                    .navigationBarsPadding()
+                                    .padding(top = 8.dp, bottom = 12.dp)
                                     .claimCanvasTouchesInside()
                             ) {
                                 PanelHost(

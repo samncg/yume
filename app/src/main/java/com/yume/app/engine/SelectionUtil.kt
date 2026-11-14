@@ -101,13 +101,38 @@ object SelectionUtil {
         }
 
         val p1 = System.nanoTime()
-        val region = Region()
-        val path = Path()
-        // Coalesce identical spans across consecutive rows into tall rectangles.
+        // Coalesce identical spans across consecutive rows into tall rectangles,
+        // a band of WAND_BAND_ROWS rows at a time: each band's path becomes a
+        // region on its own and the bands are merged at the end. One path for
+        // the whole canvas could hold millions of rectangles, and turning it
+        // into a region took gigabytes (a 16K fill around noise: 6 GB). Regions
+        // are canonical, so the result is the same set of pixels either way.
         // Marked runs are found a 64-pixel word at a time.
+        val path = Path()
+        val bands = ArrayList<Region>()
         val open = HashMap<Long, IntArray>()
         val touched = HashSet<Long>()
+        var bandTop = 0
+        fun closeRun(run: IntArray, endRow: Int) {
+            path.addRect(
+                (run[0] * step).toFloat(), (run[2] * step).toFloat(),
+                minOf(w0, run[1] * step).toFloat(), minOf(h0, endRow * step).toFloat(),
+                Path.Direction.CW
+            )
+        }
+        fun flushBand(endRow: Int) {
+            for (run in open.values) closeRun(run, endRow)
+            open.clear()
+            if (!path.isEmpty) {
+                val band = Region()
+                band.setPath(path, Region(0, bandTop * step, w0, minOf(h0, endRow * step)))
+                if (!band.isEmpty) bands.add(band)
+                path.rewind()
+            }
+            bandTop = endRow
+        }
         for (y in 0 until h) {
+            if (y - bandTop >= WAND_BAND_ROWS) flushBand(y)
             touched.clear()
             var x = 0
             while (true) {
@@ -115,42 +140,43 @@ object SelectionUtil {
                 if (start >= w) break
                 x = grid.markedRunEnd(start, y)
                 val spanKey = (start.toLong() shl 32) or (x.toLong() and 0xFFFFFFFFL)
-                if (open.containsKey(spanKey)) {
-                    touched.add(spanKey)
-                } else {
-                    open[spanKey] = intArrayOf(start, x, y)
-                    touched.add(spanKey)
-                }
+                if (!open.containsKey(spanKey)) open[spanKey] = intArrayOf(start, x, y)
+                touched.add(spanKey)
             }
             if (open.isNotEmpty()) {
-                val iterator = open.keys.iterator()
+                val iterator = open.entries.iterator()
                 while (iterator.hasNext()) {
-                    val spanKey = iterator.next()
-                    if (spanKey !in touched) {
-                        val run = open[spanKey] ?: continue
-                        path.addRect(
-                            (run[0] * step).toFloat(), (run[2] * step).toFloat(),
-                            minOf(w0, run[1] * step).toFloat(),
-                            minOf(h0, y * step).toFloat(),
-                            Path.Direction.CW
-                        )
+                    val e = iterator.next()
+                    if (e.key !in touched) {
+                        closeRun(e.value, y)
                         iterator.remove()
                     }
                 }
             }
         }
-        for (run in open.values) {
-            path.addRect(
-                (run[0] * step).toFloat(), (run[2] * step).toFloat(),
-                minOf(w0, run[1] * step).toFloat(), minOf(h0, h * step).toFloat(),
-                Path.Direction.CW
-            )
-        }
+        flushBand(h)
         val p2 = System.nanoTime()
-        region.setPath(path, Region(0, 0, w0, h0))
+        // Pairwise merge: each union touches a region about twice as big as
+        // the last, instead of re-copying the whole result once per band.
+        var level: List<Region> = bands
+        while (level.size > 1) {
+            val next = ArrayList<Region>((level.size + 1) / 2)
+            var i = 0
+            while (i < level.size) {
+                val a = level[i]
+                if (i + 1 < level.size) a.op(level[i + 1], Region.Op.UNION)
+                next.add(a)
+                i += 2
+            }
+            level = next
+        }
+        val region = level.firstOrNull() ?: Region()
         lastProfile = "flood=${(p1 - p0) / 1_000_000} spans=${(p2 - p1) / 1_000_000} setPath=${(System.nanoTime() - p2) / 1_000_000}"
         return region
     }
+
+    /** Grid rows per band when building a wand region (bounds its memory). */
+    private const val WAND_BAND_ROWS = 64
 
     /** Timing of the last wand (harness). */
     @Volatile var lastProfile: String = ""

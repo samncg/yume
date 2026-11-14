@@ -1008,3 +1008,18 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 #   frame 7.3 s -> 0.3 s, translucent 16K fill catch-up 321 s -> 23 s, undo of
 #   a 1024-tile blur streamed (344 MB on disk) and restores MATCH, reopen MATCH.
 # gpu: 4096^2 blur 96-111 ms GPU vs 10.5-12 s CPU, mean diff 0.49-0.99 / 255.
+
+# --- Preview strips fix, banded wand regions, bounded eviction (Nov 2026) ---
+# The zoomed-out view stays drawable while it refreshes (no fallback to a
+# full-resolution redraw, whose tile bitmaps could be reused before the GPU
+# uploaded them: previews at 8K showed one repeated strip); a mip row cut short
+# by the frame budget resumes where it stopped. Wand / bucket regions are built
+# in 64-row bands merged pairwise (one whole-canvas path took 6 GB to turn into
+# a region). Far-over-budget eviction writes a bounded number of tiles per
+# frame. Motion-blur direction refreshes the preview.
+# golden: dense PASS (both sizes); sparse vs dense diff lines byte-identical to
+#   the previous gate. features 30/30 MATCH x4. wand-stores PASS 36/36;
+#   wand-legacy-delta: the same 19 of 72 lines, byte-identical to the
+#   polish / performance gates. journal, png, cache-fail gates PASS.
+# stress16kq x2: native peak 826 / 819 MB (the intermittent 6.4 GB spike was
+#   Region.setPath in the wand), worst frame 0.16-0.46 s, reopen MATCH.

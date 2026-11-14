@@ -1721,7 +1721,11 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
             Spacer(Modifier.height(4.dp))
             YumeSlider(
                 value = (state.motionAngle + 90f) / 180f,
-                onChange = { session.chooseMotionAngle(it * 180f - 90f) },
+                onChange = {
+                    session.chooseMotionAngle(it * 180f - 90f)
+                    // The live preview follows the direction too.
+                    if (abs(amount) > 0.0001f) session.previewAdjustment(kind, amount)
+                },
                 label = "Direction",
                 valueLabel = "${state.motionAngle.roundToInt()}°",
                 min = 0f,
@@ -1733,7 +1737,8 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
         ) {
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "${kind.label} is applied when you press Apply.",
+                text = if (kind == AdjustmentKind.Noise) "Noise is applied when you press Apply."
+                else "The preview is approximate; Apply gives the exact result.",
                 style = MaterialTheme.typography.bodySmall,
                 color = YumeColors.textDim
             )

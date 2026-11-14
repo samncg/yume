@@ -222,7 +222,10 @@ class TileCache(
     fun evictIfFarOver() {
         if (++loadsSinceCheck < 16) return
         loadsSinceCheck = 0
-        if (residentBytes() > budgetBytes + budgetBytes / 4) evictTo(budgetBytes)
+        // Bounded writes (all of them only at twice the budget): this runs
+        // inside a frame's tile loads, where writing hundreds of dirty tiles
+        // at once was a 1.4 s frame.
+        if (residentBytes() > budgetBytes + budgetBytes / 4) evictTo(budgetBytes, OVER_DIRTY_WRITES)
     }
 
     /**

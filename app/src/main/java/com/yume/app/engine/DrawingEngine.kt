@@ -977,7 +977,15 @@ class DrawingEngine(val width: Int, val height: Int) {
         if (mipDirty.isEmpty) mipDirty.set(r) else mipDirty.union(r)
     }
 
-    val hasMipDirty: Boolean get() = !mipDirty.isEmpty
+    val hasMipDirty: Boolean get() = !mipDirty.isEmpty || mipRowRest != null
+
+    /**
+     * The rest of a mip row cut short by the frame budget, done first on the
+     * next call. Kept apart from [mipDirty]: merged into that one rectangle it
+     * covered the whole row again, so every frame redid the same first tiles
+     * and the refresh never got past them.
+     */
+    private var mipRowRest: Rect? = null
 
     /** Materialises the mip store (sparse compositing only). */
     fun enableMip() {
@@ -987,27 +995,61 @@ class DrawingEngine(val width: Int, val height: Int) {
                 solidTiles = true
             )
             mipDirty.set(0, 0, width, height)
+            mipBuilt = false
         }
     }
 
     /** True when the whole document is covered by the current mip. */
-    fun mipReady(): Boolean = mipTiles != null && mipDirty.isEmpty
+    fun mipReady(): Boolean = mipTiles != null && mipDirty.isEmpty && mipRowRest == null
+
+    /** Set once the mip has been complete: from then on it is always drawable. */
+    private var mipBuilt = false
+
+    /**
+     * True when the mip can be drawn: complete once, then refreshed a few tiles
+     * per frame, showing the previous version of a tile until its turn. The
+     * screen must not fall back to the full-resolution tiles meanwhile: at
+     * fit-to-screen that is ~1000 tiles a frame, loaded on the spot, and under
+     * memory pressure a tile bitmap could be reused for another tile before
+     * the GPU had uploaded it (every tile showed the same strip).
+     */
+    fun mipDrawable(): Boolean = mipTiles != null && (mipBuilt || mipReady())
 
     /**
      * Rebuilds the mip tiles whose document region changed since the last call.
      * Each tile is a fresh downscale of the document region it covers, so a
      * partial update produces the same result as a full rebuild.
      */
-    fun updateMip(budgetNs: Long = Long.MAX_VALUE): Boolean {
+    fun updateMip(budgetNs0: Long = Long.MAX_VALUE): Boolean {
         val st = mipTiles ?: return false
-        if (mipDirty.isEmpty) return false
-        val doc = Rect(mipDirty)
-        mipDirty.setEmpty()
+        if (mipDirty.isEmpty && mipRowRest == null) return false
+        // The first build is done in one go (there is nothing to show yet).
+        val budgetNs = if (mipBuilt) budgetNs0 else Long.MAX_VALUE
         val t0 = System.nanoTime()
+        mipRowRest?.let { rest ->
+            mipRowRest = null
+            if (!mipPass(st, rest, t0, budgetNs)) return true
+        }
+        if (!mipDirty.isEmpty) {
+            val doc = Rect(mipDirty)
+            mipDirty.setEmpty()
+            if (!mipPass(st, doc, t0, budgetNs)) return true
+        }
+        mipBuilt = true
+        return true
+    }
+
+    /**
+     * Rebuilds the mip tiles over [doc]. False when the frame budget ran out:
+     * the rest of the current row is then in [mipRowRest] and the rows below
+     * are back in [mipDirty].
+     */
+    private fun mipPass(st: SparseTileStore, doc: Rect, t0: Long, budgetNs: Long): Boolean {
         val ts = st.tileSize
         val span = ts * mipScale
         val patch = mipPatchBitmap(span)
         val src = Rect()
+        var done = 0
         for (mty in doc.top / span..(doc.bottom - 1) / span) {
             for (mtx in doc.left / span..(doc.right - 1) / span) {
                 val x0 = mtx * span
@@ -1016,14 +1058,14 @@ class DrawingEngine(val width: Int, val height: Int) {
                 val y1 = min(height, y0 + span)
                 if (x1 <= x0 || y1 <= y0) continue
                 if (x1 <= doc.left || x0 >= doc.right || y1 <= doc.top || y0 >= doc.bottom) continue
-                if (budgetNs != Long.MAX_VALUE && System.nanoTime() - t0 > budgetNs) {
-                    // Out of frame time (a 16K fill or big texture dirties
-                    // thousands of mip sources): the rest waits for the next
-                    // frames instead of stalling this one.
-                    mipDirtyUnion(Rect(max(x0, doc.left), max(y0, doc.top), doc.right, min(y1, doc.bottom)))
+                // Out of frame time (at least one tile per call, so it always
+                // advances): the rest waits for the next frames.
+                if (done > 0 && budgetNs != Long.MAX_VALUE && System.nanoTime() - t0 > budgetNs) {
+                    mipRowRest = Rect(max(x0, doc.left), max(y0, doc.top), doc.right, min(y1, doc.bottom))
                     if (y1 < doc.bottom) mipDirtyUnion(Rect(doc.left, y1, doc.right, doc.bottom))
-                    return true
+                    return false
                 }
+                done++
                 src.set(x0, y0, x1, y1)
                 val mx0 = mtx * ts
                 val my0 = mty * ts

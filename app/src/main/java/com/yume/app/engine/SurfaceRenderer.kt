@@ -232,7 +232,7 @@ class SurfaceRenderer(
         if (engine.compositeIsSparse) {
             engine.enableMip()
             if (engine.hasMipDirty) engine.updateMip(MIP_FRAME_BUDGET_NS)
-            if (engine.mipReady()) {
+            if (engine.mipDrawable()) {
                 engine.drawMip(c)
             } else {
                 glassViewport.set(documentViewport(session.view, engine.width, engine.height))
@@ -338,7 +338,7 @@ class SurfaceRenderer(
                         engine.updateMip(MIP_FRAME_BUDGET_NS)
                         mipCarry = engine.hasMipDirty
                     }
-                    if (engine.mipReady()) engine.drawMip(canvas)
+                    if (engine.mipDrawable()) engine.drawMip(canvas)
                     else engine.drawComposite(canvas, rect)
                 } else {
                     engine.drawComposite(canvas, rect)
