@@ -19,6 +19,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -365,6 +366,21 @@ class DrawingSession(
 
     /** 0 = none, 1 = vertical axis, 2 = horizontal axis. */
     private var draggingGuide = 0
+    /** Where a dragged guide / handle was, to put it back on a cancel. */
+    private var dragRestoreX = 0f
+    private var dragRestoreY = 0f
+    private var transformDragStart: android.graphics.Matrix? = null
+    /** Fill / text: the touch that lands, acted on when it lifts. */
+    private var tapPending = false
+    private var tapX = 0f
+    private var tapY = 0f
+
+    private enum class GestureKind { Undecided, View, Content }
+    /** How the current two-finger gesture is being read (transform tool). */
+    private var gestureKind = GestureKind.Undecided
+    private var gesturePan = 0f
+    private var gestureScale = 1f
+    private var gestureTurn = 0f
 
     private var draggingTransform = false
     private var dragLastDocX = 0f
@@ -524,6 +540,9 @@ class DrawingSession(
 
     val transformActive: Boolean get() = transform != null
 
+    /** The live transform's matrix values (harness checks), or null. */
+    fun transformValues(): FloatArray? = transform?.let { t -> FloatArray(9).also { t.matrix.getValues(it) } }
+
     private fun presetsOf(category: BrushCategory): List<BrushPreset> {
         val filtered = presets.filter { it.category == category }
         return filtered.ifEmpty { presets }
@@ -606,11 +625,16 @@ class DrawingSession(
                     tryGuideDrag(doc[0], doc[1]) -> Unit
                     tool == Tool.Selection -> beginSelectionOrMove(doc[0], doc[1])
                     tool == Tool.Transform -> beginTransformDrag(doc[0], doc[1])
-                    tool == Tool.Fill -> fillAtInternal(doc[0], doc[1], color, false)
+                    // Fill and text act when the touch lifts: a touch that
+                    // turns into a two-finger pan never fills or places text.
+                    tool == Tool.Fill || tool == Tool.Text -> {
+                        tapPending = true
+                        tapX = doc[0]
+                        tapY = doc[1]
+                    }
                     tool == Tool.Gradient -> gradientGuide = floatArrayOf(doc[0], doc[1], doc[0], doc[1])
                     tool == Tool.Shape -> beginShape(doc[0], doc[1], event.pressure)
                     tool == Tool.Liquify -> beginLiquify(doc[0], doc[1])
-                    tool == Tool.Text -> textRequest.value = floatArrayOf(doc[0], doc[1])
                     else -> beginStroke(doc[0], doc[1], event.pressure, event.tilt, event.eraserButton)
                 }
                 true
@@ -693,6 +717,11 @@ class DrawingSession(
             }
 
             is InputEvent.Up -> {
+                if (tapPending) {
+                    tapPending = false
+                    if (tool == Tool.Fill) fillAtInternal(tapX, tapY, color, false)
+                    else if (tool == Tool.Text) textRequest.value = floatArrayOf(tapX, tapY)
+                }
                 val guide = gradientGuide
                 if (tool == Tool.Gradient && guide != null) {
                     gradientGuide = null
@@ -724,9 +753,39 @@ class DrawingSession(
 
             is InputEvent.Gesture -> {
                 val t = transform
-                if (t != null) {
-                    view.toDocument(event.focusX, event.focusY, doc)
-                    t.scaleRotate(doc[0], doc[1], event.scaleFactor, event.angleDelta)
+                if (event.first) {
+                    gestureKind = GestureKind.Undecided
+                    gesturePan = 0f
+                    gestureScale = 1f
+                    gestureTurn = 0f
+                }
+                if (t != null && gestureKind != GestureKind.View) {
+                    // Transform: two fingers pan the view like everywhere else.
+                    // Only a gesture that is clearly a pinch or a twist before
+                    // it travels scales / rotates the content.
+                    gesturePan += hypot(event.panX, event.panY)
+                    gestureScale *= event.scaleFactor
+                    gestureTurn += event.angleDelta
+                    if (gestureKind == GestureKind.Undecided) {
+                        if (abs(ln(gestureScale.coerceAtLeast(0.01f))) > TRANSFORM_PINCH_LOG || abs(gestureTurn) > TRANSFORM_TWIST_DEG) {
+                            gestureKind = GestureKind.Content
+                            view.toDocument(event.focusX, event.focusY, doc)
+                            // Catch up on what the fingers did while undecided.
+                            t.scaleRotate(doc[0], doc[1], gestureScale, gestureTurn)
+                        } else if (gesturePan > TRANSFORM_PAN_PX) {
+                            gestureKind = GestureKind.View
+                        }
+                        if (event.panX != 0f || event.panY != 0f) {
+                            view.applyGesture(event.focusX, event.focusY, 1f, 0f, event.panX, event.panY)
+                        }
+                    } else {
+                        view.toDocument(event.focusX, event.focusY, doc)
+                        t.scaleRotate(doc[0], doc[1], event.scaleFactor, event.angleDelta)
+                        if (event.panX != 0f || event.panY != 0f) {
+                            view.applyGesture(event.focusX, event.focusY, 1f, 0f, event.panX, event.panY)
+                        }
+                    }
+                    requestState()
                 } else {
                     view.applyGesture(
                         event.focusX, event.focusY,
@@ -794,8 +853,39 @@ class DrawingSession(
                 }
                 shapeDragging = false
                 shapePreview = null
-                // A liquify drag keeps what it did so far, as one undo step.
-                if (liquify.active) liquify.end()?.let { history.push(it) }
+                // A touch that became a two-finger gesture leaves no trace:
+                // liquify, a moved selection or transform, dragged guides and
+                // pending taps are all put back as they were.
+                if (liquify.active) liquify.end()?.let { action ->
+                    action.undo(engine)
+                    history.discard(action)
+                }
+                tapPending = false
+                gradientGuide = null
+                if (movingSelection || autoSelectCanMove) {
+                    selectionMoveBase?.let { engine.setSelection(Region(it)) }
+                    movingSelection = false
+                    selectionMoveBase = null
+                }
+                if (draggingTransform) {
+                    transformDragStart?.let { transform?.restoreMatrix(it) }
+                }
+                transformDragStart = null
+                if (draggingHandle != NO_HANDLE) {
+                    if (draggingHandle == CENTER_HANDLE) {
+                        engine.symmetryXPos = dragRestoreX
+                        engine.symmetryYPos = dragRestoreY
+                    } else {
+                        engine.guides.moveHandle(draggingHandle, dragRestoreX, dragRestoreY)
+                    }
+                    draggingHandle = NO_HANDLE
+                }
+                if (draggingGuide != 0) {
+                    engine.symmetryXPos = dragRestoreX
+                    engine.symmetryYPos = dragRestoreY
+                    draggingGuide = 0
+                    touchProperties()
+                }
                 // The gesture turned into a multi-touch pan/zoom: drop the
                 // pending magic wand instead of selecting under the fingers.
                 autoSelectPending = false
@@ -877,6 +967,13 @@ class DrawingSession(
             if (d <= bestD) { bestD = d; best = CENTER_HANDLE }
         }
         draggingHandle = best
+        if (best == CENTER_HANDLE) {
+            dragRestoreX = engine.symmetryXPos
+            dragRestoreY = engine.symmetryYPos
+        } else if (best != NO_HANDLE) {
+            dragRestoreX = g.handleX(best)
+            dragRestoreY = g.handleY(best)
+        }
         return best != NO_HANDLE
     }
 
@@ -997,6 +1094,8 @@ class DrawingSession(
             return false
         }
         val threshold = 30f / max(view.scale, 0.0001f)
+        dragRestoreX = engine.symmetryXPos
+        dragRestoreY = engine.symmetryYPos
         if (engine.symmetryX && abs(x - engine.symmetryXPos) <= threshold) {
             draggingGuide = 1
             return true
@@ -1518,6 +1617,7 @@ class DrawingSession(
         draggingTransform = true
         dragLastDocX = x
         dragLastDocY = y
+        transformDragStart = android.graphics.Matrix(transform!!.matrix)
     }
 
     private fun startTransform() {
@@ -3467,6 +3567,15 @@ private const val MORPH_POINTS = 160
 private const val MORPH_MS = 240L
 /** Liquify modes repeat this often while the pen rests. */
 private const val LIQUIFY_HOLD_MS = 33L
+
+/**
+ * Transform tool: a two-finger gesture scales / rotates the content only when
+ * it pinches by ~7% or twists by 8 degrees before it has panned 48 px;
+ * otherwise it moves the view.
+ */
+private const val TRANSFORM_PINCH_LOG = 0.07f
+private const val TRANSFORM_TWIST_DEG = 8f
+private const val TRANSFORM_PAN_PX = 48f
 
 /** Largest wand / paint bucket tolerance: a full channel difference. */
 const val TOLERANCE_MAX = 255

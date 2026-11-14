@@ -439,6 +439,9 @@ class History(
         onChanged?.invoke()
     }
 
+    /** Frees an action that was never pushed (a cancelled edit). */
+    fun discard(action: HistoryAction) = action.releaseBitmaps()
+
     private fun HistoryAction.releaseBitmaps() {
         when (this) {
             is PixelAction -> {

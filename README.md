@@ -137,6 +137,13 @@ Zoom, rotation and position are pivot-correct: the point between your fingers
 stays under your fingers. QuickShape and the eyedropper can each be turned off
 in the Actions panel.
 
+A two-finger pan never touches the drawing, whatever tool is active. A lone
+finger reaches the tool about a tenth of a second after it lands (its path is
+replayed, nothing is lost), so a second finger arriving in that time makes it
+a pan from the start; a later second finger undoes whatever the first one had
+begun (stroke, liquify, selection move, transform drag, guide drag). The paint
+bucket and text tool act when the touch lifts. A stylus is never held back.
+
 ---
 
 ## Brush Studio
@@ -305,7 +312,9 @@ The transform tool moves, scales and rotates the active selection, or the
 active layer when nothing is selected.
 
 - **Drag** to move.
-- **Pinch** to scale and rotate.
+- **Pinch** or **twist** with two fingers to scale and rotate. A two-finger
+  gesture that starts as a pan moves the view instead, as everywhere else, and
+  never nudges the content.
 - **Flip horizontal** and **flip vertical** buttons in the transform bar.
 - **Confirm** commits everything as a single undo step; **cancel** restores the
   previous state.

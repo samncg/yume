@@ -44,9 +44,21 @@ class CanvasView(
 
     private var renderer: SurfaceRenderer? = null
 
-    private enum class Mode { None, Stroke, Selection, Transform, Pick }
+    private enum class Mode { None, Pending, Stroke, Selection, Transform, Pick }
 
     private var mode = Mode.None
+
+    /*
+     * A finger that lands alone may be the first half of a two-finger pan.
+     * Its events are held for a moment ([FINGER_COMMIT_MS]) and only then
+     * replayed to the tool; a second finger in that window drops them, so the
+     * tool never sees the touch at all. A stylus is never held back.
+     */
+    private var pendingMode = Mode.None
+    private val pendingEvents = ArrayList<InputEvent>()
+    private var commitAction: Runnable? = null
+    /** The next gesture event starts a new multi-finger gesture. */
+    private var gestureFresh = false
     private var activePointerId = -1
     private var twoFinger = false
     /** A stylus is currently in contact — fingers are treated as palms. */
@@ -181,28 +193,61 @@ class CanvasView(
 
         val barrel = (event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
 
-        when {
-            session.tool == Tool.Selection -> {
-                mode = Mode.Selection
-                pushDown(event, 0, barrel)
-            }
-            session.tool == Tool.Transform -> {
-                mode = Mode.Transform
-                pushDown(event, 0, barrel)
-            }
-            !stylus && !session.fingerPaint -> {
-                mode = Mode.None
-                twoFinger = true
-                rebaseGesture(event, -1)
-            }
-            else -> {
-                mode = Mode.Stroke
-                pushDown(event, 0, barrel)
-                // Holding still picks a colour only with the painting tools:
-                // liquify, shapes and the rest use a resting pen themselves.
-                if (session.tool in EYEDROPPER_TOOLS) scheduleLongPress()
-            }
+        val target = when {
+            session.tool == Tool.Selection -> Mode.Selection
+            session.tool == Tool.Transform -> Mode.Transform
+            !stylus && !session.fingerPaint -> Mode.None
+            else -> Mode.Stroke
         }
+        if (target == Mode.None) {
+            mode = Mode.None
+            twoFinger = true
+            rebaseGesture(event, -1)
+            return
+        }
+        val down = downEvent(event, 0, barrel)
+        if (stylus) {
+            mode = target
+            session.pushInput(down)
+            startTimers()
+        } else {
+            mode = Mode.Pending
+            pendingMode = target
+            pendingEvents.clear()
+            pendingEvents.add(down)
+            val action = Runnable { commitPending() }
+            commitAction = action
+            handler.postDelayed(action, FINGER_COMMIT_MS)
+        }
+    }
+
+    /** Timers that run while a single pointer is on a tool. */
+    private fun startTimers() {
+        // Holding still picks a colour only with the painting tools: liquify,
+        // shapes and the rest use a resting pen themselves.
+        if (mode == Mode.Stroke && session.tool in EYEDROPPER_TOOLS) {
+            val elapsed = android.os.SystemClock.uptimeMillis() - downTime
+            scheduleLongPress((EYEDROPPER_HOLD_MS - elapsed).coerceAtLeast(0L))
+        }
+    }
+
+    /** The held-back finger is a real single touch: hand it to the tool. */
+    private fun commitPending() {
+        commitAction?.let { handler.removeCallbacks(it) }
+        commitAction = null
+        if (mode != Mode.Pending) return
+        mode = pendingMode
+        for (e in pendingEvents) session.pushInput(e)
+        pendingEvents.clear()
+        startTimers()
+    }
+
+    /** A second finger arrived in time: the held-back touch never happened. */
+    private fun dropPending() {
+        commitAction?.let { handler.removeCallbacks(it) }
+        commitAction = null
+        pendingEvents.clear()
+        if (mode == Mode.Pending) mode = Mode.None
     }
 
     private fun onPointerDown(event: MotionEvent) {
@@ -214,12 +259,16 @@ class CanvasView(
         maxFingers = max(maxFingers, event.pointerCount)
         cancelScheduledLongPress()
         cancelQuickShape()
-        if (mode == Mode.Stroke || mode == Mode.Selection) {
-            // Roll back whatever single-pointer action had started.
+        if (mode == Mode.Pending) {
+            dropPending()
+        } else if (mode == Mode.Stroke || mode == Mode.Selection || mode == Mode.Transform || mode == Mode.Pick) {
+            // A slower second finger: roll back whatever the first one started.
             session.pushInput(InputEvent.CancelStroke)
-            mode = Mode.None
+            if (mode == Mode.Pick) session.pushInput(InputEvent.PickEnd)
         }
+        mode = Mode.None
         twoFinger = true
+        gestureFresh = true
         rebaseGesture(event, -1)
         if (event.pointerCount == 2 && maxFingers == 2) scheduleMenuHold() else cancelMenuHold()
     }
@@ -242,23 +291,8 @@ class CanvasView(
         if (index < 0) return
 
         when (mode) {
-            Mode.Stroke, Mode.Selection, Mode.Transform -> {
-                val count = event.historySize + 1
-                val xs = FloatArray(count)
-                val ys = FloatArray(count)
-                val ps = FloatArray(count)
-                for (h in 0 until event.historySize) {
-                    xs[h] = event.getHistoricalX(index, h)
-                    ys[h] = event.getHistoricalY(index, h)
-                    ps[h] = pressureAt(event, index)
-                }
-                xs[count - 1] = event.x
-                ys[count - 1] = event.y
-                ps[count - 1] = pressureAt(event, index)
-                session.pushInput(
-                    InputEvent.Move(activePointerId, xs, ys, ps, tiltAt(event, index), orientationAt(event, index))
-                )
-            }
+            Mode.Stroke, Mode.Selection, Mode.Transform -> session.pushInput(moveEvent(event, index))
+            Mode.Pending -> pendingEvents.add(moveEvent(event, index))
             Mode.Pick -> session.pushInput(InputEvent.PickMove(event.x, event.y))
             Mode.None -> Unit
         }
@@ -277,6 +311,8 @@ class CanvasView(
     }
 
     private fun onUp(event: MotionEvent) {
+        // A quick single tap (fill, text, auto-select) lifts inside the hold.
+        if (mode == Mode.Pending) commitPending()
         cancelScheduledLongPress()
         cancelQuickShape()
         cancelMenuHold()
@@ -292,7 +328,7 @@ class CanvasView(
                 Mode.Stroke, Mode.Selection, Mode.Transform ->
                     session.pushInput(InputEvent.Up(activePointerId))
                 Mode.Pick -> session.pushInput(InputEvent.PickEnd)
-                Mode.None -> Unit
+                Mode.Pending, Mode.None -> Unit
             }
         }
         mode = Mode.None
@@ -303,6 +339,7 @@ class CanvasView(
     }
 
     private fun cancelEverything() {
+        dropPending()
         cancelScheduledLongPress()
         cancelQuickShape()
         cancelMenuHold()
@@ -315,21 +352,34 @@ class CanvasView(
         stylusActive = false
     }
 
-    private fun pushDown(event: MotionEvent, index: Int, barrel: Boolean) {
-        session.pushInput(
-            InputEvent.Down(
-                pointerId = activePointerId,
-                x = event.getX(index),
-                y = event.getY(index),
-                pressure = pressureAt(event, index),
-                tilt = tiltAt(event, index),
-                stylus = isStylus(event),
-                eraserButton = barrel
-            )
+    private fun downEvent(event: MotionEvent, index: Int, barrel: Boolean): InputEvent =
+        InputEvent.Down(
+            pointerId = activePointerId,
+            x = event.getX(index),
+            y = event.getY(index),
+            pressure = pressureAt(event, index),
+            tilt = tiltAt(event, index),
+            stylus = isStylus(event),
+            eraserButton = barrel
         )
+
+    private fun moveEvent(event: MotionEvent, index: Int): InputEvent {
+        val count = event.historySize + 1
+        val xs = FloatArray(count)
+        val ys = FloatArray(count)
+        val ps = FloatArray(count)
+        for (h in 0 until event.historySize) {
+            xs[h] = event.getHistoricalX(index, h)
+            ys[h] = event.getHistoricalY(index, h)
+            ps[h] = pressureAt(event, index)
+        }
+        xs[count - 1] = event.getX(index)
+        ys[count - 1] = event.getY(index)
+        ps[count - 1] = pressureAt(event, index)
+        return InputEvent.Move(activePointerId, xs, ys, ps, tiltAt(event, index), orientationAt(event, index))
     }
 
-    private fun scheduleLongPress() {
+    private fun scheduleLongPress(delay: Long = EYEDROPPER_HOLD_MS) {
         val action = Runnable {
             if (mode == Mode.Stroke && moved < 9f * density) {
                 session.pushInput(InputEvent.CancelStroke)
@@ -339,7 +389,7 @@ class CanvasView(
             }
         }
         longPressAction = action
-        handler.postDelayed(action, EYEDROPPER_HOLD_MS)
+        handler.postDelayed(action, delay)
     }
 
     private fun cancelScheduledLongPress() {
@@ -444,9 +494,11 @@ class CanvasView(
                 scaleFactor = factor.coerceIn(0.25f, 4f),
                 angleDelta = delta,
                 panX = panX,
-                panY = panY
+                panY = panY,
+                first = gestureFresh
             )
         )
+        gestureFresh = false
 
         gestureFocusX = fx
         gestureFocusY = fy
@@ -574,6 +626,13 @@ private const val MENU_HOLD_TURN_DEG = 6.0
 /** How long the pen rests before QuickShape snaps, and how still it must be. */
 private const val QUICKSHAPE_HOLD_MS = 600L
 private const val QUICKSHAPE_SLOP_DP = 6f
+/**
+ * How long a lone finger is held back before it reaches the tool: two-finger
+ * pans land their fingers well within this, a finger stroke loses nothing
+ * (its points are replayed).
+ */
+private const val FINGER_COMMIT_MS = 110L
+
 /** Holding a stroke this still for this long picks a colour instead. */
 private const val EYEDROPPER_HOLD_MS = 750L
 

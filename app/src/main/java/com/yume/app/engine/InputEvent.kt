@@ -37,7 +37,9 @@ sealed interface InputEvent {
         val scaleFactor: Float,
         val angleDelta: Float,
         val panX: Float,
-        val panY: Float
+        val panY: Float,
+        /** First event of a new multi-finger gesture. */
+        val first: Boolean = false
     ) : InputEvent
 
     /** Multi-finger tap: 2 = undo, 3 = redo, 4 = toggle interface. */

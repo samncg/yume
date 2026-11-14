@@ -324,6 +324,12 @@ class TransformSession(
         if (needsRebuild) rebuild()
     }
 
+    /** Puts the transform back exactly as [m] (a cancelled drag). */
+    fun restoreMatrix(m: android.graphics.Matrix) {
+        matrix.set(m)
+        needsRebuild = true
+    }
+
     fun translate(dx: Float, dy: Float) {
         matrix.postTranslate(dx, dy)
         needsRebuild = true

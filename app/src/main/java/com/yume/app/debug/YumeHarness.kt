@@ -156,6 +156,8 @@ object YumeHarness {
                     out.append(scoreAcceptance8k(app))
                 } else if (only == "fill8k") {
                     out.append(scoreFill8k(app))
+                } else if (only == "pancancel") {
+                    out.append(scorePanCancel())
                 } else if (only == "pickfresh") {
                     out.append(line(scorePickFresh()))
                 } else if (only == "wand") {
@@ -3326,6 +3328,98 @@ object YumeHarness {
         return out.toString()
     }
 
+
+    /**
+     * Two-finger pan over every tool: one finger lands and drags, a second
+     * finger turns it into a pan (the view's CancelStroke), then the fingers
+     * pan and pinch a little. Nothing in the document may change: layers,
+     * selection, guides, symmetry, transform, history, pending text.
+     */
+    private fun scorePanCancel(): String {
+        val out = StringBuilder()
+        var bad = 0
+        fun scenario(name: String, setup: (DrawingSession, DrawingEngine) -> Unit) {
+            val size = 512
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = 0xFFFFFFFF.toInt()
+            val session = DrawingSession("pc", "PC", engine, History())
+            identityView(session, size, size)
+            session.presets = presets
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            val l = engine.newLayer("Ink")
+            engine.selectLayer(l.id)
+            pick(session, hard, BrushCategory.Brush)
+            session.runCommands()
+            session.color = 0xFF2040C0.toInt()
+            session.stroke(listOf(P(60f, 60f), P(450f, 300f), P(120f, 460f)))
+            setup(session, engine)
+            session.runCommands()
+            session.runInput()
+            fun state(): String {
+                val sel = engine.selection?.bounds?.toShortString() ?: "none"
+                val tv = session.transformValues()?.joinToString(",") ?: "none"
+                return engine.layers.joinToString("|") { hashLayer(it) } +
+                    " sel=$sel guides=${engine.guides.toJson()} sym=${engine.symmetryXPos},${engine.symmetryYPos}" +
+                    " t=$tv hist=${session.history.totalCount} text=${session.textRequest.value?.joinToString()}"
+            }
+            val before = state()
+            session.pushInput(InputEvent.Down(0, 200f, 200f, 1f, 0f, false, false))
+            session.runInput()
+            for (k in 1..6) {
+                session.pushInput(InputEvent.Move(0, floatArrayOf(200f + k * 9f), floatArrayOf(200f + k * 4f), floatArrayOf(1f), 0f))
+                session.runInput()
+            }
+            session.tickFrame()
+            session.pushInput(InputEvent.CancelStroke)
+            session.pushInput(InputEvent.Gesture(256f, 256f, 1.01f, 0.6f, 30f, 5f, first = true))
+            session.pushInput(InputEvent.Gesture(256f, 256f, 1f, 0f, 40f, 0f))
+            session.runInput()
+            session.runCommands()
+            engine.flush()
+            val after = state()
+            val ok = before == after
+            if (!ok) bad++
+            out.append("pan-cancel $name: ${if (ok) "ok" else "CHANGED\n    before=$before\n    after =$after"}\n")
+        }
+        scenario("brush") { _, _ -> }
+        scenario("eraser") { s, _ -> pick(s, eraser, BrushCategory.Eraser) }
+        scenario("smudge") { s, _ -> pick(s, smudge, BrushCategory.Smudge) }
+        scenario("fill") { s, _ -> s.chooseTool(Tool.Fill) }
+        scenario("gradient") { s, _ -> s.chooseTool(Tool.Gradient) }
+        scenario("shape") { s, _ -> s.chooseTool(Tool.Shape) }
+        for (m in com.yume.app.engine.LiquifyMode.entries) {
+            scenario("liquify-${m.name}") { s, _ -> s.chooseTool(Tool.Liquify); s.setLiquifyMode(m) }
+        }
+        scenario("text") { s, _ -> s.chooseTool(Tool.Text) }
+        for (shape in SelectionShape.entries) {
+            scenario("selection-${shape.name}") { s, _ -> s.chooseTool(Tool.Selection); s.chooseSelectionShape(shape) }
+        }
+        scenario("selection-move") { s, e ->
+            e.applySelection(android.graphics.Region(150, 150, 300, 300), SelectionOp.Replace)
+            s.chooseTool(Tool.Selection)
+            s.chooseSelectionShape(SelectionShape.Rectangle)
+        }
+        scenario("selection-auto-move") { s, e ->
+            e.applySelection(android.graphics.Region(150, 150, 300, 300), SelectionOp.Replace)
+            s.chooseTool(Tool.Selection)
+            s.chooseSelectionShape(SelectionShape.Automatic)
+        }
+        scenario("transform") { s, _ -> s.chooseTool(Tool.Transform) }
+        scenario("symmetry-line") { s, e ->
+            e.symmetryX = true
+            e.symmetryXPos = 200f
+        }
+        scenario("guide-handle") { s, e ->
+            s.setGuideMode(com.yume.app.engine.GuideMode.Perspective)
+            s.setVanishingPoints(1)
+            e.guides.vpX[0] = 200f
+            e.guides.vpY[0] = 200f
+            s.setGuideEditing(true)
+        }
+        out.insert(0, "pan-cancel: ${if (bad == 0) "PASS" else "FAIL ($bad changed)"}\n")
+        return out.toString()
+    }
 
     /**
      * Eyedropper after a held pen: a white soft stroke starts on black, the
