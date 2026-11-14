@@ -192,6 +192,14 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     )
                 }
                 Spacer(Modifier.weight(1f))
+                PressableRow(onClick = { GuideHost.open = true }) {
+                    Text(
+                        text = "Guide",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = YumeColors.textDim
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
                 PressableRow(onClick = { SettingsHost.open = true }) {
                     Text(
                         text = "Settings",

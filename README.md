@@ -130,7 +130,7 @@ changed region each frame.
 | Two fingers | Pan, pinch to zoom, twist to rotate |
 | Two-finger tap | Undo |
 | Three-finger tap | Redo |
-| Three fingers dragged sideways | Scrub history: each step left undoes, back right redoes |
+| Slide along the undo / redo button | Scrub history: each step down undoes, back up redoes |
 | Hold the undo / redo button | Keep stepping, faster the longer it is held |
 | Four-finger tap | Show or hide the interface |
 | Drag the colour chip onto the canvas | ColorDrop fill; rest before lifting, then slide sideways to set the threshold |
@@ -426,8 +426,9 @@ Open **Settings** from the gallery or from Actions.
   going, so it keeps up with the pen), the **pressure curve** (lighter or
   firmer touch, with a live graph), and the QuickShape and eyedropper hold
   times.
-- **Gestures** — turn two-finger undo, three-finger redo, three-finger history
-  scrub, four-finger interface toggle and hold-to-repeat undo on or off.
+- **Gestures** — turn two-finger undo, three-finger redo, four-finger
+  interface toggle and hold-or-slide undo / redo on or off. There are no
+  three-finger slides: HyperOS uses them for screenshots and minimising.
 
 Long operations (fill, auto-select, adjustments, invert, merge…) show a
 **Working…** card with **Cancel**; cancelling puts back everything the

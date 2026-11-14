@@ -28,7 +28,6 @@ object AppSettings {
         eyedropperHoldMs = p.getInt("eyedropperHoldMs", eyedropperHoldMs)
         twoFingerUndo = p.getBoolean("twoFingerUndo", twoFingerUndo)
         threeFingerRedo = p.getBoolean("threeFingerRedo", threeFingerRedo)
-        threeFingerScrub = p.getBoolean("threeFingerScrub", threeFingerScrub)
         fourFingerUi = p.getBoolean("fourFingerUi", fourFingerUi)
         holdToRepeatUndo = p.getBoolean("holdToRepeatUndo", holdToRepeatUndo)
         railOnRight = p.getBoolean("railOnRight", railOnRight)
@@ -102,16 +101,14 @@ object AppSettings {
         private set
     fun updateThreeFingerRedo(v: Boolean) { threeFingerRedo = v; put { putBoolean("threeFingerRedo", v) } }
 
-    /** Three fingers dragged sideways scrub through history (left undo, right redo). */
-    var threeFingerScrub by mutableStateOf(true)
-        private set
-    fun updateThreeFingerScrub(v: Boolean) { threeFingerScrub = v; put { putBoolean("threeFingerScrub", v) } }
-
     var fourFingerUi by mutableStateOf(true)
         private set
     fun updateFourFingerUi(v: Boolean) { fourFingerUi = v; put { putBoolean("fourFingerUi", v) } }
 
-    /** Holding the undo / redo buttons keeps stepping, faster the longer they are held. */
+    /**
+     * Holding the undo / redo buttons keeps stepping, faster the longer they
+     * are held; sliding along them scrubs through history.
+     */
     var holdToRepeatUndo by mutableStateOf(true)
         private set
     fun updateHoldToRepeatUndo(v: Boolean) { holdToRepeatUndo = v; put { putBoolean("holdToRepeatUndo", v) } }

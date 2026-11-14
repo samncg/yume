@@ -125,6 +125,9 @@ private fun YumeRoot() {
             }
         }
     }
+    if (com.yume.app.ui.GuideHost.open) {
+        com.yume.app.ui.GuideScreen(onClose = { com.yume.app.ui.GuideHost.open = false })
+    }
     if (com.yume.app.ui.SettingsHost.open) {
         com.yume.app.ui.SettingsScreen(onClose = { com.yume.app.ui.SettingsHost.open = false })
     }

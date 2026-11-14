@@ -200,13 +200,9 @@ fun SettingsScreen(onClose: () -> Unit) {
                 Spacer(Modifier.height(4.dp))
                 ToggleRow(Glyph.Undo, "Two-finger tap: undo", AppSettings.twoFingerUndo) { AppSettings.updateTwoFingerUndo(it) }
                 ToggleRow(Glyph.Redo, "Three-finger tap: redo", AppSettings.threeFingerRedo) { AppSettings.updateThreeFingerRedo(it) }
-                ToggleRow(Glyph.History, "Three-finger swipe: scrub history", AppSettings.threeFingerScrub) {
-                    AppSettings.updateThreeFingerScrub(it)
-                }
-                Hint("Drag three fingers left to undo step by step, back right to redo.")
                 ToggleRow(Glyph.Eye, "Four-finger tap: hide interface", AppSettings.fourFingerUi) { AppSettings.updateFourFingerUi(it) }
-                ToggleRow(Glyph.Undo, "Hold undo / redo to repeat", AppSettings.holdToRepeatUndo) { AppSettings.updateHoldToRepeatUndo(it) }
-                Hint("Drag the colour chip onto the canvas to fill (ColorDrop); hold before letting go and slide sideways to set the threshold.")
+                ToggleRow(Glyph.Undo, "Hold or slide undo / redo", AppSettings.holdToRepeatUndo) { AppSettings.updateHoldToRepeatUndo(it) }
+                Hint("Hold the undo or redo button to keep stepping; slide up and down along it to scrub through history.")
                 Spacer(Modifier.height(8.dp))
             }
         }

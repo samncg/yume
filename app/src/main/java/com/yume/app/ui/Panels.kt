@@ -2385,6 +2385,7 @@ fun ActionsPanel(
         MenuRow(Glyph.ZoomOut, "Zoom out") { session.zoomBy(1f / 1.25f) }
         DividerLine()
         MenuRow(Glyph.Sliders, "Settings…") { onSettings() }
+        MenuRow(Glyph.History, "Gestures & tips") { GuideHost.open = true }
         DividerLine()
         PenGestureSettings()
         if (BuildConfig.DEBUG) {

@@ -67,12 +67,13 @@ class CanvasView(
     private var filterStroke = false
     private var predictStroke = false
 
-    /** Three-finger sideways scrub through history. */
-    private var scrubStartX = 0f
-    private var scrubStartY = 0f
-    private var scrubDecided = false
-    private var scrubbing = false
-    private var scrubSteps = 0
+    /**
+     * Multi-finger taps: where each finger landed, and whether any of them
+     * has moved further than a tap allows. Tracked per finger, so a finger
+     * lifting early (or one landing late) never reads as movement.
+     */
+    private val fingerDown = HashMap<Int, FloatArray>()
+    private var tapSlopExceeded = false
     private var activePointerId = -1
     private var twoFinger = false
     /** A stylus is currently in contact — fingers are treated as palms. */
@@ -200,6 +201,9 @@ class CanvasView(
         downTime = event.eventTime
         moved = 0f
         maxFingers = 1
+        fingerDown.clear()
+        fingerDown[event.getPointerId(0)] = floatArrayOf(event.x, event.y)
+        tapSlopExceeded = false
         twoFinger = false
         lastX = event.x
         lastY = event.y
@@ -281,6 +285,8 @@ class CanvasView(
         if (isPalm(event, event.actionIndex)) return
 
         maxFingers = max(maxFingers, event.pointerCount)
+        val ai = event.actionIndex
+        fingerDown[event.getPointerId(ai)] = floatArrayOf(event.getX(ai), event.getY(ai))
         cancelScheduledLongPress()
         cancelQuickShape()
         if (mode == Mode.Pending) {
@@ -295,24 +301,24 @@ class CanvasView(
         gestureFresh = true
         session.predictedTip = null
         rebaseGesture(event, -1)
-        if (event.pointerCount == 3) {
-            scrubStartX = gestureFocusX
-            scrubStartY = gestureFocusY
-            scrubDecided = false
-            scrubbing = false
-            scrubSteps = 0
-        }
         if (event.pointerCount == 2 && maxFingers == 2) scheduleMenuHold() else cancelMenuHold()
     }
 
     private fun onMove(event: MotionEvent) {
         accumulateMovement(event)
+        if (!tapSlopExceeded && fingerDown.isNotEmpty()) {
+            val slop = TAP_SLOP_DP * density
+            for (i in 0 until event.pointerCount) {
+                val start = fingerDown[event.getPointerId(i)] ?: continue
+                if (hypot(event.getX(i) - start[0], event.getY(i) - start[1]) > slop) {
+                    tapSlopExceeded = true
+                    break
+                }
+            }
+        }
 
         if (twoFinger) {
             if (menuHoldFired) return
-            if (event.pointerCount == 3 && maxFingers == 3 && com.yume.app.data.AppSettings.threeFingerScrub) {
-                if (handleScrub(event)) return
-            }
             if (event.pointerCount >= 2) {
                 sendGesture(event)
                 // Panning, pinching or rotating cancels the hold. Measured from
@@ -359,7 +365,9 @@ class CanvasView(
         session.predictedTip = null
         if (twoFinger) {
             val duration = event.eventTime - downTime
-            if (!menuHoldFired && !scrubbing && duration < 420L && moved < 26f * density) {
+            // More fingers land and lift less together: allow them more time.
+            val limit = if (maxFingers >= 3) MULTI_TAP_MS else TWO_TAP_MS
+            if (!menuHoldFired && !tapSlopExceeded && duration < limit) {
                 val s = com.yume.app.data.AppSettings
                 val allowed = when (maxFingers) {
                     2 -> s.twoFingerUndo
@@ -369,7 +377,6 @@ class CanvasView(
                 }
                 if (allowed) session.pushInput(InputEvent.Tap(maxFingers))
             }
-            scrubbing = false
             twoFinger = false
         } else {
             when (mode) {
@@ -441,43 +448,6 @@ class CanvasView(
             filtered[1] = y
         }
         if (predictStroke) predictor.add(filtered[0], filtered[1], t)
-    }
-
-    /**
-     * Three fingers dragged sideways step through history: every
-     * [SCRUB_STEP_DP] to the left is one undo, back to the right redoes.
-     * Returns true while the gesture is a scrub (no pan).
-     */
-    private fun handleScrub(event: MotionEvent): Boolean {
-        val fx = focusX(event, -1)
-        val fy = focusY(event, -1)
-        val dx = fx - scrubStartX
-        val dy = fy - scrubStartY
-        if (!scrubDecided) {
-            val slop = 28f * density
-            if (kotlin.math.abs(dx) < slop && kotlin.math.abs(dy) < slop) return true
-            scrubDecided = true
-            scrubbing = kotlin.math.abs(dx) > 1.8f * kotlin.math.abs(dy)
-            if (!scrubbing) {
-                // A pan or pinch with three fingers: continue as a gesture.
-                rebaseGesture(event, -1)
-                return false
-            }
-            scrubStartX = fx
-        }
-        if (!scrubbing) return false
-        val target = (-(fx - scrubStartX) / (SCRUB_STEP_DP * density)).toInt()
-        while (scrubSteps < target) {
-            session.undo()
-            scrubSteps++
-            performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
-        }
-        while (scrubSteps > target) {
-            session.redo()
-            scrubSteps--
-            performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
-        }
-        return true
     }
 
     private fun scheduleLongPress(delay: Long = com.yume.app.data.AppSettings.eyedropperHoldMs.toLong()) {
@@ -663,8 +633,10 @@ class CanvasView(
 
     private fun accumulateMovement(event: MotionEvent) {
         val index = event.findPointerIndex(activePointerId)
-        val x = if (index >= 0) event.getX(index) else event.x
-        val y = if (index >= 0) event.getY(index) else event.y
+        // The tracked pointer lifted: another finger's position is not movement.
+        if (index < 0) return
+        val x = event.getX(index)
+        val y = event.getY(index)
         moved += hypot(x - lastX, y - lastY)
         lastX = x
         lastY = y
@@ -736,8 +708,10 @@ private const val QUICKSHAPE_SLOP_DP = 11f
 private const val PREDICT_AHEAD_MS = 22f
 private const val PREDICT_MAX_DP = 40f
 
-/** Three-finger scrub: sideways distance per history step. */
-private const val SCRUB_STEP_DP = 36f
+/** Multi-finger taps: how far a finger may drift, and how long the tap may take. */
+private const val TAP_SLOP_DP = 30f
+private const val TWO_TAP_MS = 450L
+private const val MULTI_TAP_MS = 700L
 /**
  * How long a lone finger is held back before it reaches the tool: two-finger
  * pans land their fingers well within this, a finger stroke loses nothing

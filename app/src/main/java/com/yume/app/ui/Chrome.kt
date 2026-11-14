@@ -358,8 +358,8 @@ fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f
                     )
                 }
                 Spacer(Modifier.height(6.dp))
-                RepeatButton(Glyph.Undo, "Undo", state.canUndo) { session.undo() }
-                RepeatButton(Glyph.Redo, "Redo", state.canRedo) { session.redo() }
+                RepeatButton(Glyph.Undo, "Undo", state.canUndo, { session.undo() }, { session.redo() }) { session.undo() }
+                RepeatButton(Glyph.Redo, "Redo", state.canRedo, { session.undo() }, { session.redo() }) { session.redo() }
                 Spacer(Modifier.height(4.dp))
                 Row {
                     YumeIconButton(
@@ -421,14 +421,26 @@ fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> U
 }
 
 /**
- * Undo / redo button: a tap steps once; held (Settings: on by default) it
- * keeps stepping, faster the longer it is held.
+ * Undo / redo button. A tap steps once; held still it keeps stepping, faster
+ * the longer it is held; slid up or down (along the rail) it scrubs through
+ * history: every step down is one undo, back up redoes. On by default
+ * (Settings → Gestures).
  */
 @androidx.compose.runtime.Composable
-internal fun RepeatButton(glyph: Glyph, label: String, enabled: Boolean, action: () -> Unit) {
+internal fun RepeatButton(
+    glyph: Glyph,
+    label: String,
+    enabled: Boolean,
+    onBack: () -> Unit = {},
+    onForward: () -> Unit = {},
+    action: () -> Unit
+) {
     val act = androidx.compose.runtime.rememberUpdatedState(action)
+    val back = androidx.compose.runtime.rememberUpdatedState(onBack)
+    val fwd = androidx.compose.runtime.rememberUpdatedState(onForward)
     val on = androidx.compose.runtime.rememberUpdatedState(enabled)
     val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     if (!com.yume.app.data.AppSettings.holdToRepeatUndo) {
         YumeIconButton(glyph, action, enabled = enabled, size = 44.dp, label = label)
         return
@@ -436,22 +448,46 @@ internal fun RepeatButton(glyph: Glyph, label: String, enabled: Boolean, action:
     androidx.compose.foundation.layout.Box(
         Modifier.pointerInput(Unit) {
             awaitEachGesture {
-                val down = awaitFirstDown(pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial)
-                if (!on.value) return@awaitEachGesture
+                val pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial
+                val down = awaitFirstDown(pass = pass)
                 down.consume()
+                val startY = down.position.y
+                val slop = 12.dp.toPx()
+                val step = 26.dp.toPx()
+                var scrubbing = false
+                var steps = 0
                 var fired = 0
-                val job = scope.launch {
+                var job = if (on.value) scope.launch {
                     kotlinx.coroutines.delay(420L)
                     while (on.value) {
                         act.value()
                         fired++
                         kotlinx.coroutines.delay(maxOf(45L, 190L - fired * 14L))
                     }
+                } else null
+                var lifted = false
+                while (true) {
+                    val ev = awaitPointerEvent(pass)
+                    val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                    ch.consume()
+                    if (!ch.pressed) {
+                        lifted = true
+                        break
+                    }
+                    val dy = ch.position.y - startY
+                    if (!scrubbing && kotlin.math.abs(dy) > slop && fired == 0) {
+                        scrubbing = true
+                        job?.cancel()
+                        job = null
+                    }
+                    if (scrubbing) {
+                        val target = (dy / step).toInt()
+                        while (steps < target) { back.value(); steps++; haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove) }
+                        while (steps > target) { fwd.value(); steps--; haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove) }
+                    }
                 }
-                val up = waitForUpOrCancellation(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
-                up?.consume()
-                job.cancel()
-                if (fired == 0 && up != null) act.value()
+                job?.cancel()
+                if (lifted && !scrubbing && fired == 0 && on.value) act.value()
             }
         }
     ) {
