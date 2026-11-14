@@ -978,32 +978,61 @@ class SparseTileStore(
      * RESET (a store the journal has never seen, or one that was cleared).
      * Returns the raw bytes captured.
      */
-    fun journalCollect(slot: Int, full: Boolean, out: MutableList<TileJournal.Change>): Long {
+    fun journalCollect(slot: Int, full: Boolean, out: MutableList<TileJournal.Change>, budget: Long = Long.MAX_VALUE): Long {
         var bytes = 0L
+        // A flat tile is 4 bytes, a pixel tile a full copy; past [budget]
+        // collecting stops at once (nothing is cleared) and the caller does a
+        // full save instead. Copying first and checking after let one layer
+        // of a 16K fill copy 1 GB.
+        fun change(k: Long, t: Bitmap): TileJournal.Change {
+            val tx = (k ushr 32).toInt()
+            val ty = k.toInt()
+            val raw = if (k in solids) SolidTiles.rawOf(t) else null
+            return if (raw != null) {
+                TileJournal.Change(slot, tx, ty, TileJournal.TILE_SOLID, t.width, t.height, TileJournal.solidBytes(raw))
+            } else {
+                TileJournal.Change(slot, tx, ty, TileJournal.TILE_RAW, t.width, t.height, TileJournal.copyRaw(t))
+            }
+        }
+        val mark = out.size
+        if (budget != Long.MAX_VALUE) {
+            // Count first, copy after: a pixel tile is tileSize² * 4 bytes, so
+            // an edit far past the budget is known without copying 96 MB first.
+            val perTile = tileSize.toLong() * tileSize * 4L
+            var estimate = 0L
+            val keys: Collection<Long> = if (full || journalFullDump) allKeys() else journalDirty
+            for (k in keys) {
+                if (k in solids) continue
+                estimate += perTile
+                if (estimate > budget) return -1L
+            }
+        }
         if (full || journalFullDump) {
             ensureResident()
             out.add(TileJournal.Change(slot, 0, 0, TileJournal.RESET, 0, 0, null))
             for (k in allKeys()) {
                 val t = tileAt(k) ?: continue
-                val raw = TileJournal.copyRaw(t)
-                bytes += raw.size
-                out.add(
-                    TileJournal.Change(
-                        slot, (k ushr 32).toInt(), k.toInt(), TileJournal.TILE_RAW, t.width, t.height, raw
-                    )
-                )
+                val c = change(k, t)
+                bytes += c.raw?.size ?: 0
+                out.add(c)
+                if (bytes > budget) {
+                    while (out.size > mark) out.removeAt(out.size - 1)
+                    return -1L
+                }
             }
         } else {
             for (k in journalDirty) {
-                val tx = (k ushr 32).toInt()
-                val ty = k.toInt()
                 val t = tileAt(k)
                 if (t == null) {
-                    out.add(TileJournal.Change(slot, tx, ty, TileJournal.DEFAULT, 0, 0, null))
+                    out.add(TileJournal.Change(slot, (k ushr 32).toInt(), k.toInt(), TileJournal.DEFAULT, 0, 0, null))
                 } else {
-                    val raw = TileJournal.copyRaw(t)
-                    bytes += raw.size
-                    out.add(TileJournal.Change(slot, tx, ty, TileJournal.TILE_RAW, t.width, t.height, raw))
+                    val c = change(k, t)
+                    bytes += c.raw?.size ?: 0
+                    out.add(c)
+                    if (bytes > budget) {
+                        while (out.size > mark) out.removeAt(out.size - 1)
+                        return -1L
+                    }
                 }
             }
         }

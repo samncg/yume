@@ -170,26 +170,64 @@ object TileOps {
     fun blur(store: TileStore, capture: TileCapture, bounds: Rect, radius: Int) {
         if (radius <= 0) return
         val halo = radius * 3
-        for (ty in tileRangeY(store, bounds)) {
-            for (tx in tileRangeX(store, bounds)) {
-                val tile = tileRect(store, tx, ty)
-                if (tile.isEmpty) continue
-                if (!intersects(tile, bounds)) continue
-                val pad = Rect(tile)
-                pad.left = max(0, tile.left - halo)
-                pad.top = max(0, tile.top - halo)
-                pad.right = min(store.width, tile.right + halo)
-                pad.bottom = min(store.height, tile.bottom + halo)
-                // Everything the blur reads here is empty, or one and the same
-                // opaque solid: a box blur of a constant is that constant, so
-                // the tile (still the captured one) stays exactly as it is.
-                OpCancel.check()
-                if (uniformSnapshot(capture, pad)) continue
-                val patch = scratch(pad.width(), pad.height())
+        // Tiles are blurred in parallel: each reads only the pre-edit capture
+        // and the arithmetic is the same, so the result is bit-identical to
+        // one tile at a time. Reading and writing the store stay on this
+        // thread (stores are single-threaded).
+        val batch = BLUR_THREADS * 2
+        val tiles = ArrayList<Rect>(batch)
+        val pads = ArrayList<Rect>(batch)
+        val patches = ArrayList<Bitmap>(batch)
+        fun run() {
+            if (tiles.isEmpty()) return
+            val n = tiles.size
+            for (i in 0 until n) {
+                val pad = pads[i]
+                val reuse = patches.getOrNull(i)
+                val patch = if (reuse != null && reuse.width == pad.width() && reuse.height == pad.height()) reuse
+                else Bitmap.createBitmap(pad.width(), pad.height(), Bitmap.Config.ARGB_8888).also {
+                    if (i < patches.size) { patches[i].recycle(); patches[i] = it } else patches.add(it)
+                }
                 readSnapshot(capture, pad, patch)
-                Adjustments.blur(patch, radius)
-                writePart(store, patch, pad, tile)
             }
+            val jobs = (0 until n).map { i -> blurPool.submit { Adjustments.blur(patches[i], radius) } }
+            for (j in jobs) j.get()
+            for (i in 0 until n) writePart(store, patches[i], pads[i], tiles[i])
+            tiles.clear()
+            pads.clear()
+        }
+        try {
+            for (ty in tileRangeY(store, bounds)) {
+                for (tx in tileRangeX(store, bounds)) {
+                    val tile = tileRect(store, tx, ty)
+                    if (tile.isEmpty) continue
+                    if (!intersects(tile, bounds)) continue
+                    val pad = Rect(tile)
+                    pad.left = max(0, tile.left - halo)
+                    pad.top = max(0, tile.top - halo)
+                    pad.right = min(store.width, tile.right + halo)
+                    pad.bottom = min(store.height, tile.bottom + halo)
+                    // Everything the blur reads here is empty, or one and the same
+                    // opaque solid: a box blur of a constant is that constant, so
+                    // the tile (still the captured one) stays exactly as it is.
+                    OpCancel.check()
+                    if (uniformSnapshot(capture, pad)) continue
+                    tiles.add(tile)
+                    pads.add(pad)
+                    if (tiles.size >= batch) run()
+                }
+            }
+            run()
+        } finally {
+            for (p in patches) p.recycle()
+        }
+    }
+
+    private val BLUR_THREADS = Runtime.getRuntime().availableProcessors().coerceIn(1, 6)
+
+    private val blurPool: java.util.concurrent.ExecutorService by lazy {
+        java.util.concurrent.Executors.newFixedThreadPool(BLUR_THREADS) { r ->
+            Thread(r, "yume-blur").apply { isDaemon = true }
         }
     }
 

@@ -987,3 +987,24 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 #   8K reopen 5.4 s (PNG decode) -> tile file; 16K undo 30 ms + 0.17 s
 #   redraw, 16K reopen 1.8 s (pixel-identical);
 #   accept-8k save 270 s -> 22 s, cache-big save 97 s -> 22 s.
+
+# --- 16K memory pass + GPU filter previews (Nov 2026) ------------------------
+# Journal: flat tiles as 4-byte records, size counted before copying, early
+# abort to a full save. Bucket fill: tile by tile for every colour / blend
+# (no whole-region clip path); flat tiles get the exact blended solid. Undo
+# steps over 96 MB spill while being made and stream on undo / redo. Mip
+# refresh 6 ms per frame; cache writes bounded per frame until 2x over budget.
+# Blur bake tiles in parallel (same arithmetic). GPU (HardwareRenderer + AGSL)
+# only for blur / sharpen / motion-blur previews; every bake stays CPU.
+# dense vs this file: golden PASS on 2048x2048 and 2000x1333 (all stores);
+#   sparse256/64 vs dense: 59 phases, 16 bad -- diff lines byte-identical to
+#   the previous gate (documented rotate/scale residue, nothing new).
+# features 30/30 MATCH x4, canvas-copy PASS; journal recover / torn-tail /
+#   corrupt / full-save, history-spill PASS; png-parity, sparse-persist,
+#   export-parity, lazy-open, save-safety PASS; evict-fuzz x9, cache-fail
+#   (writer, lowdisk, corrupt, truncate, save-refuse), compaction PASS;
+#   accept-8k reopen PASS aace48fd; hist16k reload MATCH; fill-8k as before.
+# stress16k (debug build, Xiaomi Pad): native peak 6392 MB -> 868 MB, worst
+#   frame 7.3 s -> 0.3 s, translucent 16K fill catch-up 321 s -> 23 s, undo of
+#   a 1024-tile blur streamed (344 MB on disk) and restores MATCH, reopen MATCH.
+# gpu: 4096^2 blur 96-111 ms GPU vs 10.5-12 s CPU, mean diff 0.49-0.99 / 255.

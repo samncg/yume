@@ -47,6 +47,8 @@ class SurfaceRenderer(
     private var lastFrameStartNanos = 0L
 
     private companion object {
+        /** Mip refresh time per frame; the rest carries over to the next frames. */
+        const val MIP_FRAME_BUDGET_NS = 6_000_000L
         /** Flip to true to log frame timing and canvas geometry to logcat. */
         const val DEBUG_STATS = false
 
@@ -164,6 +166,9 @@ class SurfaceRenderer(
                 }
                 // While tiles are pending, keep polling for them.
                 if (cache != null && cache.pendingPrefetches() > 0) work = true
+                // The zoomed-out view still has mip tiles to refresh (they are
+                // done a few milliseconds per frame).
+                if (mipCarry) work = true
 
                 val antsActive = engine.selection != null
                 if (session.publishIfNeeded() && !work) work = true
@@ -226,7 +231,7 @@ class SurfaceRenderer(
         c.concat(session.view.matrix)
         if (engine.compositeIsSparse) {
             engine.enableMip()
-            if (engine.hasMipDirty) engine.updateMip()
+            if (engine.hasMipDirty) engine.updateMip(MIP_FRAME_BUDGET_NS)
             if (engine.mipReady()) {
                 engine.drawMip(c)
             } else {
@@ -286,7 +291,11 @@ class SurfaceRenderer(
         }
     }
 
+    /** Set when a frame left mip work for the next ones. */
+    @Volatile private var mipCarry = false
+
     private fun drawFrame() {
+        mipCarry = false
         if (surfaceW <= 0 || surfaceH <= 0) return
         val view = session.view
         if (view.viewWidth != surfaceW || view.viewHeight != surfaceH) {
@@ -325,7 +334,10 @@ class SurfaceRenderer(
                     // Zoomed out far enough that a full-resolution blit would
                     // touch every visible tile: use the downscaled composite.
                     engine.enableMip()
-                    if (engine.hasMipDirty) engine.updateMip()
+                    if (engine.hasMipDirty) {
+                        engine.updateMip(MIP_FRAME_BUDGET_NS)
+                        mipCarry = engine.hasMipDirty
+                    }
                     if (engine.mipReady()) engine.drawMip(canvas)
                     else engine.drawComposite(canvas, rect)
                 } else {

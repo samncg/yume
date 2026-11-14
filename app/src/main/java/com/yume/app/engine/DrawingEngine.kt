@@ -23,6 +23,13 @@ import kotlin.math.min
  */
 class DrawingEngine(val width: Int, val height: Int) {
 
+    /**
+     * The undo history's disk tier, for [makeTilePatch]: a patch past
+     * [History.STREAM_BYTES] writes its crops there as it makes them, so a
+     * whole painted 16K layer never needs 2 GB of crops in memory at once.
+     */
+    var patchSpill: () -> HistorySpill? = { null }
+
     val layers = ArrayList<Layer>()
     val groups = ArrayList<LayerGroup>()
     var activeIndex: Int = 0
@@ -991,11 +998,12 @@ class DrawingEngine(val width: Int, val height: Int) {
      * Each tile is a fresh downscale of the document region it covers, so a
      * partial update produces the same result as a full rebuild.
      */
-    fun updateMip(): Boolean {
+    fun updateMip(budgetNs: Long = Long.MAX_VALUE): Boolean {
         val st = mipTiles ?: return false
         if (mipDirty.isEmpty) return false
         val doc = Rect(mipDirty)
         mipDirty.setEmpty()
+        val t0 = System.nanoTime()
         val ts = st.tileSize
         val span = ts * mipScale
         val patch = mipPatchBitmap(span)
@@ -1008,6 +1016,14 @@ class DrawingEngine(val width: Int, val height: Int) {
                 val y1 = min(height, y0 + span)
                 if (x1 <= x0 || y1 <= y0) continue
                 if (x1 <= doc.left || x0 >= doc.right || y1 <= doc.top || y0 >= doc.bottom) continue
+                if (budgetNs != Long.MAX_VALUE && System.nanoTime() - t0 > budgetNs) {
+                    // Out of frame time (a 16K fill or big texture dirties
+                    // thousands of mip sources): the rest waits for the next
+                    // frames instead of stalling this one.
+                    mipDirtyUnion(Rect(max(x0, doc.left), max(y0, doc.top), doc.right, min(y1, doc.bottom)))
+                    if (y1 < doc.bottom) mipDirtyUnion(Rect(doc.left, y1, doc.right, doc.bottom))
+                    return true
+                }
                 src.set(x0, y0, x1, y1)
                 val mx0 = mtx * ts
                 val my0 = mty * ts
@@ -1664,6 +1680,8 @@ class DrawingEngine(val width: Int, val height: Int) {
         val tileSize = store.tileSize
         val def = store.defaultPixel
         val changes = ArrayList<TileChange>()
+        var heldBytes = 0L
+        var spill: HistorySpill? = null
         val box = Rect()
         val ty1 = (r.bottom - 1) / tileSize
         val tx1 = (r.right - 1) / tileSize
@@ -1691,7 +1709,30 @@ class DrawingEngine(val width: Int, val height: Int) {
                 val beforeCrop = cropTile(beforeFull, tx0, ty0, box, def)
                 val afterCrop = cropTile(afterFull, tx0, ty0, box, def)
                 if (beforeCrop == null && afterCrop == null) continue
-                changes.add(TileChange(tx, ty, Rect(box), beforeCrop, afterCrop))
+                val change = TileChange(tx, ty, Rect(box), beforeCrop, afterCrop)
+                changes.add(change)
+                if (spill == null && heldBytes > History.STREAM_BYTES) spill = patchSpill()
+                val s = spill
+                if (s != null) {
+                    // Past the stream size: straight to disk (on a write
+                    // failure the crop simply stays in memory).
+                    try {
+                        beforeCrop?.takeIf { !SolidTiles.isShared(it) }?.let {
+                            change.beforeKey = s.write(it)
+                            it.recycle()
+                            change.before = null
+                        }
+                        afterCrop?.takeIf { !SolidTiles.isShared(it) }?.let {
+                            change.afterKey = s.write(it)
+                            it.recycle()
+                            change.after = null
+                        }
+                    } catch (_: java.io.IOException) {
+                    }
+                } else {
+                    beforeCrop?.let { if (!SolidTiles.isShared(it)) heldBytes += it.byteCount }
+                    afterCrop?.let { if (!SolidTiles.isShared(it)) heldBytes += it.byteCount }
+                }
             }
         }
         // The crops are copies, so the copy-on-touch snapshot is no longer needed.
@@ -1709,7 +1750,7 @@ class DrawingEngine(val width: Int, val height: Int) {
             detail = detail,
             swatch = swatch,
             mask = layer.editMask && layer.hasMask
-        )
+        ).also { if (spill != null) it.stream = spill }
     }
 
     private fun cropTile(

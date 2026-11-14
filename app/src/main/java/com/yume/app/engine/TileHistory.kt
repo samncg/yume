@@ -162,6 +162,9 @@ class HistorySpill(file: java.io.File) {
         if (key >= 0) spill.drop(key)
     }
 
+    /** True while the crop stored under [key] is on disk. */
+    fun has(key: Long): Boolean = spill.has(key)
+
     fun compactIfNeeded() {
         if (spill.shouldCompact()) runCatching { spill.compact(scratch) }
     }
@@ -195,11 +198,63 @@ class TilePixelAction(
             return total
         }
 
-    override fun undo(engine: DrawingEngine) =
-        engine.applyTileChanges(layerId, changes, bounds, before = true, mask = mask)
+    /**
+     * Set for a step too big to bring back into memory at once (a whole 16K
+     * layer is 1 GB per side): its crops stay on disk and undo / redo read
+     * them a few tiles at a time.
+     */
+    internal var stream: HistorySpill? = null
 
-    override fun redo(engine: DrawingEngine) =
-        engine.applyTileChanges(layerId, changes, bounds, before = false, mask = mask)
+    /** True when every crop not in memory can be read from [spill]. */
+    internal fun canStream(spill: HistorySpill): Boolean = changes.all {
+        (it.beforeKey < 0 || spill.has(it.beforeKey)) && (it.afterKey < 0 || spill.has(it.afterKey))
+    }
+
+    override fun undo(engine: DrawingEngine) = apply(engine, before = true)
+
+    override fun redo(engine: DrawingEngine) = apply(engine, before = false)
+
+    private fun apply(engine: DrawingEngine, before: Boolean) {
+        val s = stream
+        if (s == null || isResident) {
+            engine.applyTileChanges(layerId, changes, bounds, before = before, mask = mask)
+            return
+        }
+        // Streamed: STREAM_CHUNK tiles in memory at a time, read, written into
+        // the layer and freed.
+        val chunk = ArrayList<TileChange>(STREAM_CHUNK)
+        val temps = ArrayList<Bitmap>(STREAM_CHUNK)
+        val box = Rect()
+        fun flush() {
+            if (chunk.isEmpty()) return
+            engine.applyTileChanges(layerId, chunk, Rect(box), before = before, mask = mask)
+            for (b in temps) if (!SolidTiles.isShared(b)) b.recycle()
+            chunk.clear()
+            temps.clear()
+            box.setEmpty()
+        }
+        for (c in changes) {
+            val key = if (before) c.beforeKey else c.afterKey
+            val bmp = if (key >= 0) {
+                try {
+                    s.read(key).also { temps.add(it) }
+                } catch (e: java.io.IOException) {
+                    android.util.Log.w("YumeHistory", "streamed crop unreadable, tile skipped", e)
+                    continue
+                }
+            } else {
+                if (before) c.before else c.after
+            }
+            chunk.add(TileChange(c.tx, c.ty, c.clip, bmp, bmp))
+            if (box.isEmpty) box.set(c.clip) else box.union(c.clip)
+            if (chunk.size >= STREAM_CHUNK) flush()
+        }
+        flush()
+    }
+
+    companion object {
+        private const val STREAM_CHUNK = 32
+    }
 
     internal fun releaseTiles(spill: HistorySpill? = null) {
         for (c in changes) {

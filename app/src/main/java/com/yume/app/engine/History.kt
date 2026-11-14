@@ -184,6 +184,8 @@ class History(
 
     companion object {
         const val SPILL_MEM_CAP = 64L * 1024L * 1024L
+        /** A step past this many bytes of crops is kept on disk and streamed. */
+        const val STREAM_BYTES = 96L * 1024L * 1024L
     }
     var spilledActions: Long = 0L; private set
     var loadedActions: Long = 0L; private set
@@ -197,12 +199,35 @@ class History(
         return t
     }
 
+    /**
+     * A step bigger than [STREAM_BYTES] (or one whose crops were already put
+     * on disk while it was made) goes to disk at once and is streamed on
+     * undo / redo, instead of sitting in memory as the newest step: one blur
+     * of a painted 16K layer is 2 GB of crops.
+     */
+    private fun streamIfLarge(action: HistoryAction) {
+        if (action is GroupAction) {
+            action.actions.forEach { streamIfLarge(it) }
+            return
+        }
+        val t = action as? TilePixelAction ?: return
+        val s = spill ?: return
+        if (t.isResident && t.bytes <= STREAM_BYTES) return
+        t.spillTo(s)
+        t.stream = s
+    }
+
     /** Brings [action]'s spilled crops back into memory. False if unreadable. */
     fun ensureLoaded(action: HistoryAction): Boolean {
         if (action is GroupAction) return action.actions.all { ensureLoaded(it) }
         val t = action as? TilePixelAction ?: return true
         if (t.isResident) return true
         val s = spill ?: return false
+        if (t.stream === s) {
+            if (t.canStream(s)) return true
+            lastError = "An older undo step could not be read back"
+            return false
+        }
         return try {
             t.loadFrom(s)
             loadedActions++
@@ -330,6 +355,7 @@ class History(
     }
 
     fun push(action: HistoryAction) {
+        streamIfLarge(action)
         undoStack.addLast(action)
         bytes += action.bytes
         redoStack.forEach { it.releaseBitmaps() }

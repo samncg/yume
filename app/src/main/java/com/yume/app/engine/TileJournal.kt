@@ -39,6 +39,12 @@ object TileJournal {
     const val TILE_DEFLATE = 1
     const val DEFAULT = 2
     const val RESET = 3
+    /** A flat tile: the payload is its 4 raw pixel bytes. */
+    const val TILE_SOLID = 4
+
+    /** The 4 raw bytes of a flat tile whose pixels all read as [raw]. */
+    fun solidBytes(raw: Int): ByteArray =
+        ByteBuffer.allocate(4).order(ByteOrder.nativeOrder()).putInt(raw).array()
 
     /** One change captured on the owner thread ([raw] is a private copy). */
     class Change(
@@ -76,7 +82,10 @@ object TileJournal {
                     var payload: ByteArray = EMPTY
                     var len = 0
                     val raw = c.raw
-                    if (raw != null) {
+                    if (c.kind == TILE_SOLID && raw != null) {
+                        payload = raw
+                        len = raw.size
+                    } else if (raw != null) {
                         if (pack.size < raw.size + 64) pack = ByteArray(raw.size + 64)
                         deflater.reset()
                         deflater.setInput(raw)
@@ -181,7 +190,20 @@ object TileJournal {
                     if (crc.value.toInt() != pcrc) throw IOException("journal payload corrupt at $pos")
                     pos += HEADER + len
                     var tile: Bitmap? = null
-                    if (kind == TILE_RAW || kind == TILE_DEFLATE) {
+                    var reported = kind
+                    if (kind == TILE_SOLID) {
+                        if (len != 4) throw IOException("journal solid size mismatch")
+                        val size = w * h * 4
+                        if (raw.size < size) raw = ByteArray(size)
+                        var i = 0
+                        while (i < size) {
+                            raw[i] = body[0]; raw[i + 1] = body[1]; raw[i + 2] = body[2]; raw[i + 3] = body[3]
+                            i += 4
+                        }
+                        tile = TilePool.acquire(w, h)
+                        tile.copyPixelsFromBuffer(ByteBuffer.wrap(raw, 0, size))
+                        reported = TILE_RAW
+                    } else if (kind == TILE_RAW || kind == TILE_DEFLATE) {
                         val size = w * h * 4
                         val bytes = if (kind == TILE_DEFLATE) {
                             if (raw.size < size) raw = ByteArray(size)
@@ -202,7 +224,7 @@ object TileJournal {
                         tile = TilePool.acquire(w, h)
                         tile.copyPixelsFromBuffer(ByteBuffer.wrap(bytes, 0, size))
                     }
-                    visitor.visit(slot, tx, ty, kind, tile)
+                    visitor.visit(slot, tx, ty, reported, tile)
                     n++
                 }
             }

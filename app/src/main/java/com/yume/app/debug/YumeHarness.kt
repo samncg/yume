@@ -187,6 +187,10 @@ object YumeHarness {
                     out.append(scoreCancel(app))
                 } else if (only == "hist16k") {
                     out.append(scoreHistory16k(app))
+                } else if (only == "gpu") {
+                    out.append(scoreGpu())
+                } else if (only == "stress16k" || only == "stress16kq") {
+                    out.append(scoreStress16k(app, quick = only == "stress16kq"))
                 } else if (only == "pickfresh") {
                     out.append(line(scorePickFresh()))
                 } else if (only == "wand") {
@@ -3758,6 +3762,263 @@ object YumeHarness {
             TileStoreConfig.useSparseLayers = oldS
             TileStoreConfig.tileSize = oldT
         }
+        return out.toString()
+    }
+
+    /**
+     * GPU filters against the CPU ones on a 4096 x 4096 painted proxy (the
+     * blur preview's size for a 16K canvas): time and mean difference.
+     */
+    private fun scoreGpu(): String {
+        val out = StringBuilder()
+        if (android.os.Build.VERSION.SDK_INT < 33) return "gpu: needs Android 13\n"
+        val n = 4096
+        val src = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(src)
+        val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        val rnd = java.util.Random(7)
+        for (i in 0 until 400) {
+            p.color = rnd.nextInt() or 0xFF000000.toInt()
+            c.drawCircle(rnd.nextFloat() * n, rnd.nextFloat() * n, 20f + rnd.nextFloat() * 200f, p)
+        }
+        fun diff(a: Bitmap, b: Bitmap): Double {
+            val w = a.width
+            val pa = IntArray(w)
+            val pb = IntArray(w)
+            var sum = 0L
+            var cnt = 0L
+            var y = 0
+            while (y < a.height) {
+                a.getPixels(pa, 0, w, 0, y, w, 1)
+                b.getPixels(pb, 0, w, 0, y, w, 1)
+                for (x in 0 until w) {
+                    for (sh in intArrayOf(0, 8, 16, 24)) sum += kotlin.math.abs(((pa[x] ushr sh) and 255) - ((pb[x] ushr sh) and 255))
+                    cnt += 4
+                }
+                y += 7
+            }
+            return sum.toDouble() / cnt
+        }
+        for (radius in intArrayOf(2, 6)) {
+            val cpu = src.copy(Bitmap.Config.ARGB_8888, true)
+            var t0 = System.nanoTime()
+            com.yume.app.engine.Adjustments.blur(cpu, radius)
+            val cpuMs = (System.nanoTime() - t0) / 1e6
+            com.yume.app.engine.GpuFilter.apply(src, com.yume.app.engine.GpuFilter.blurEffect(radius, 1f))?.recycle()
+            t0 = System.nanoTime()
+            val gpu = com.yume.app.engine.GpuFilter.apply(src, com.yume.app.engine.GpuFilter.blurEffect(radius, 1f))
+            val gpuMs = (System.nanoTime() - t0) / 1e6
+            out.append("gpu blur r=$radius 4096^2: cpu ${"%.0f".format(cpuMs)}ms gpu ${"%.0f".format(gpuMs)}ms " +
+                (if (gpu == null) "GPU UNAVAILABLE" else "meanDiff=${"%.2f".format(diff(cpu, gpu))}/255") + "\n")
+            cpu.recycle()
+            gpu?.recycle()
+        }
+        var t0 = System.nanoTime()
+        val sh = com.yume.app.engine.GpuFilter.apply(src, com.yume.app.engine.GpuFilter.sharpenEffect(1.5f))
+        out.append("gpu sharpen 4096^2: ${"%.0f".format((System.nanoTime() - t0) / 1e6)}ms ${if (sh == null) "UNAVAILABLE" else "ok"}\n")
+        sh?.recycle()
+        t0 = System.nanoTime()
+        val mo = com.yume.app.engine.GpuFilter.apply(src, com.yume.app.engine.GpuFilter.motionEffect(12f, 30f))
+        out.append("gpu motion 4096^2: ${"%.0f".format((System.nanoTime() - t0) / 1e6)}ms ${if (mo == null) "UNAVAILABLE" else "ok"}\n")
+        mo?.recycle()
+        com.yume.app.engine.GpuFilter.release()
+        src.recycle()
+        return out.toString()
+    }
+
+    /**
+     * 16K with several layers, the way the editor uses it: fills, strokes, a
+     * large textured area, new layers, blur, undo / redo, the autosave journal,
+     * the history snapshot, a full save and a reopen. Java and native heap
+     * peaks are sampled throughout, and every step reports its renderer-style
+     * frames until the screen settles (worst frame = the hitch).
+     */
+    private fun scoreStress16k(app: YumeApp, quick: Boolean = false): String {
+        val sb = StringBuilder()
+        val size = 16384
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = 256
+        var cache: TileCache? = null
+        val ps = app.projectStore
+        val project = ps.createProject("harness-stress16k", size, size, BG)
+        val rt = Runtime.getRuntime()
+        val sampling = java.util.concurrent.atomic.AtomicBoolean(true)
+        var javaPeak = 0L
+        var nativePeak = 0L
+        val sampler = Thread {
+            while (sampling.get()) {
+                javaPeak = max(javaPeak, rt.totalMemory() - rt.freeMemory())
+                nativePeak = max(nativePeak, android.os.Debug.getNativeHeapAllocatedSize())
+                Thread.sleep(15)
+            }
+        }.apply { isDaemon = true; start() }
+        fun ms(t0: Long) = "%.0f".format((System.nanoTime() - t0) / 1e6)
+        fun mem() = "java=${(rt.totalMemory() - rt.freeMemory()) shr 20}MB (peak ${javaPeak shr 20}) native=${android.os.Debug.getNativeHeapAllocatedSize() shr 20}MB (peak ${nativePeak shr 20})"
+        // Every line is logged as it happens, so a long run can be followed.
+        val out = object {
+            fun append(line: String): StringBuilder {
+                Log.i(TAG, line.trimEnd())
+                return sb.append(line)
+            }
+            override fun toString() = sb.toString()
+        }
+        try {
+            val am = app.getSystemService(android.app.ActivityManager::class.java)
+            cache = TileCache.open(app.cacheDir, project.id, TileCache.defaultBudget(am))
+            val c0 = cache!!
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("s16", "S16", engine, History())
+            session.history.spill = com.yume.app.engine.HistorySpill(File(c0.dir, "history.spill"))
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            fun settle(): String {
+                var frames = 0
+                var worst = 0L
+                var wFlush = 0L
+                var wMip = 0L
+                var wEvict = 0L
+                val f0 = System.nanoTime()
+                while (engine.hasDirty() && frames < 100000) {
+                    val s0 = System.nanoTime()
+                    c0.adoptPrefetched()
+                    c0.blockingLoads = false
+                    try { engine.flush() } finally { c0.blockingLoads = true }
+                    val s1 = System.nanoTime()
+                    engine.enableMip()
+                    if (engine.hasMipDirty) engine.updateMip(6_000_000L)
+                    val s2 = System.nanoTime()
+                    c0.evictIfNeeded()
+                    val s3 = System.nanoTime()
+                    frames++
+                    worst = max(worst, s3 - s0)
+                    wFlush = max(wFlush, s1 - s0)
+                    wMip = max(wMip, s2 - s1)
+                    wEvict = max(wEvict, s3 - s2)
+                }
+                return "settle ${ms(f0)}ms frames=$frames worst=${"%.1f".format(worst / 1e6)}ms " +
+                    "(flush ${"%.0f".format(wFlush / 1e6)} mip ${"%.0f".format(wMip / 1e6)} evict ${"%.0f".format(wEvict / 1e6)})"
+            }
+            fun step(name: String, block: () -> Unit) {
+                val t0 = System.nanoTime()
+                block()
+                session.runCommands()
+                val work = ms(t0)
+                val atWork = "${mem()} cache=${c0.residentBytes() shr 20}MB capture=${com.yume.app.engine.TileCapture.liveBytes shr 20}MB pool=${com.yume.app.engine.TilePool.heldBytes shr 20}MB"
+                val st = settle()
+                out.append("stress16k $name: ${work}ms [after work: $atWork] + $st | ${mem()} cache=${c0.residentBytes() shr 20}MB\n")
+            }
+            fun journal(name: String) {
+                val t0 = System.nanoTime()
+                val batch = session.collectJournal({ _, _ -> false }, 96L * 1024L * 1024L)
+                out.append("stress16k journal after $name: ${ms(t0)}ms ${if (batch == null) "too big -> full save" else "${batch.changes.size} records"} | ${mem()}\n")
+            }
+            val base = engine.layers.first()
+            engine.selectLayer(base.id)
+            session.chooseTool(Tool.Fill)
+            session.runCommands()
+            session.fillLayerOnly = false
+            session.color = 0xFF3366CC.toInt()
+            step("fill base") { session.fillAt(100f, 100f) }
+            journal("fill")
+            step("new layer") { engine.newLayer("Strokes").also { engine.selectLayer(it.id) } }
+            journal("new layer")
+            session.chooseTool(Tool.Brush)
+            session.runCommands()
+            session.color = 0xFF101010.toInt()
+            step("10 strokes") {
+                for (k in 0 until 10) {
+                    val y = 800f + k * 1500f
+                    session.stroke(listOf(P(300f, y), P(8000f, y + 900f), P(16000f, y)))
+                }
+            }
+            journal("strokes")
+            val tex = engine.newLayer("Texture")
+            engine.selectLayer(tex.id)
+            val noise = (0 until 4).map { noiseTile(500 + it, 256, opaque = true) }
+            step("textured quarter (1024 tiles)") {
+                for (ty in 0 until 32) for (tx in 0 until 32) {
+                    tex.tiles.writeRect(Rect(tx * 256, ty * 256, tx * 256 + 256, ty * 256 + 256), noise[(tx + ty) % 4], Rect(0, 0, 256, 256))
+                    if ((tx + ty * 32) % 64 == 0) c0.safePoint()
+                }
+                tex.touch()
+                engine.markDirty(Rect(0, 0, 8192, 8192))
+            }
+            journal("texture")
+            if (!quick) {
+            engine.compositeAll()
+            val hashPreBlur = bandHash(engine.compositeTiles!!)
+            step("blur texture layer") {
+                session.previewAdjustment(com.yume.app.engine.AdjustmentKind.Blur, 0.2f)
+                session.consumePendingPreview()
+                session.commitAdjustment()
+            }
+            step("undo blur") { session.undo() }
+            engine.compositeAll()
+            val hashUndone = bandHash(engine.compositeTiles!!)
+            out.append("stress16k undo blur restores: ${if (hashUndone == hashPreBlur) "MATCH" else "MISMATCH"} streamed=${session.history.spill?.diskBytes?.shr(20)}MB on disk\n")
+            step("redo blur") { session.redo() }
+            }
+            val d = engine.newLayer("Fill 2")
+            engine.selectLayer(d.id)
+            session.chooseTool(Tool.Fill)
+            session.runCommands()
+            session.color = 0x80FF8800.toInt()
+            step("translucent fill on new layer") { session.fillAt(16000f, 16000f) }
+            step("opacity change") { d.opacity = 0.5f; engine.markDirtyAll() }
+            journal("all")
+            var snap: com.yume.app.engine.PersistedHistory? = null
+            var t0 = System.nanoTime()
+            val th = Thread { snap = session.historyForDiskBlocking() }.apply { start() }
+            while (th.isAlive) { session.runCommands(); Thread.sleep(2) }
+            out.append("stress16k history snapshot: ${ms(t0)}ms entries=${snap?.entries?.size} | ${mem()}\n")
+            t0 = System.nanoTime()
+            snap?.let { ps.saveHistory(project.id, it) }
+            out.append("stress16k history save: ${ms(t0)}ms | ${mem()}\n")
+            engine.compositeAll()
+            val hashBefore = bandHash(engine.compositeTiles!!)
+            t0 = System.nanoTime()
+            ps.saveProject(project.id, session.snapshotNow())
+            out.append("stress16k save: ${ms(t0)}ms complete=${ps.lastSaveComplete} | ${mem()}\n")
+            session.history.spill?.close()
+            noise.forEach { it.recycle() }
+            c0.close()
+            cache = null
+            rt.gc()
+            t0 = System.nanoTime()
+            val c1 = TileCache.open(app.cacheDir, project.id, TileCache.defaultBudget(am))
+            cache = c1
+            val loaded = ps.loadProject(project.id) ?: error("reload failed")
+            val re = DrawingEngine(size, size)
+            re.backgroundColor = loaded.background
+            for (dl in loaded.layers) {
+                val l = re.newLayer(name = dl.name, bitmap = dl.bitmap, backingFile = dl.file)
+                l.adoptMask(dl.mask, dl.maskFile)
+                l.opacity = dl.opacity
+                l.blend = dl.blend
+                l.visible = dl.visible
+            }
+            re.compositeAll()
+            val hashAfter = bandHash(re.compositeTiles!!)
+            out.append("stress16k reopen: ${ms(t0)}ms ${if (hashAfter == hashBefore) "MATCH" else "MISMATCH"} | ${mem()}\n")
+        } catch (t: Throwable) {
+            Log.e(TAG, "stress16k failed", t)
+            out.append("stress16k: FAIL ${t.javaClass.simpleName}: ${t.message} | ${mem()}\n")
+        } finally {
+            sampling.set(false)
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
+            rt.gc()
+        }
+        out.append("stress16k peaks: java=${javaPeak shr 20}MB native=${nativePeak shr 20}MB (Java limit ${rt.maxMemory() shr 20}MB)\n")
         return out.toString()
     }
 

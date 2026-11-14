@@ -85,7 +85,10 @@ Documents are plain PNG layers on disk and are saved automatically.
 ![Gallery](docs/01-gallery.png)
 
 The gallery lists one card per document, most recently saved first, with a
-rendered thumbnail, name, resolution, layer count and save time.
+rendered thumbnail, name, resolution, layer count and save time. Cards scroll
+up under the floating header, where they blur gradually and fade into the
+background (the blur is an AGSL shader on Android 13 and later; older versions
+get the fade only).
 
 - **New canvas** — pick a shape (1:1, 3:4, 4:3, 2:3, 3:2, 9:16, 16:9, A paper
   portrait or landscape, 4:5) and a resolution for its long edge (2K, 4K, 6K,
@@ -161,7 +164,7 @@ families — **Brush**, **Eraser** and **Smudge** — each with its library
 sorted into groups: **Sketching, Inking, Calligraphy, Painting, Airbrushing,
 Textures, Elements, Erasers, Blending**, plus **Imported** and **Custom**.
 The group row also has **★ Favorites** (long-press any brush, or tap the star
-next to its name) and **Recent** (the last brushes you painted with).
+next to its name) and **Recent** (the last brushes you painted with). The studio stays compact: the brush grid shows two rows at a time and scrolls, and the stroke preview of the selected brush is always in view, with the settings scrolling below it.
 
 **Built-in presets (57)** — pencils from 2H to 6B and graphite shading,
 charcoal and pastel; fine liner, brush pen, crow quill, sumi and dry ink,
@@ -262,6 +265,8 @@ includes:
   or fill a layer — merely picking a colour does not add it.
 - **Eyedropper** by long-pressing on the canvas, or via the toolbar colour chip.
 
+**Gradient tool** — drag on the canvas from the current colour to the end colour. The gradient panel shows a preview bar of the gradient over a checkerboard and has its own picker for the end colour (saturation / value square and hue bar), plus one-tap Transparent, White, Black and Swap, and your recent colours.
+
 ---
 
 ## Layers
@@ -352,7 +357,9 @@ active layer when nothing is selected.
 Adjustments apply to the active layer and preview **in real time** as you drag.
 
 - **Hue**, **Saturation** and **Brightness** via GPU colour matrices.
-- **Blur** using a quarter-resolution premultiplied box-blur proxy.
+- **Blur**, **Sharpen** and **Motion blur** preview on the GPU (see
+  [GPU engine](#gpu-engine)); without a usable GPU, blur falls back to a
+  quarter-resolution CPU box-blur proxy and the other two bake on Apply.
 - **Noise** and **film grain**.
 - **Invert** and **Grayscale** one-tap conversions.
 
@@ -684,8 +691,38 @@ formats.
   receives state snapshots.
 - Stroke updates composite only the dirty rectangle.
 - Layer previews are downscaled and are refreshed on the render thread.
-- Adjustment previews are GPU colour matrices, and blur works on a
-  quarter-resolution proxy, so dragging a slider stays interactive.
+- Adjustment previews are GPU colour matrices or GPU filters on a reduced
+  copy of the layer, so dragging a slider stays interactive.
+- Very large edits (more than 96 MB of undo data, such as a blur over a fully
+  painted 16K layer) write their undo tiles to disk as they are made and
+  undo / redo stream them back 32 tiles at a time. Such a step is not saved
+  with the project's history.
+- The autosave journal stores flat tiles as a single pixel value and counts
+  what it would copy before copying: past its 96 MB budget it does a full
+  save instead, so a filled 16K layer no longer copies 1 GB on autosave.
+- Bucket fills work tile by tile for every colour and blend mode. A fill
+  over a fragmented region (around noise or texture) used to become one
+  gigantic clip path: 6.4 GB of native memory at 16K, now under 0.9 GB.
+  A fully covered flat tile gets the exact blended colour as a shared solid.
+- The downscaled (mip) view refreshes at most 6 ms per frame and the tile
+  cache writes a bounded number of tiles per frame until it is twice over
+  budget, so a whole-canvas change at 16K catches up over a few seconds
+  instead of freezing frames for seconds (worst frame 7.3 s → 0.3 s in the
+  `stress16k` harness).
+- Blur bakes run tiles in parallel on up to six cores (same arithmetic,
+  bit-identical results).
+
+### GPU engine
+
+The first stage of the GPU engine is `engine/GpuFilter.kt`: filters run on
+the GPU through an offscreen `HardwareRenderer` and are read back into a
+normal bitmap. It drives the live previews for blur (a gaussian matched to the
+CPU box blur's sigma), sharpen (the same 1-4-6-4-1 kernel as the CPU) and
+motion blur (AGSL shaders). On the tablet a 4096² blur takes about 110 ms on
+the GPU against about 10 s on the CPU (debug build), and the two differ by
+less than 1/255 on average. **Apply** still bakes with the CPU kernels, which
+are exact and keep the golden hashes; moving the bakes to the GPU is the next
+step. Any GPU failure turns the GPU path off for the rest of the run.
 - Brush stamps are generated once per brush variant and cached as bitmaps.
 - Smudge reuses a single 128² scratch buffer per stroke.
 - The magic wand reuses one pixel buffer, one mask and one growable stack, so
@@ -861,8 +898,9 @@ formats.
 - **Painting and layer compositing run on the CPU.** The screen itself is
   drawn on the GPU (hardware canvas: zoom, pan, rotate and the composite
   blit), but brush stamping and blending stay on the CPU, where every store
-  gives bit-identical results and the golden tests hold. A GPU paint engine
-  is a separate project.
+  gives bit-identical results and the golden tests hold. The GPU engine has
+  started with filter previews (see [GPU engine](#gpu-engine)); stamping and
+  bakes are still CPU.
 - **Latency: no front-buffer rendering yet.** Stylus events are delivered
   unbatched and the stroke tip is predicted ahead of the pen, but frames
   still go through the normal double-buffered surface.

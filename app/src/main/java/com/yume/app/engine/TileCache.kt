@@ -170,9 +170,14 @@ class TileCache(
      * tiles are flushed regardless.
      */
     fun evictTo(target: Long = budgetBytes, maxDirtyWrites: Int): Int {
-        val n = evictLimited(target, maxDirtyWrites)
-        if (maxDirtyWrites != Int.MAX_VALUE && residentBytes() > target + target / 2) {
-            return n + evictLimited(target, Int.MAX_VALUE)
+        var n = evictLimited(target, maxDirtyWrites)
+        if (maxDirtyWrites != Int.MAX_VALUE) {
+            // Well over: write more this frame, but a bounded number (writing
+            // everything at once was a 180 ms frame). Only at twice the budget
+            // does memory win over smoothness.
+            val total = residentBytes()
+            if (total > target * 2) n += evictLimited(target, Int.MAX_VALUE)
+            else if (total > target + target / 2) n += evictLimited(target, OVER_DIRTY_WRITES)
         }
         return n
     }
@@ -435,6 +440,9 @@ class TileCache(
 
         /** Dirty tiles a render-frame safe point may write (deflate) at most. */
         const val FRAME_DIRTY_WRITES = 1
+
+        /** Dirty tiles a frame may write while 1.5-2x over budget (16 = 4 MB). */
+        const val OVER_DIRTY_WRITES = 16
 
         /** The cache new layer / mask stores register with (null = no eviction). */
         @Volatile var active: TileCache? = null

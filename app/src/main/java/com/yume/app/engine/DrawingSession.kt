@@ -435,6 +435,9 @@ class DrawingSession(
     private var adjustKind: AdjustmentKind? = null
     private var adjustAmount = 0f
     private var adjustProxy: Bitmap? = null
+    /** Unfiltered small copy of the layer the GPU previews filter (built once per adjustment). */
+    private var adjustBase: Bitmap? = null
+    private var adjustBaseKind: AdjustmentKind? = null
     /** Tiles the bake writes (a blur spreads 3 * radius past the content). */
     private var adjustWork: Rect = Rect()
 
@@ -463,6 +466,7 @@ class DrawingSession(
         view.setDocument(engine.width, engine.height)
         engine.ensureLayer()
         history.onChanged = { requestState() }
+        engine.patchSpill = { history.spill }
         _uiState.value = buildState()
     }
 
@@ -500,7 +504,11 @@ class DrawingSession(
                 }
                 if (!full && !sp.journalHasChanges()) continue
                 if (!full && !sp.isResident) continue
-                bytes += sp.journalCollect(sp.journalSlot, full, changes)
+                val got = sp.journalCollect(sp.journalSlot, full, changes, maxBytes - bytes)
+                // Over the budget: no journal this time, a full save instead
+                // (the store keeps its pending changes for it).
+                if (got < 0L) return null
+                bytes += got
                 if (bytes > maxBytes) return null
             }
         }
@@ -1974,6 +1982,34 @@ class DrawingSession(
         }) { fillAtWork(fx, fy, fillColor, compositeOnly) { cap = it } }
     }
 
+    /**
+     * [paint] drawn over a flat tile ([before] = its shared solid, or null
+     * for an absent tile reading as [defaultPixel]): the shared solid of the
+     * result, or null when it is not flat. Drawn on a real tile-sized copy, so
+     * the bytes are exactly those of drawing on the tile itself.
+     */
+    private fun flatFillResult(before: Bitmap?, defaultPixel: Int, w: Int, h: Int, paint: Paint): Bitmap? {
+        val scratch = before?.copy(Bitmap.Config.ARGB_8888, true)
+            ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also {
+                if (defaultPixel != 0) {
+                    val px = IntArray(w * h) { defaultPixel }
+                    it.copyPixelsFromBuffer(java.nio.IntBuffer.wrap(px))
+                }
+            }
+        try {
+            if (scratch.width != w || scratch.height != h) return null
+            Canvas(scratch).drawPaint(paint)
+            val buf = java.nio.IntBuffer.allocate(w * h)
+            scratch.copyPixelsToBuffer(buf)
+            val px = buf.array()
+            val raw = px[0]
+            for (v in px) if (v != raw) return null
+            return SolidTiles.obtain(scratch, raw, scratch.getPixel(0, 0))
+        } finally {
+            scratch.recycle()
+        }
+    }
+
     private fun fillAtWork(fx: Float, fy: Float, fillColor: Int, compositeOnly: Boolean, onCapture: (TileCapture) -> Unit) {
         val layer = engine.activeLayer ?: return
         if (!editable(layer)) return
@@ -2036,11 +2072,16 @@ class DrawingSession(
                 else -> android.graphics.BlendMode.SRC_OVER
             }
         }
-        if (store.isSparse && !mask && !layer.alphaLock && Color.alpha(fillColor) == 255) {
-            // An opaque fill over anything is just the colour: tiles the region
-            // covers completely become one shared solid each (no pixels to
-            // draw or keep), and only the edge tiles are drawn, each clipped
-            // to its own part of the region. Same bytes as drawing it all.
+        if (store.isSparse) {
+            // Tile by tile, each clipped to its own part of the region (one
+            // path for the whole region was gigabytes for a fragmented region,
+            // a fill around noise or texture). Same bytes as drawing it all.
+            // A tile the region covers completely: an opaque fill is just the
+            // colour, and any fill over a flat tile is flat too, so both
+            // become one shared solid each (no pixels to draw or keep).
+            val sp = store as? SparseTileStore
+            val opaqueNormal = !mask && !layer.alphaLock && Color.alpha(fillColor) == 255
+            val flatResults = HashMap<Long, Bitmap?>()
             val ts = store.tileSize
             val tile = Rect()
             val part = android.graphics.Region()
@@ -2051,7 +2092,28 @@ class DrawingSession(
                     part.set(region)
                     if (!part.op(tile, android.graphics.Region.Op.INTERSECT) || part.isEmpty) continue
                     if (part.isRect && part.bounds == tile) {
-                        store.fillRect(tile, fillColor)
+                        if (opaqueNormal) {
+                            store.fillRect(tile, fillColor)
+                            continue
+                        }
+                        val flat = sp?.flatColourAt(tx, ty) ?: -1L
+                        if (sp != null && flat >= 0L) {
+                            // The fill drawn once on a copy of the flat tile.
+                            val fk = (flat shl 24) xor (tile.width().toLong() shl 12) xor tile.height().toLong()
+                            val result = flatResults.getOrPut(fk) {
+                                flatFillResult(sp.sharedSolidAt(tx, ty), store.defaultPixel, tile.width(), tile.height(), paint)
+                            }
+                            if (result != null) {
+                                store.putTileRegion(tx, ty, tile, result)
+                                continue
+                            }
+                        }
+                        store.withWriteCanvas(Rect(tile)) { c ->
+                            val save = c.save()
+                            c.clipRect(tile)
+                            c.drawPaint(paint)
+                            c.restoreToCount(save)
+                        }
                     } else {
                         val partPath = SelectionUtil.regionFillPath(part)
                         store.withWriteCanvas(Rect(part.bounds)) { c ->
@@ -2955,14 +3017,21 @@ class DrawingSession(
             AdjustmentKind.Blur -> {
                 // Sparse layers build the proxy from their tiles, so no
                 // canvas-sized snapshot is needed for the live preview.
-                val proxy = if (store.isSparse) blurProxyFromStore(store, amount)
-                else Adjustments.blurProxyInto(snapshot!!, amount, adjustProxy)
+                val proxy = gpuPreview(store, snapshot, kind, amount)
+                    ?: if (store.isSparse) blurProxyFromStore(store, amount)
+                    else Adjustments.blurProxyInto(snapshot!!, amount, adjustProxy)
                 adjustProxy = proxy
                 LayerPreview(layer.id, null, proxy)
             }
-            // Neighbourhood filters are baked exactly on Apply (no proxy: a
-            // quarter-resolution sharpen would only look blurry).
-            AdjustmentKind.Noise, AdjustmentKind.Sharpen, AdjustmentKind.MotionBlur -> null
+            // Sharpen and motion blur preview on the GPU (a reduced copy:
+            // close, while Apply bakes the exact CPU kernels). Without a GPU,
+            // and for noise (grain at preview size would mislead), no preview.
+            AdjustmentKind.Sharpen, AdjustmentKind.MotionBlur ->
+                gpuPreview(store, snapshot, kind, amount)?.let { proxy ->
+                    adjustProxy = proxy
+                    LayerPreview(layer.id, null, proxy)
+                }
+            AdjustmentKind.Noise -> null
             AdjustmentKind.Curves, AdjustmentKind.Levels, AdjustmentKind.ColorBalance,
             AdjustmentKind.GradientMap -> {
                 val lut = toneLut ?: return
@@ -3013,6 +3082,57 @@ class DrawingSession(
     }
 
     /**
+     * A filter preview made on the GPU: [kind] at [amount] applied to a small
+     * copy of the layer (quarter size for blur, at most 2048 px otherwise).
+     * The copy is made once per adjustment; each slider move is one GPU pass.
+     * Null when the GPU is not usable (the caller falls back).
+     */
+    private fun gpuPreview(store: TileStore, snapshot: Bitmap?, kind: AdjustmentKind, amount: Float): Bitmap? {
+        if (android.os.Build.VERSION.SDK_INT < 33 || !GpuFilter.available) return null
+        val scale = if (kind == AdjustmentKind.Blur) 0.25f
+        else minOf(1f, 2048f / maxOf(engine.width, engine.height))
+        val w = max(1, (engine.width * scale).toInt())
+        val h = max(1, (engine.height * scale).toInt())
+        var base = adjustBase
+        if (base == null || base.isRecycled || base.width != w || base.height != h || adjustBaseKind != kind) {
+            base?.recycle()
+            if (snapshot == null && !store.isSparse) return null
+            base = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val c = Canvas(base)
+            val p = Paint(Paint.FILTER_BITMAP_FLAG)
+            if (snapshot != null) {
+                c.drawBitmap(snapshot, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), p)
+            } else {
+                val save = c.save()
+                c.scale(w.toFloat() / engine.width, h.toFloat() / engine.height)
+                store.drawInto(c, p)
+                c.restoreToCount(save)
+            }
+            adjustBase = base
+            adjustBaseKind = kind
+        }
+        val px = w.toFloat() / engine.width
+        // A shader that does not build on this GPU means no GPU preview.
+        val effect = try { when (kind) {
+            AdjustmentKind.Blur -> GpuFilter.blurEffect((amount * 24f).toInt().coerceIn(1, 24), px)
+            AdjustmentKind.Sharpen -> GpuFilter.sharpenEffect(amount.coerceIn(0f, 1f) * 2f)
+            AdjustmentKind.MotionBlur ->
+                GpuFilter.motionEffect(amount.coerceIn(0f, 1f) * MOTION_MAX_RADIUS * px, motionAngle)
+            else -> return null
+        } } catch (t: IllegalArgumentException) {
+            android.util.Log.w("YumeGpu", "preview shader failed", t)
+            return null
+        }
+        val out = GpuFilter.apply(base, effect) ?: return null
+        val reuse = adjustProxy
+        val proxy = if (reuse != null && !reuse.isRecycled && reuse.width == w && reuse.height == h) reuse
+        else Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        Canvas(proxy).drawBitmap(out, 0f, 0f, Paint().apply { blendMode = BlendMode.SRC })
+        out.recycle()
+        return proxy
+    }
+
+    /**
      * Quarter-resolution blurred copy of a tile store, used as the live blur
      * preview. Built from the layer's own tiles so the document is never
      * materialised. The compositor stretches it over the whole canvas.
@@ -3060,6 +3180,9 @@ class DrawingSession(
         engine.applyPreview(null)
         adjustProxy?.recycle()
         adjustProxy = null
+        adjustBase?.recycle()
+        adjustBase = null
+        adjustBaseKind = null
         adjustSnapshot = null
         adjustCapture = null
         adjustKind = null
@@ -3214,6 +3337,9 @@ class DrawingSession(
         engine.applyPreview(null)
         adjustProxy?.recycle()
         adjustProxy = null
+        adjustBase?.recycle()
+        adjustBase = null
+        adjustBaseKind = null
         val layer = engine.activeLayer
         val capture = adjustCapture
         val snapshot = adjustSnapshot
@@ -3452,6 +3578,10 @@ class DrawingSession(
                         mask = action.mask
                     )
                     is TilePixelAction -> {
+                        // A streamed step (too big to hold in memory) is not
+                        // saved with the project: its copies alone would be
+                        // gigabytes. The saved history ends after it.
+                        if (action.stream != null && !action.isResident) break
                         // A spilled (disk-tier) step is read back for the write.
                         if (!history.ensureLoaded(action)) break
                         val layerNow = engine.layers[index]
