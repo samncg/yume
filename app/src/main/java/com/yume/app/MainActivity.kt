@@ -81,6 +81,11 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
+        // Debug only: lay the app out in portrait without touching the
+        // device's rotation settings (layout checks).
+        if (debuggable && intent?.getBooleanExtra("force_portrait", false) == true) {
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
         com.yume.app.input.PenGestures.init(applicationContext)
         enableEdgeToEdge()
         setContent {
@@ -133,7 +138,12 @@ private fun EditorHost(app: YumeApp, openId: String, onLeave: (String?) -> Unit)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val controller = remember { EditorController(app.projectStore, app.presetStore, openId) }
-    LaunchedEffect(Unit) { controller.load() }
+    LaunchedEffect(Unit) {
+        // A project closed moments ago may still be writing (8K saves take a
+        // while): never read it half-written.
+        app.projectStore.awaitSaved(openId)
+        controller.load()
+    }
     DisposableEffect(Unit) {
         onDispose { controller.dispose() }
     }

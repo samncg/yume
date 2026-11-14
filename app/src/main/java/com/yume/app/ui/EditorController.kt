@@ -150,6 +150,9 @@ class EditorController(
             // recovery the persisted history describes the last FULL save, not
             // the recovered pixels, so it is not restored.
             if (!recovered) {
+                _session.value?.engine?.let { e ->
+                    store.markLoaded(projectId, e.layers.map { it.id to it.revision })
+                }
                 runCatching { store.loadHistory(projectId) }
                     .getOrNull()
                     ?.takeIf { it.entries.isNotEmpty() }
@@ -287,6 +290,10 @@ class EditorController(
     }
 
     private fun saveNowLocked(session: DrawingSession) {
+        // Undo history is read from the render thread: take it before the
+        // (possibly long, at 8K) layer writes, while the editor is certainly
+        // alive; written after the document.
+        val historyToSave = runCatching { session.historyForDiskBlocking() }.getOrNull()
         // Take the pending journal changes in the same owner turn as the
         // snapshot: a change made after it stays pending for the next autosave.
         var snapshot: com.yume.app.engine.DocumentSnapshot? = null
@@ -312,8 +319,10 @@ class EditorController(
             tileCache?.lastError = null
             _message.value = it
         }
-        session.historyForDiskBlocking()?.let { history ->
+        historyToSave?.let { history ->
             runCatching { store.saveHistory(projectId, history) }
+            // The crops were copies for this write.
+            history.entries.forEach { e -> e.tiles?.forEach { t -> t.before?.recycle(); t.after?.recycle() } }
         }
         // Keep memory bounded on big documents: flush hidden layers to disk once
         // the document is safely written. They reload if they become visible.

@@ -218,7 +218,7 @@ fun GlassToolCapsule(
  * place, or minimise it to a small pill. Position and state persist.
  */
 @Composable
-fun SideRail(state: EditorUiState, session: DrawingSession) {
+fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("yume_ui", 0) }
     var locked by remember { mutableStateOf(prefs.getBoolean("rail_locked", false)) }
@@ -237,28 +237,31 @@ fun SideRail(state: EditorUiState, session: DrawingSession) {
         var railSize by remember { mutableStateOf(IntSize.Zero) }
         val ox = remember { Animatable(margin) }
         val oy = remember { Animatable(Float.NaN) }
+        // The rail never slides under the toolbar (two rows tall when narrow).
+        val topState = androidx.compose.runtime.rememberUpdatedState(topInset)
+        fun minY(): Float = margin + topState.value
         fun bounds(): Pair<Float, Float> {
             val maxX = (maxWState.value - railSize.width - margin).coerceAtLeast(margin)
-            val maxY = (maxHState.value - railSize.height - margin).coerceAtLeast(margin)
+            val maxY = (maxHState.value - railSize.height - margin).coerceAtLeast(minY())
             return maxX to maxY
         }
         // Restore the saved side / height once the rail has been measured.
-        LaunchedEffect(railSize, maxW, maxH) {
+        LaunchedEffect(railSize, maxW, maxH, topInset) {
             if (railSize == IntSize.Zero) return@LaunchedEffect
             val (maxX, maxY) = bounds()
             if (oy.value.isNaN()) {
                 ox.snapTo(if (prefs.getBoolean("rail_right", false)) maxX else margin)
-                oy.snapTo(margin + (maxY - margin) * prefs.getFloat("rail_y", 0.5f))
+                oy.snapTo(minY() + (maxY - minY()) * prefs.getFloat("rail_y", 0.5f))
             } else {
                 ox.snapTo(ox.value.coerceIn(margin, maxX))
-                oy.snapTo(oy.value.coerceIn(margin, maxY))
+                oy.snapTo(oy.value.coerceIn(minY(), maxY))
             }
         }
         fun save() {
             val (maxX, maxY) = bounds()
             prefs.edit()
                 .putBoolean("rail_right", ox.value > (margin + maxX) / 2f)
-                .putFloat("rail_y", ((oy.value - margin) / (maxY - margin).coerceAtLeast(1f)).coerceIn(0f, 1f))
+                .putFloat("rail_y", ((oy.value - minY()) / (maxY - minY()).coerceAtLeast(1f)).coerceIn(0f, 1f))
                 .apply()
         }
         Column(
@@ -291,7 +294,7 @@ fun SideRail(state: EditorUiState, session: DrawingSession) {
                                 scope.launch {
                                     val (maxX, maxY) = bounds()
                                     ox.snapTo(rubber(ox.value + d.x, margin, maxX))
-                                    oy.snapTo(rubber(oy.value + d.y, margin, maxY))
+                                    oy.snapTo(rubber(oy.value + d.y, minY(), maxY))
                                 }
                             }
                             val v = tracker.calculateVelocity()
@@ -300,7 +303,7 @@ fun SideRail(state: EditorUiState, session: DrawingSession) {
                             // flick is going, then hand the velocity to the spring.
                             val px = ox.value + AppleSpring.project(v.x)
                             val tx = if (px + railSize.width / 2f < maxWState.value / 2f) margin else maxX
-                            val ty = (oy.value + AppleSpring.project(v.y)).coerceIn(margin, maxY)
+                            val ty = (oy.value + AppleSpring.project(v.y)).coerceIn(minY(), maxY)
                             scope.launch { ox.animateTo(tx, AppleSpring.move(), v.x) }
                             scope.launch {
                                 oy.animateTo(ty, AppleSpring.move(), v.y)

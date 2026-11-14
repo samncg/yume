@@ -124,10 +124,20 @@ data class PersistedHistoryEntry(
     val swatch: Int,
     val layerIndex: Int,
     val rect: Rect,
-    val before: Bitmap,
-    val after: Bitmap,
-    val mask: Boolean = false
+    /** Rectangle form (dense edits): the region before and after. */
+    val before: Bitmap?,
+    val after: Bitmap?,
+    val mask: Boolean = false,
+    /**
+     * Tile form (sparse edits of any size, 8K included): only the changed
+     * tiles' crops, as the in-memory step holds them. Null for rectangle form.
+     */
+    val tiles: List<PersistedTile>? = null,
+    val tileSize: Int = 0
 )
+
+/** One changed tile of a persisted step; a null crop means the tile was empty. */
+class PersistedTile(val tx: Int, val ty: Int, val clip: Rect, val before: Bitmap?, val after: Bitmap?)
 
 data class PersistedHistory(
     val appliedCount: Int,
@@ -224,6 +234,19 @@ class DrawingSession(
 
     // ---- render-thread only ----
     private val painter = StrokePainter(engine)
+
+    private val _busy = kotlinx.coroutines.flow.MutableStateFlow(false)
+    /** A long operation (undo/redo, adjustment, transform, merge…) is running. */
+    val busy: kotlinx.coroutines.flow.StateFlow<Boolean> = _busy
+
+    private inline fun <T> working(block: () -> T): T {
+        _busy.value = true
+        try {
+            return block()
+        } finally {
+            _busy.value = false
+        }
+    }
 
     /** True while a brush / eraser / smudge stroke is being painted. */
     val strokeInProgress: Boolean get() = painter.isActive
@@ -1481,7 +1504,9 @@ class DrawingSession(
         requestState()
     }
 
-    private fun commitTransformInternal() {
+    private fun commitTransformInternal() = working { commitTransformInternalWork() }
+
+    private fun commitTransformInternalWork() {
         val current = transform ?: return
         val action = current.commit()
         transform = null
@@ -2038,18 +2063,20 @@ class DrawingSession(
         pushStructural(before, "Duplicate layer", EditKind.LayerDuplicate)
     }
 
-    fun mergeDown() = post {
+    fun mergeDown() = post { working { mergeDownWork() } }
+
+    private fun mergeDownWork() {
         val gid = engine.activeGroupId
         if (gid != 0L) {
             val before = engine.snapshotState()
             if (engine.mergeGroup(gid)) pushStructural(before, "Merge group", EditKind.LayerOrder)
-            return@post
+            return
         }
-        val id = engine.activeLayer?.id ?: return@post
+        val id = engine.activeLayer?.id ?: return
         val extra = engine.mergeCost(id)
         if (extra > 0 && !engine.canAfford(extra)) {
             onMessage?.invoke(MemoryBudget.decodeRefusal(engine.width, engine.height, extra))
-            return@post
+            return
         }
         val before = engine.snapshotState()
         if (engine.mergeDown(id)) {
@@ -2093,9 +2120,11 @@ class DrawingSession(
         requestState()
     }
 
-    fun fillLayer(color: Int) = post {
-        val layer = engine.activeLayer ?: return@post
-        if (!editable(layer)) return@post
+    fun fillLayer(color: Int) = post { working { fillLayerWork(color) } }
+
+    private fun fillLayerWork(color: Int) {
+        val layer = engine.activeLayer ?: return
+        if (!editable(layer)) return
         val mask = layer.editMask && layer.hasMask
         val store = layer.paintStore
         val bounds = Rect(0, 0, engine.width, engine.height)
@@ -2441,7 +2470,9 @@ class DrawingSession(
 
     fun redo() = post { doRedo() }
 
-    private fun doUndo() {
+    private fun doUndo() = working { doUndoWork() }
+
+    private fun doUndoWork() {
         if (transform != null) cancelTransformInternal()
         cancelAdjustmentInternal()
         val action = history.peekUndo() ?: return
@@ -2452,7 +2483,9 @@ class DrawingSession(
         }
     }
 
-    private fun doRedo() {
+    private fun doRedo() = working { doRedoWork() }
+
+    private fun doRedoWork() {
         val action = history.peekRedo() ?: return
         if (!ensureHistoryBudget(action, undo = false)) return
         if (history.redo(engine)) {
@@ -2740,7 +2773,9 @@ class DrawingSession(
     private fun previewTarget(layer: Layer): Long =
         if (adjustAllLayers) LayerPreview.ALL_LAYERS else layer.id
 
-    private fun commitAdjustmentInternal() {
+    private fun commitAdjustmentInternal() = working { commitAdjustmentInternalWork() }
+
+    private fun commitAdjustmentInternalWork() {
         val layer = engine.activeLayer
         val dense = adjustSnapshot
         val capture = adjustCapture
@@ -2913,13 +2948,17 @@ class DrawingSession(
         layer.tiles.writeRect(Rect(0, 0, engine.width, engine.height), source)
     }
 
-    fun invertColors() = post {
-        val layer = engine.activeLayer ?: return@post
+    fun invertColors() = post { working { invertColorsWork() } }
+
+    private fun invertColorsWork() {
+        val layer = engine.activeLayer ?: return
         pixelEdit(layer, "Invert") { Adjustments.invert(it) }
     }
 
-    fun grayscale() = post {
-        val layer = engine.activeLayer ?: return@post
+    fun grayscale() = post { working { grayscaleWork() } }
+
+    private fun grayscaleWork() {
+        val layer = engine.activeLayer ?: return
         pixelEdit(layer, "Grayscale") { Adjustments.grayscale(it) }
     }
 
@@ -3098,8 +3137,10 @@ class DrawingSession(
                     is TilePixelAction -> {
                         // A spilled (disk-tier) step is read back for the write.
                         if (!history.ensureLoaded(action)) break
-                        val legacy = engine.tileActionToRect(action, PERSIST_PATCH_BUDGET)
-                            ?: break
+                        val layerNow = engine.layers[index]
+                        val store = if (action.mask) layerNow.maskTiles ?: break else layerNow.tiles
+                        // Copies: the save writes them off this thread while
+                        // the history may trim or spill the originals.
                         PersistedHistoryEntry(
                             actionId = action.id,
                             label = action.label,
@@ -3107,10 +3148,18 @@ class DrawingSession(
                             detail = action.detail,
                             swatch = action.swatch,
                             layerIndex = index,
-                            rect = Rect(legacy.rect),
-                            before = legacy.before,
-                            after = legacy.after,
-                            mask = legacy.mask
+                            rect = Rect(action.bounds),
+                            before = null,
+                            after = null,
+                            mask = action.mask,
+                            tiles = action.changes.map { c ->
+                                PersistedTile(
+                                    c.tx, c.ty, Rect(c.clip),
+                                    c.before?.copy(Bitmap.Config.ARGB_8888, false),
+                                    c.after?.copy(Bitmap.Config.ARGB_8888, false)
+                                )
+                            },
+                            tileSize = store.tileSize
                         )
                     }
                     else -> break
@@ -3132,11 +3181,33 @@ class DrawingSession(
             val actions = ArrayList<HistoryAction>(persisted.entries.size)
             for (entry in persisted.entries) {
                 val layer = engine.layers.getOrNull(entry.layerIndex) ?: continue
+                val tiles = entry.tiles
+                if (tiles != null) {
+                    val store = if (entry.mask) layer.maskTiles else layer.tiles
+                    // Tile steps only fit a store with the same tile grid.
+                    if (store == null || !store.isSparse || store.tileSize != entry.tileSize) break
+                    val action = TilePixelAction(
+                        layerId = layer.id,
+                        bounds = Rect(entry.rect),
+                        changes = tiles.map { TileChange(it.tx, it.ty, Rect(it.clip), it.before, it.after) },
+                        label = entry.label,
+                        kind = entry.kind,
+                        detail = entry.detail,
+                        swatch = entry.swatch,
+                        mask = entry.mask
+                    )
+                    action.id = entry.actionId
+                    HistoryAction.bumpCounterTo(entry.actionId)
+                    actions.add(action)
+                    continue
+                }
+                val before = entry.before ?: continue
+                val after = entry.after ?: continue
                 val action = PixelAction(
                     layerId = layer.id,
                     rect = Rect(entry.rect),
-                    before = entry.before,
-                    after = entry.after,
+                    before = before,
+                    after = after,
                     label = entry.label,
                     kind = entry.kind,
                     detail = entry.detail,

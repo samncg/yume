@@ -148,7 +148,7 @@ fun ProjectCurtain(
 
 /** A short highlight sliding along a hairline: busy, without a spinner. */
 @Composable
-private fun ProgressLine() {
+internal fun ProgressLine() {
     val t by rememberInfiniteTransition(label = "progress").animateFloat(
         initialValue = 0f,
         targetValue = 1f,

@@ -64,7 +64,9 @@ private val OPACITY_STEPS = floatArrayOf(1f, 0.6f, 0.3f)
 fun ReferenceWindow(
     bitmap: Bitmap,
     onPickColor: (Int) -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    /** Window px below the toolbar: the window stays under it. */
+    topInset: Float = 0f
 ) {
     val density = LocalDensity.current
     val image = remember(bitmap) { bitmap.asImageBitmap() }
@@ -79,6 +81,9 @@ fun ReferenceWindow(
         val maxH = constraints.maxHeight.toFloat()
         var x by remember { mutableFloatStateOf(maxW - with(density) { 340.dp.toPx() }) }
         var y by remember { mutableFloatStateOf(with(density) { 120.dp.toPx() }) }
+        val top = topInset + with(density) { 8.dp.toPx() }
+        // Keep the title bar reachable below the toolbar (two rows when narrow).
+        LaunchedEffect(top) { if (y < top) y = top }
         var widthPx by remember { mutableFloatStateOf(with(density) { 300.dp.toPx() }) }
         var opacityStep by remember { mutableIntStateOf(0) }
         val minW = with(density) { 120.dp.toPx() }
@@ -86,7 +91,7 @@ fun ReferenceWindow(
         val imageH = widthPx * aspect
         fun moveBy(dx: Float, dy: Float) {
             x = (x + dx).coerceIn(-widthPx * 0.7f, maxW - widthPx * 0.3f)
-            y = (y + dy).coerceIn(0f, maxH - bar)
+            y = (y + dy).coerceIn(top, (maxH - bar).coerceAtLeast(top))
         }
         fun resizeBy(f: Float) {
             val old = widthPx

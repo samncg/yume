@@ -101,6 +101,7 @@ fun EditorScreen(
     // Vertical geometry for the collapse point: the toolbar's centre line,
     // relative to the panel area below it.
     var barCenterY by remember { mutableStateOf(0f) }
+    var barBottom by remember { mutableStateOf(0f) }
     var areaTop by remember { mutableStateOf(0f) }
     var areaHeight by remember { mutableStateOf(1f) }
     // Each panel remembers the button it came from, so it closes back into that
@@ -184,14 +185,15 @@ fun EditorScreen(
 
         // Under the toolbar and panels, so a panel (History) opens over it.
         if (state.chromeVisible) {
-            SideRail(state, session)
+            SideRail(state, session, topInset = barBottom)
         }
         val ref = reference
         if (ref != null && state.chromeVisible) {
             ReferenceWindow(
                 bitmap = ref,
                 onPickColor = { session.chooseColor(it) },
-                onClose = { controller.clearReference() }
+                onClose = { controller.clearReference() },
+                topInset = barBottom
             )
         }
 
@@ -199,6 +201,7 @@ fun EditorScreen(
             if (state.chromeVisible) {
                 Box(Modifier.onGloballyPositioned {
                     barCenterY = it.positionInRoot().y + it.size.height / 2f
+                    barBottom = it.positionInRoot().y + it.size.height
                 }) {
                 EditorTopBar(
                     state = state,
@@ -358,6 +361,38 @@ fun EditorScreen(
             )
         }
 
+        // Long operations (a big undo, an adjustment on an 8K layer…) show a
+        // small working card after a moment, so the app never looks frozen.
+        val busy by session.busy.collectAsStateWithLifecycle()
+        var showBusy by remember { mutableStateOf(false) }
+        LaunchedEffect(busy) {
+            if (busy) {
+                delay(250)
+                showBusy = true
+            } else {
+                showBusy = false
+            }
+        }
+        if (showBusy) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .claimCanvasTouches(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    Modifier
+                        .glass(corner = 22f, weight = GlassWeight.Heavy)
+                        .padding(horizontal = 28.dp, vertical = 18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("Working…", style = MaterialTheme.typography.titleSmall, color = YumeColors.text)
+                    Spacer(Modifier.height(12.dp))
+                    ProgressLine()
+                }
+            }
+        }
+
         if (exportOpen) {
             ExportDialog(controller, state.width, state.height, onDismiss = { exportOpen = false })
         }
@@ -487,110 +522,144 @@ private fun EditorTopBar(
     // Floating glass capsules, grouped by intent: the document, then tools
     // that change what is there, then tools that put paint down, then layers
     // and colour. The painting stays visible between and through them.
-    Row(
+    // Floating glass capsules. One row when the screen is wide enough; on a
+    // narrow (portrait) screen the tools pill moves to a second row of its
+    // own instead of being squeezed between the others.
+    val titleCapsule: @Composable () -> Unit = {
+            Capsule {
+                YumeIconButton(Glyph.Gallery, onExit, size = 44.dp, iconSize = 20.dp, label = "Gallery")
+                // Tap the name to rename the document.
+                Text(
+                    text = state.title,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = YumeColors.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .widthIn(max = 180.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(onClick = onRename)
+                        .padding(start = 6.dp, end = 12.dp, top = 6.dp, bottom = 6.dp)
+                )
+            }
+    }
+    val leftPill: @Composable () -> Unit = {
+            GlassToolCapsule(
+                listOf(
+                    CapsuleItem(Glyph.History, "History", active = activePanel == PanelId.History) {
+                        onPanel(PanelId.History)
+                    },
+                    CapsuleItem(Glyph.Wrench, "Actions", active = activePanel == PanelId.Actions) {
+                        onPanel(PanelId.Actions)
+                    },
+                    CapsuleItem(Glyph.Guides, "Guides", active = activePanel == PanelId.Guides) {
+                        onPanel(PanelId.Guides)
+                    }
+                ),
+                onAnchor = onAnchor
+            )
+    }
+    val toolsPill: @Composable (Modifier) -> Unit = { modifier ->
+            GlassToolCapsule(
+                listOf(
+                    CapsuleItem(Glyph.Select, "Select", selected = state.tool == Tool.Selection) {
+                        onTool(Tool.Selection, PanelId.Selection)
+                    },
+                    CapsuleItem(Glyph.Transform, "Transform", selected = state.tool == Tool.Transform) {
+                        onTool(Tool.Transform, null)
+                    },
+                    CapsuleItem(Glyph.Brush, "Paint", selected = state.tool == Tool.Brush) {
+                        onTool(Tool.Brush, PanelId.Brush)
+                    },
+                    CapsuleItem(Glyph.Smudge, "Smudge", selected = state.tool == Tool.Smudge) {
+                        onTool(Tool.Smudge, PanelId.Brush)
+                    },
+                    CapsuleItem(Glyph.Eraser, "Erase", selected = state.tool == Tool.Eraser) {
+                        onTool(Tool.Eraser, PanelId.Brush)
+                    },
+                    CapsuleItem(Glyph.Bucket, "Fill", selected = state.tool == Tool.Fill) {
+                        onTool(Tool.Fill, PanelId.Fill)
+                    },
+                    CapsuleItem(Glyph.Gradient, "Gradient", selected = state.tool == Tool.Gradient) {
+                        onTool(Tool.Gradient, PanelId.Gradient)
+                    },
+                    CapsuleItem(Glyph.Shape, "Shape", selected = state.tool == Tool.Shape) {
+                        onTool(Tool.Shape, PanelId.Shape)
+                    },
+                    CapsuleItem(Glyph.Liquify, "Liquify", selected = state.tool == Tool.Liquify) {
+                        onTool(Tool.Liquify, PanelId.Liquify)
+                    },
+                    CapsuleItem(Glyph.Text, "Text", selected = state.tool == Tool.Text) {
+                        onTool(Tool.Text, null)
+                    }
+                ),
+                onAnchor = onAnchor,
+                modifier = modifier
+            )
+    }
+    val rightPill: @Composable () -> Unit = {
+            GlassToolCapsule(
+                listOf(
+                    CapsuleItem(Glyph.Sliders, "Adjustments", active = activePanel == PanelId.Adjust) {
+                        onPanel(PanelId.Adjust)
+                    },
+                    CapsuleItem(Glyph.Layers, "Layers", active = activePanel == PanelId.Layers) {
+                        onPanel(PanelId.Layers)
+                    }
+                ),
+                onAnchor = onAnchor,
+                trailing = {
+                    var chipX by remember { mutableStateOf(0f) }
+                    Box(Modifier.onGloballyPositioned { chipX = it.positionInRoot().x + it.size.width / 2f }) {
+                        ColorChip(
+                            color = state.color,
+                            selected = activePanel == PanelId.Color,
+                            onClick = {
+                                onAnchor(chipX)
+                                onPanel(PanelId.Color)
+                            },
+                            onDrop = onColorDrop
+                        )
+                    }
+                }
+            )
+    }
+    androidx.compose.foundation.layout.BoxWithConstraints(
         Modifier
             .fillMaxWidth()
             .statusBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        Capsule {
-            YumeIconButton(Glyph.Gallery, onExit, size = 44.dp, iconSize = 20.dp, label = "Gallery")
-            // Tap the name to rename the document.
-            Text(
-                text = state.title,
-                style = MaterialTheme.typography.labelLarge,
-                color = YumeColors.text,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .widthIn(max = 180.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(onClick = onRename)
-                    .padding(start = 6.dp, end = 12.dp, top = 6.dp, bottom = 6.dp)
-            )
-        }
-        GlassToolCapsule(
-            listOf(
-                CapsuleItem(Glyph.History, "History", active = activePanel == PanelId.History) {
-                    onPanel(PanelId.History)
-                },
-                CapsuleItem(Glyph.Wrench, "Actions", active = activePanel == PanelId.Actions) {
-                    onPanel(PanelId.Actions)
-                },
-                CapsuleItem(Glyph.Guides, "Guides", active = activePanel == PanelId.Guides) {
-                    onPanel(PanelId.Guides)
+        if (maxWidth >= TOOLBAR_ONE_ROW_MIN) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                titleCapsule()
+                leftPill()
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                    toolsPill(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()))
                 }
-            ),
-            onAnchor = onAnchor
-        )
-        // Every tool in one pill, so the glass bubble can travel between all of
-        // them. On a narrow (portrait) screen the pill scrolls sideways instead
-        // of pushing the colour chip off the edge.
-        Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-        GlassToolCapsule(
-            listOf(
-                CapsuleItem(Glyph.Select, "Select", selected = state.tool == Tool.Selection) {
-                    onTool(Tool.Selection, PanelId.Selection)
-                },
-                CapsuleItem(Glyph.Transform, "Transform", selected = state.tool == Tool.Transform) {
-                    onTool(Tool.Transform, null)
-                },
-                CapsuleItem(Glyph.Brush, "Paint", selected = state.tool == Tool.Brush) {
-                    onTool(Tool.Brush, PanelId.Brush)
-                },
-                CapsuleItem(Glyph.Smudge, "Smudge", selected = state.tool == Tool.Smudge) {
-                    onTool(Tool.Smudge, PanelId.Brush)
-                },
-                CapsuleItem(Glyph.Eraser, "Erase", selected = state.tool == Tool.Eraser) {
-                    onTool(Tool.Eraser, PanelId.Brush)
-                },
-                CapsuleItem(Glyph.Bucket, "Fill", selected = state.tool == Tool.Fill) {
-                    onTool(Tool.Fill, PanelId.Fill)
-                },
-                CapsuleItem(Glyph.Gradient, "Gradient", selected = state.tool == Tool.Gradient) {
-                    onTool(Tool.Gradient, PanelId.Gradient)
-                },
-                CapsuleItem(Glyph.Shape, "Shape", selected = state.tool == Tool.Shape) {
-                    onTool(Tool.Shape, PanelId.Shape)
-                },
-                CapsuleItem(Glyph.Liquify, "Liquify", selected = state.tool == Tool.Liquify) {
-                    onTool(Tool.Liquify, PanelId.Liquify)
-                },
-                CapsuleItem(Glyph.Text, "Text", selected = state.tool == Tool.Text) {
-                    onTool(Tool.Text, null)
+                rightPill()
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(Modifier.weight(1f, fill = false)) { titleCapsule() }
+                    leftPill()
+                    Spacer(Modifier.weight(1f))
+                    rightPill()
                 }
-            ),
-            onAnchor = onAnchor,
-            modifier = Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState())
-        )
-        }
-        GlassToolCapsule(
-            listOf(
-                CapsuleItem(Glyph.Sliders, "Adjustments", active = activePanel == PanelId.Adjust) {
-                    onPanel(PanelId.Adjust)
-                },
-                CapsuleItem(Glyph.Layers, "Layers", active = activePanel == PanelId.Layers) {
-                    onPanel(PanelId.Layers)
-                }
-            ),
-            onAnchor = onAnchor,
-            trailing = {
-                var chipX by remember { mutableStateOf(0f) }
-                Box(Modifier.onGloballyPositioned { chipX = it.positionInRoot().x + it.size.width / 2f }) {
-                    ColorChip(
-                        color = state.color,
-                        selected = activePanel == PanelId.Color,
-                        onClick = {
-                            onAnchor(chipX)
-                            onPanel(PanelId.Color)
-                        },
-                        onDrop = onColorDrop
-                    )
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    toolsPill(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()))
                 }
             }
-        )
+        }
     }
 }
 
@@ -695,3 +764,6 @@ private fun TransformBar(
         YumeIconButton(Glyph.Check, onCommit, size = 40.dp, tint = YumeColors.accent)
     }
 }
+
+/** Narrower than this, the toolbar wraps the tools pill onto its own row. */
+private val TOOLBAR_ONE_ROW_MIN = 1000.dp

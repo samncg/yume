@@ -1,5 +1,9 @@
 package com.yume.app.data
 
+import kotlinx.coroutines.flow.first
+
+import kotlinx.coroutines.flow.update
+
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -402,6 +406,16 @@ class ProjectStore(private val context: Context) {
      */
     private val savedLayers = HashMap<String, Pair<Int, Int>>()
 
+    /**
+     * Layers just loaded from disk are already saved as they are: the next
+     * save skips re-encoding them until they change (an 8K layer takes
+     * seconds to encode). Not used after a journal recovery, whose pixels
+     * still have to reach the PNGs.
+     */
+    fun markLoaded(id: String, layers: List<Pair<Long, Int>>) {
+        layers.forEachIndexed { index, (layerId, revision) -> savedLayers["$id/$layerId"] = index to revision }
+    }
+
     fun projectDir(id: String): File = File(root, id)
 
     fun listProjects(): List<ProjectMeta> {
@@ -622,7 +636,30 @@ class ProjectStore(private val context: Context) {
         }.getOrNull()
     }
 
+    private val _saving = kotlinx.coroutines.flow.MutableStateFlow<Set<String>>(emptySet())
+    /** Projects with a full save in progress (the gallery shows "Saving…"). */
+    val saving: kotlinx.coroutines.flow.StateFlow<Set<String>> = _saving
+
+    private val _saved = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 16)
+    /** A project finished a full save (the gallery refreshes its card). */
+    val saved: kotlinx.coroutines.flow.SharedFlow<String> = _saved
+
     fun saveProject(id: String, snapshot: DocumentSnapshot) {
+        _saving.update { it + id }
+        try {
+            saveProjectInner(id, snapshot)
+        } finally {
+            _saving.update { it - id }
+            _saved.tryEmit(id)
+        }
+    }
+
+    /** Suspends until no full save of [id] is running (before reopening it). */
+    suspend fun awaitSaved(id: String) {
+        _saving.first { id !in it }
+    }
+
+    private fun saveProjectInner(id: String, snapshot: DocumentSnapshot) {
         val dir = projectDir(id).apply { mkdirs() }
         // Stage 3c: every full save bumps saveSeq, which invalidates any journal
         // written against the previous PNG set.
@@ -1073,13 +1110,50 @@ class ProjectStore(private val context: Context) {
         val entriesJson = JSONArray()
 
         for (entry in history.entries) {
+            val tiles = entry.tiles
+            if (tiles != null) {
+                // Tile form: one small PNG per changed tile crop.
+                val tilesJson = JSONArray()
+                for (t in tiles) {
+                    fun crop(b: Bitmap?, tag: String): Any {
+                        if (b == null) return JSONObject.NULL
+                        val name = "h${entry.actionId}_${t.tx}_${t.ty}_$tag.png"
+                        val f = File(hdir, name)
+                        if (!f.exists()) writePng(f, b)
+                        keep.add(name)
+                        return name
+                    }
+                    tilesJson.put(JSONObject().apply {
+                        put("tx", t.tx)
+                        put("ty", t.ty)
+                        put("clip", JSONArray().put(t.clip.left).put(t.clip.top).put(t.clip.right).put(t.clip.bottom))
+                        put("b", crop(t.before, "b"))
+                        put("a", crop(t.after, "a"))
+                    })
+                }
+                entriesJson.put(JSONObject().apply {
+                    put("id", entry.actionId)
+                    put("label", entry.label)
+                    put("kind", entry.kind.name)
+                    put("detail", entry.detail)
+                    put("swatch", entry.swatch)
+                    put("layer", entry.layerIndex)
+                    put("rect", JSONArray().put(entry.rect.left).put(entry.rect.top).put(entry.rect.right).put(entry.rect.bottom))
+                    put("mask", entry.mask)
+                    put("tileSize", entry.tileSize)
+                    put("tiles", tilesJson)
+                })
+                continue
+            }
+            val beforeBmp = entry.before ?: continue
+            val afterBmp = entry.after ?: continue
             val beforeName = "h${entry.actionId}_b.png"
             val afterName = "h${entry.actionId}_a.png"
             val beforeFile = File(hdir, beforeName)
             val afterFile = File(hdir, afterName)
             if (!beforeFile.exists() || !afterFile.exists()) {
-                writePng(beforeFile, entry.before)
-                writePng(afterFile, entry.after)
+                writePng(beforeFile, beforeBmp)
+                writePng(afterFile, afterBmp)
             }
             keep.add(beforeName)
             keep.add(afterName)
@@ -1124,6 +1198,52 @@ class ProjectStore(private val context: Context) {
         val entries = ArrayList<PersistedHistoryEntry>()
         for (i in 0 until entriesJson.length()) {
             val o = entriesJson.getJSONObject(i)
+            val r0 = o.optJSONArray("rect")
+            val rect0 = android.graphics.Rect(
+                r0?.optInt(0) ?: 0, r0?.optInt(1) ?: 0, r0?.optInt(2) ?: 0, r0?.optInt(3) ?: 0
+            )
+            val tilesJson = o.optJSONArray("tiles")
+            if (tilesJson != null) {
+                val tiles = ArrayList<com.yume.app.engine.PersistedTile>(tilesJson.length())
+                var ok = true
+                for (k in 0 until tilesJson.length()) {
+                    val t = tilesJson.getJSONObject(k)
+                    val c = t.optJSONArray("clip")
+                    fun crop(key: String): Pair<Boolean, Bitmap?> {
+                        if (t.isNull(key)) return true to null
+                        val b = decodePatch(File(hdir, t.optString(key)))
+                        return (b != null) to b
+                    }
+                    val (okB, b) = crop("b")
+                    val (okA, a) = crop("a")
+                    if (!okB || !okA) { ok = false; break }
+                    tiles.add(com.yume.app.engine.PersistedTile(
+                        t.optInt("tx"), t.optInt("ty"),
+                        android.graphics.Rect(c?.optInt(0) ?: 0, c?.optInt(1) ?: 0, c?.optInt(2) ?: 0, c?.optInt(3) ?: 0),
+                        b, a
+                    ))
+                }
+                // A step with a missing crop cannot be undone exactly: stop
+                // there (older steps would replay on top of a hole).
+                if (!ok) break
+                entries.add(
+                    PersistedHistoryEntry(
+                        actionId = o.optLong("id", i + 1L),
+                        label = o.optString("label", "Edit"),
+                        kind = runCatching { EditKind.valueOf(o.optString("kind", "Stroke")) }.getOrDefault(EditKind.Stroke),
+                        detail = o.optString("detail", ""),
+                        swatch = o.optInt("swatch", 0),
+                        layerIndex = o.optInt("layer", -1),
+                        rect = rect0,
+                        before = null,
+                        after = null,
+                        mask = o.optBoolean("mask", false),
+                        tiles = tiles,
+                        tileSize = o.optInt("tileSize", 0)
+                    )
+                )
+                continue
+            }
             val before = decodePatch(File(hdir, o.optString("before")))
             val after = decodePatch(File(hdir, o.optString("after")))
             if (before == null || after == null) continue

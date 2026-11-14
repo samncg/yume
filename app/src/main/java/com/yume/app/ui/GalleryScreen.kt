@@ -1,5 +1,7 @@
 package com.yume.app.ui
 
+import androidx.compose.runtime.collectAsState
+
 import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.unit.sp
 
@@ -94,6 +96,10 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
     var renameTarget by remember { mutableStateOf<ProjectMeta?>(null) }
     val scope = rememberCoroutineScope()
     var galleryNote by remember { mutableStateOf<String?>(null) }
+    var creating by remember { mutableStateOf(false) }
+    val savingIds by store.saving.collectAsState()
+    // A save that finishes after we came back (8K) refreshes its card.
+    LaunchedEffect(store) { store.saved.collect { refresh++ } }
     var backupTarget by remember { mutableStateOf<ProjectMeta?>(null) }
     val backupLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/zip")
@@ -221,6 +227,7 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                         ProjectCard(
                             meta = meta,
                             thumb = thumbs[meta.id],
+                            saving = meta.id in savingIds,
                             pinned = pins.isPinned(meta.id).also { pinTick },
                             // Pinning slides cards to their new places.
                             modifier = Modifier.animateItem(),
@@ -233,17 +240,33 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
         }
     }
 
+    if (creating) {
+        androidx.compose.ui.window.Dialog(onDismissRequest = {}) {
+            PanelCard(Modifier.width(260.dp)) {
+                Text("Creating canvas…", style = MaterialTheme.typography.titleMedium, color = YumeColors.text)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Large canvases take a few seconds.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YumeColors.textDim
+                )
+            }
+        }
+    }
+
     if (showNewDialog) {
         NewCanvasDialog(
             defaultName = "Untitled",
             onDismiss = { showNewDialog = false },
             onCreate = { name, width, height ->
                 showNewDialog = false
+                creating = true
                 scope.launch {
-                    val created = withContext(Dispatchers.IO) {
-                        store.createProject(name, width, height, 0xFFFFFFFF.toInt())
-                    }
-                    onOpenProject(created.id)
+                    val created = runCatching {
+                        withContext(Dispatchers.IO) { store.createProject(name, width, height, 0xFFFFFFFF.toInt()) }
+                    }.getOrNull()
+                    creating = false
+                    if (created != null) onOpenProject(created.id) else galleryNote = "Could not create that canvas"
                 }
             }
         )
@@ -360,7 +383,8 @@ private fun ProjectCard(
     onOpen: () -> Unit,
     onMenu: () -> Unit,
     pinned: Boolean = false,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    saving: Boolean = false
 ) {
     val source = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     val scale = pressScale(source)
@@ -390,6 +414,19 @@ private fun ProjectCard(
                     contentDescription = meta.name,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit
+                )
+            }
+            if (saving) {
+                Text(
+                    text = "Saving…",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(8.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(Color(0xB3000000))
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
                 )
             }
         }

@@ -766,10 +766,6 @@ class DrawingEngine(val width: Int, val height: Int) {
                 ) {
                     sub.set(r)
                 }
-                if (sub == r && st.isEvicted(tx, ty)) {
-                    // Fully re-rendered below: its old pixels are not needed.
-                    st.clearTile(tx, ty)
-                }
                 val overTime = nonBlocking &&
                     System.nanoTime() - passStart > cache!!.frameCompositeBudgetNs
                 if (overTime) cache!!.deferredTime++
@@ -782,6 +778,13 @@ class DrawingEngine(val width: Int, val height: Int) {
                     pending.add(Rect(sub))
                     cache.deferredTiles++
                     continue
+                }
+                if (sub == r && st.isEvicted(tx, ty)) {
+                    // Fully re-rendered below: its old pixels are not needed.
+                    // Only now, once the tile is really being drawn: clearing
+                    // it before a deferral left a blank (white) square on
+                    // screen until its turn came.
+                    st.clearTile(tx, ty)
                 }
                 if (CompositeProfile.enabled) {
                     CompositeProfile.compositeDirtyPx += sub.width().toLong() * sub.height().toLong()
