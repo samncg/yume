@@ -1182,8 +1182,8 @@ class ProjectStore(private val context: Context) {
                         put("tx", t.tx)
                         put("ty", t.ty)
                         put("clip", JSONArray().put(t.clip.left).put(t.clip.top).put(t.clip.right).put(t.clip.bottom))
-                        put("b", crop(t.before, "b"))
-                        put("a", crop(t.after, "a"))
+                        if (t.beforeSolid >= 0L) put("bSolid", t.beforeSolid) else put("b", crop(t.before, "b"))
+                        if (t.afterSolid >= 0L) put("aSolid", t.afterSolid) else put("a", crop(t.after, "a"))
                     })
                 }
                 entriesJson.put(JSONObject().apply {
@@ -1269,13 +1269,15 @@ class ProjectStore(private val context: Context) {
                         val b = decodePatch(File(hdir, t.optString(key)))
                         return (b != null) to b
                     }
-                    val (okB, b) = crop("b")
-                    val (okA, a) = crop("a")
+                    val bSolid = t.optLong("bSolid", -1L)
+                    val aSolid = t.optLong("aSolid", -1L)
+                    val (okB, b) = if (bSolid >= 0L) true to null else crop("b")
+                    val (okA, a) = if (aSolid >= 0L) true to null else crop("a")
                     if (!okB || !okA) { ok = false; break }
                     tiles.add(com.yume.app.engine.PersistedTile(
                         t.optInt("tx"), t.optInt("ty"),
                         android.graphics.Rect(c?.optInt(0) ?: 0, c?.optInt(1) ?: 0, c?.optInt(2) ?: 0, c?.optInt(3) ?: 0),
-                        b, a
+                        b, a, bSolid, aSolid
                     ))
                 }
                 // A step with a missing crop cannot be undone exactly: stop

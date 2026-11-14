@@ -55,9 +55,33 @@ object SolidTiles {
             ?: return null
         if (shared.isMutable) return null
         colours[shared] = colour
+        raws[shared] = raw
         byKey[k] = WeakReference(shared)
         created++
         return shared
+    }
+
+    /** Raw pixel value of each shared solid (what every pixel's bytes read as). */
+    private val raws = WeakHashMap<Bitmap, Int>()
+
+    /** The raw pixel value of a shared solid, or null if [bitmap] is not one. */
+    @Synchronized
+    fun rawOf(bitmap: Bitmap): Int? = raws[bitmap]
+
+    /**
+     * The shared solid of size [w] x [h] whose every pixel is [raw]: found in
+     * the cache, or made once (a saved history entry coming back).
+     */
+    fun solid(raw: Int, w: Int, h: Int): Bitmap? {
+        synchronized(this) { byKey[key(raw, w, h)]?.get()?.let { return it } }
+        val sample = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        try {
+            val px = IntArray(w * h) { raw }
+            sample.copyPixelsFromBuffer(java.nio.IntBuffer.wrap(px))
+            return obtain(sample, raw, sample.getPixel(0, 0))
+        } finally {
+            sample.recycle()
+        }
     }
 
     @Synchronized

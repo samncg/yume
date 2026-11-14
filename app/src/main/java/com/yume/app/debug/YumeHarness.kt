@@ -185,6 +185,8 @@ object YumeHarness {
                     }
                 } else if (only == "cancel") {
                     out.append(scoreCancel(app))
+                } else if (only == "hist16k") {
+                    out.append(scoreHistory16k(app))
                 } else if (only == "pickfresh") {
                     out.append(line(scorePickFresh()))
                 } else if (only == "wand") {
@@ -3677,6 +3679,79 @@ object YumeHarness {
         } catch (t: Throwable) {
             Log.e(TAG, "cancel test failed", t)
             out.append("cancel: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
+        }
+        return out.toString()
+    }
+
+    /**
+     * Autosave after a whole-canvas fill at 16K: the history snapshot taken
+     * for saving and the history files. A fill is 4096 tile changes; flat ones
+     * must not be copied (they were 1 GB of copies, an out-of-memory crash).
+     */
+    private fun scoreHistory16k(app: YumeApp): String {
+        val out = StringBuilder()
+        val size = 16384
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = 256
+        var cache: TileCache? = null
+        val ps = app.projectStore
+        val project = ps.createProject("harness-hist16k", size, size, BG)
+        fun ms(t0: Long) = "%.0f".format((System.nanoTime() - t0) / 1e6)
+        try {
+            val am = app.getSystemService(android.app.ActivityManager::class.java)
+            cache = TileCache.open(app.cacheDir, project.id, TileCache.defaultBudget(am))
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("h16", "H16", engine, History())
+            session.history.spill = com.yume.app.engine.HistorySpill(File(cache!!.dir, "history.spill"))
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            val l = engine.newLayer("Ink")
+            engine.selectLayer(l.id)
+            session.color = 0xFF202020.toInt()
+            session.stroke(listOf(P(1000f, 1000f), P(9000f, 6000f), P(15000f, 2000f)))
+            session.chooseTool(Tool.Fill)
+            session.runCommands()
+            session.fillLayerOnly = false
+            session.color = 0xFF3366CC.toInt()
+            var t0 = System.nanoTime()
+            session.fillAt(100f, 15000f)
+            session.runCommands()
+            out.append("hist16k fill: ${ms(t0)}ms changes=${session.history.totalCount}\n")
+            val heap0 = android.os.Debug.getNativeHeapAllocatedSize() shr 20
+            // The snapshot runs on the session's own queue: drive it from here.
+            var snap: com.yume.app.engine.PersistedHistory? = null
+            t0 = System.nanoTime()
+            val th = Thread { snap = session.historyForDiskBlocking() }.apply { start() }
+            while (th.isAlive) { session.runCommands(); Thread.sleep(2) }
+            val heap1 = android.os.Debug.getNativeHeapAllocatedSize() shr 20
+            val tiles = snap?.entries?.sumOf { it.tiles?.size ?: 0 } ?: 0
+            val solids = snap?.entries?.sumOf { e -> e.tiles?.count { it.afterSolid >= 0L } ?: 0 } ?: 0
+            out.append("hist16k snapshot: ${ms(t0)}ms tiles=$tiles flatAsValues=$solids nativeHeap ${heap0}->${heap1}MB\n")
+            t0 = System.nanoTime()
+            snap?.let { ps.saveHistory(project.id, it) }
+            val files = File(ps.projectDir(project.id), "history").listFiles()?.size ?: 0
+            out.append("hist16k save: ${ms(t0)}ms files=$files\n")
+            val back = ps.loadHistory(project.id)
+            val backTiles = back?.entries?.sumOf { it.tiles?.size ?: 0 } ?: 0
+            val backSolids = back?.entries?.sumOf { e -> e.tiles?.count { it.afterSolid >= 0L } ?: 0 } ?: 0
+            out.append("hist16k reload: entries=${back?.entries?.size} tiles=$backTiles flat=$backSolids " +
+                (if (backTiles == tiles && backSolids == solids) "MATCH" else "MISMATCH") + "\n")
+            session.history.spill?.close()
+        } catch (t: Throwable) {
+            Log.e(TAG, "hist16k failed", t)
+            out.append("hist16k: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
         } finally {
             cache?.close()
             runCatching { ps.deleteProject(project.id) }

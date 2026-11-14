@@ -138,7 +138,20 @@ data class PersistedHistoryEntry(
 )
 
 /** One changed tile of a persisted step; a null crop means the tile was empty. */
-class PersistedTile(val tx: Int, val ty: Int, val clip: Rect, val before: Bitmap?, val after: Bitmap?)
+class PersistedTile(
+    val tx: Int,
+    val ty: Int,
+    val clip: Rect,
+    val before: Bitmap?,
+    val after: Bitmap?,
+    /**
+     * A crop that is a whole flat tile is kept as its raw pixel value
+     * (-1 when not): no 256 KB copy and no file, and it comes back as the
+     * shared solid it was. A whole-canvas fill at 16K is 4096 such tiles.
+     */
+    val beforeSolid: Long = -1L,
+    val afterSolid: Long = -1L
+)
 
 data class PersistedHistory(
     val appliedCount: Int,
@@ -3457,10 +3470,14 @@ class DrawingSession(
                             after = null,
                             mask = action.mask,
                             tiles = action.changes.map { c ->
+                                val bRaw = c.before?.let { SolidTiles.rawOf(it) }
+                                val aRaw = c.after?.let { SolidTiles.rawOf(it) }
                                 PersistedTile(
                                     c.tx, c.ty, Rect(c.clip),
-                                    c.before?.copy(Bitmap.Config.ARGB_8888, false),
-                                    c.after?.copy(Bitmap.Config.ARGB_8888, false)
+                                    if (bRaw != null) null else c.before?.copy(Bitmap.Config.ARGB_8888, false),
+                                    if (aRaw != null) null else c.after?.copy(Bitmap.Config.ARGB_8888, false),
+                                    beforeSolid = bRaw?.let { it.toLong() and 0xFFFFFFFFL } ?: -1L,
+                                    afterSolid = aRaw?.let { it.toLong() and 0xFFFFFFFFL } ?: -1L
                                 )
                             },
                             tileSize = store.tileSize
@@ -3493,7 +3510,15 @@ class DrawingSession(
                     val action = TilePixelAction(
                         layerId = layer.id,
                         bounds = Rect(entry.rect),
-                        changes = tiles.map { TileChange(it.tx, it.ty, Rect(it.clip), it.before, it.after) },
+                        changes = tiles.map {
+                            fun solid(raw: Long) = if (raw < 0L) null
+                            else SolidTiles.solid(raw.toInt(), it.clip.width(), it.clip.height())
+                            TileChange(
+                                it.tx, it.ty, Rect(it.clip),
+                                it.before ?: solid(it.beforeSolid),
+                                it.after ?: solid(it.afterSolid)
+                            )
+                        },
                         label = entry.label,
                         kind = entry.kind,
                         detail = entry.detail,
