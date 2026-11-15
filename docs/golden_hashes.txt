@@ -1068,3 +1068,22 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 # motion16k (16K layer of noise, worst case): first frame after apply
 #   13-21 s -> 1.3-1.6 s; undo MATCH at 0 and 45 deg; reopen MATCH.
 # stress16k: blur undo MATCH (344 MB streamed), reopen MATCH, native peak 896 MB.
+
+# --- Per-tile damage, no whole-canvas recomposite on undo (Nov 2026) --------
+# Composite damage is kept per tile (sub-rect per composite tile, merged), and
+# the deferred queue is deduplicated by tile; the mip refreshes per mip tile.
+# Undo / redo of pixel edits, an empty applyPreview(null) and layer property
+# changes (opacity, blend, visibility, clipping, mask, group) no longer mark
+# the whole canvas. Display-only: layer pixels and composites are unchanged.
+# golden: output byte-identical to the previous gate (dense PASS both sizes,
+#   sparse residue the same 16 lines). features 30/30 MATCH x4; journal,
+#   history-spill, png, sparse-persist, export-parity, lazy-open, save-safety,
+#   cache-fail (evict-fuzz 0 mismatches) PASS.
+# bleedtest: dense = sparse MATCH in every run; the absolute hash differs
+#   between runs (37946cd1, b8a59d66: stroke jitter is not seeded per run),
+#   so the earlier hash changes in this log were not regressions.
+# opacitytest: unchanged (205/255, dense = sparse 9bae5b1e).
+# mipstale (empty 16K): undo shows in the zoomed-out view after 1 frame.
+# mipstalepainted (16K textured layer + empty layer): undo caught up in
+#   0.19 s / 0.07 s (was 91 s, 4096 tiles recomposited); strokes < 1 s.
+# stress16k: blur undo MATCH, reopen MATCH, native peak 900 MB.

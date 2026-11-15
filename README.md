@@ -803,8 +803,23 @@ formats.
   bands of 64 rows merged pairwise; one path for the whole region could take
   6 GB to turn into a region.
   A fully covered flat tile gets the exact blended colour as a shared solid.
-- The downscaled (mip) view refreshes at most 6 ms per frame (a row cut short
-  resumes exactly where it stopped) and keeps showing its previous tiles
+- **Damage is tracked per tile.** Every change records, for each composite
+  tile it touches, the sub-rectangle that changed; a tile damaged again merges
+  into its entry. One bounding box around all the damage used to cover far
+  more than changed: a diagonal stroke across a 16K canvas is a box of about
+  a thousand tiles, and every undo, redo and tool switch marked the whole
+  canvas (4096 tiles), so after an undo the zoomed-out view of a painted 16K
+  document showed the old pixels for up to a minute. Now undo / redo of
+  pixel edits damage only the tiles they put back, an empty preview clear
+  damages nothing, and a layer's opacity, blend mode, visibility, clipping or
+  mask toggle damages only the tiles that layer has pixels in. On a painted
+  16K canvas (harness `mipstalepainted`) an undo is on screen and in the
+  zoomed-out view in 0.2 s instead of 91 s, a stroke in under a second.
+- The composite catches up 12 ms per frame while nothing is being drawn or
+  moved (4 ms during a stroke or a pinch, so those frames stay light).
+- The downscaled (mip) view is refreshed tile by tile, at most 6 ms per frame,
+  composite tiles on disk first going to the prefetcher instead of being read
+  inside the frame; it keeps showing its previous tiles
   meanwhile, never falling back to a full-resolution redraw of the whole
   canvas; the first build is done in one go. The tile
   cache writes a bounded number of tiles per frame until it is twice over

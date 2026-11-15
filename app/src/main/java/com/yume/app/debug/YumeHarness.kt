@@ -196,6 +196,8 @@ object YumeHarness {
                     out.append(scoreOpacityTest())
                 } else if (only == "motionuser") {
                     out.append(scoreMotionUser(app))
+                } else if (only == "make16kempty") {
+                    out.append(makeEmpty16k(app))
                 } else if (only == "make8k") {
                     out.append(makeTest8k(app))
                 } else if (only == "motion8k") {
@@ -204,6 +206,11 @@ object YumeHarness {
                     out.append(scoreGpu())
                 } else if (only == "stress16k" || only == "stress16kq") {
                     out.append(scoreStress16k(app, quick = only == "stress16kq"))
+                } else if (only == "mipstale") {
+                    out.append(scoreMipStale(app))
+                    out.append(scoreMipStale(app, tightMb = 12))
+                } else if (only == "mipstalepainted") {
+                    out.append(scoreMipStale(app, painted = true))
                 } else if (only == "motion16k") {
                     out.append(scoreStress16k(app, quick = true, motion = true))
                 } else if (only == "motiontest") {
@@ -4088,6 +4095,31 @@ object YumeHarness {
         return out.toString()
     }
 
+    /** Saves an empty 16K canvas (one empty layer), kept in the gallery for UI checks. */
+    private fun makeEmpty16k(app: YumeApp): String {
+        val size = 16384
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        val ps = app.projectStore
+        val project = ps.createProject("test-16k-empty (delete me)", size, size, BG)
+        var cache: TileCache? = null
+        try {
+            val am = app.getSystemService(android.app.ActivityManager::class.java)
+            cache = TileCache.open(app.cacheDir, project.id, TileCache.defaultBudget(am))
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("e16", "E16", engine, History())
+            identityView(session, size, size)
+            engine.ensureLayer()
+            session.runCommands()
+            ps.saveProject(project.id, session.snapshotNow())
+            return "make16kempty: saved ${project.id} layers=${engine.layers.size}\n"
+        } finally {
+            cache?.close()
+            TileStoreConfig.useSparseLayers = oldS
+        }
+    }
+
     /** Saves an 8K canvas with strokes, kept in the gallery for UI checks. */
     private fun makeTest8k(app: YumeApp): String {
         val size = 8192
@@ -4375,6 +4407,156 @@ object YumeHarness {
     }
 
     @Volatile private var profPhase = ""
+
+    /**
+     * How long a stroke / an undo takes to show in the zoomed-out view of an
+     * empty 16K canvas, with frames run like the renderer's (non-blocking
+     * composite, 6 ms of mip per frame, eviction at the safe point).
+     */
+    private fun scoreMipStale(app: YumeApp, tightMb: Int = 0, painted: Boolean = false): String {
+        val out = StringBuilder()
+        val size = 16384
+        val oldS = TileStoreConfig.useSparseLayers
+        val oldT = TileStoreConfig.tileSize
+        TileStoreConfig.useSparseLayers = true
+        TileStoreConfig.tileSize = 256
+        val ps = app.projectStore
+        val project = ps.createProject("harness-mipstale", size, size, BG)
+        var cache: TileCache? = null
+        fun line(t: String) { Log.i(TAG, t); out.append(t).append('\n') }
+        try {
+            val am = app.getSystemService(android.app.ActivityManager::class.java)
+            cache = TileCache.open(app.cacheDir, project.id, TileCache.defaultBudget(am))
+            val c0 = cache!!
+            if (tightMb > 0) {
+                c0.budgetBytes = tightMb * 1024L * 1024L
+                line("mipstale: tile cache squeezed to $tightMb MB (memory pressure)")
+            }
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("ms", "MS", engine, History())
+            session.history.spill = com.yume.app.engine.HistorySpill(File(c0.dir, "history.spill"))
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            if (painted) {
+                // A painting underneath: a whole 16K layer of texture, so every
+                // composite tile is real work and most of them live on disk.
+                val under = engine.newLayer("Painting")
+                val noise = (0 until 4).map { noiseTile(700 + it, 256, opaque = true) }
+                val t0 = System.nanoTime()
+                for (ty in 0 until 64) for (tx in 0 until 64) {
+                    under.tiles.writeRect(Rect(tx * 256, ty * 256, tx * 256 + 256, ty * 256 + 256), noise[(tx * 3 + ty) % 4], Rect(0, 0, 256, 256))
+                    if ((tx + ty * 64) % 64 == 0) c0.safePoint()
+                }
+                under.touch()
+                c0.safePoint()
+                line("mipstale: painted 4096 tiles in ${"%.0f".format((System.nanoTime() - t0) / 1e6)} ms")
+            }
+            val l = engine.newLayer("Layer 1")
+            engine.selectLayer(l.id)
+            session.chooseTool(Tool.Brush)
+            session.runCommands()
+            session.color = 0xFF101010.toInt()
+            session.setBrushSize(40f)
+            session.runCommands()
+            var zoomedOut = true
+            var mipMs = 0.0
+            var worstMs = 0.0
+            fun frame() {
+                val f0 = System.nanoTime()
+                c0.frameCompositeBudgetNs = 12_000_000L
+                session.runCommands()
+                session.runInput()
+                session.tickFrame()
+                c0.adoptPrefetched()
+                c0.blockingLoads = false
+                try { engine.flush() } finally { c0.blockingLoads = true }
+                if (zoomedOut) {
+                    engine.priorityRect.set(0, 0, size, size)
+                    engine.enableMip()
+                    val m0 = System.nanoTime()
+                    if (engine.hasMipDirty) engine.updateMip(6_000_000L)
+                    mipMs += (System.nanoTime() - m0) / 1e6
+                } else {
+                    engine.priorityRect.set(7000, 7000, 9000, 9000)
+                }
+                c0.evictIfNeeded()
+                worstMs = max(worstMs, (System.nanoTime() - f0) / 1e6)
+            }
+            // The canvas as opened: everything composited, mip built.
+            val o0 = System.nanoTime()
+            engine.compositeAll()
+            engine.enableMip()
+            engine.updateMip()
+            c0.safePoint()
+            line("mipstale: open (composite + mip) ${"%.0f".format((System.nanoTime() - o0) / 1e6)} ms")
+            for (i in 0 until 5) frame()
+            fun mipAt(x: Int, y: Int): Int = engine.mipTiles!!.getPixel(x / engine.mipScale, y / engine.mipScale)
+            fun compAt(x: Int, y: Int): Int = engine.compositeTiles!!.getPixel(x, y)
+            fun waitFor(name: String, x: Int, y: Int, want: (Int) -> Boolean) {
+                val t0 = System.nanoTime()
+                var frames = 0
+                mipMs = 0.0
+                worstMs = 0.0
+                var compFrames = -1
+                while (frames < 4000) {
+                    frame()
+                    frames++
+                    if (compFrames < 0 && (painted || want(compAt(x, y)))) {
+                        if (!painted || !engine.hasDirty()) compFrames = frames
+                    }
+                    // Caught up: nothing left to composite or downscale (and,
+                    // on the plain canvas, the probe shows the right thing).
+                    if (!engine.hasDirty() && !engine.hasMipDirty && (painted || want(mipAt(x, y)))) break
+                }
+                line("mipstale $name: composite after $compFrames frames, zoomed-out view after $frames frames " +
+                    "${"%.0f".format((System.nanoTime() - t0) / 1e6)} ms (mip ${"%.0f".format(mipMs)} ms, worst frame ${"%.1f".format(worstMs)} ms) " +
+                    "mipDirty=${engine.hasMipDirty} pending=${engine.deferredRect()} " + if (frames >= 4000) "STALE" else "OK")
+            }
+            val ink = { c: Int -> ((c shr 16) and 0xFF) < 128 }
+            val paper = { c: Int -> ((c shr 16) and 0xFF) > 200 }
+            // 1. Zoomed out the whole time.
+            val s0 = System.nanoTime()
+            session.stroke(listOf(P(6000f, 6000f), P(8000f, 8200f), P(10000f, 8000f)))
+            line("mipstale: stroke + end ${"%.0f".format((System.nanoTime() - s0) / 1e6)} ms")
+            waitFor("stroke while zoomed out", 8000, 8200, ink)
+            // 2. Undo it.
+            session.undo()
+            run {
+                val u0 = System.nanoTime()
+                session.runCommands()
+                line("mipstale: undo itself ${"%.0f".format((System.nanoTime() - u0) / 1e6)} ms; then ${engine.mipDebug()} " +
+                    "history top=${session.history.peekRedo()?.javaClass?.simpleName}")
+            }
+            waitFor("undo while zoomed out", 8000, 8200, paper)
+            // 3. Stroke while zoomed in, then zoom out.
+            zoomedOut = false
+            session.stroke(listOf(P(7200f, 7200f), P(8000f, 8000f), P(8800f, 7600f)))
+            for (i in 0 until 30) frame()
+            zoomedOut = true
+            waitFor("stroke zoomed in, then zoom out", 8000, 8000, ink)
+            // 4. Strokes far apart, then undo both.
+            session.stroke(listOf(P(1000f, 1000f), P(2000f, 1600f)))
+            session.stroke(listOf(P(15000f, 15000f), P(15800f, 15600f)))
+            waitFor("second far stroke", 15400, 15300, ink)
+            session.undo()
+            session.undo()
+            waitFor("undo two far strokes", 15400, 15300, paper)
+        } catch (t: Throwable) {
+            Log.e(TAG, "mipstale failed", t)
+            out.append("mipstale: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+            TileStoreConfig.tileSize = oldT
+        }
+        return out.toString()
+    }
 
     private fun scoreStress16k(app: YumeApp, quick: Boolean = false, motion: Boolean = false): String {
         val sb = StringBuilder()

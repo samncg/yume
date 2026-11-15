@@ -158,7 +158,22 @@ class SurfaceRenderer(
                 // and their composite tiles stay stale until they land).
                 val cache = TileCache.active
                 cache?.adoptPrefetched()
-                if (cache != null) cache.blockingLoads = false
+                if (cache != null) {
+                    // Catching up (after an undo, a fill, opening a file) goes
+                    // three times faster while the user is not drawing or
+                    // moving the view; during a stroke or a pinch frames stay
+                    // light.
+                    val v = session.view
+                    val sig = v.scale.toBits().toLong() * 31L + v.tx.toBits() * 17L + v.ty.toBits() + v.rotationDeg.toBits() * 7L
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (sig != lastViewSig) {
+                        lastViewSig = sig
+                        lastViewMove = now
+                    }
+                    val busy = session.strokeInProgress || now - lastViewMove < 250L
+                    cache.frameCompositeBudgetNs = if (busy) 4_000_000L else 12_000_000L
+                    cache.blockingLoads = false
+                }
                 try {
                     if (engine.flush()) work = true
                 } finally {
@@ -291,6 +306,10 @@ class SurfaceRenderer(
         }
     }
 
+    private var lastMipLog = 0L
+    private var lastViewSig = 0L
+    private var lastViewMove = 0L
+
     /** Set when a frame left mip work for the next ones. */
     @Volatile private var mipCarry = false
 
@@ -337,6 +356,13 @@ class SurfaceRenderer(
                     if (engine.hasMipDirty) {
                         engine.updateMip(MIP_FRAME_BUDGET_NS)
                         mipCarry = engine.hasMipDirty
+                    }
+                    if (com.yume.app.BuildConfig.DEBUG) {
+                        val now = android.os.SystemClock.uptimeMillis()
+                        if (now - lastMipLog > 500L) {
+                            lastMipLog = now
+                            android.util.Log.i("YumeMip", "zoomed out scale=${view.scale} carry=$mipCarry ${engine.mipDebug()}")
+                        }
                     }
                     if (engine.mipDrawable()) engine.drawMip(canvas)
                     else engine.drawComposite(canvas, rect)

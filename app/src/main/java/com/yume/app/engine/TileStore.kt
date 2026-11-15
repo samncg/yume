@@ -895,6 +895,27 @@ class SparseTileStore(
         }
     }
 
+    /** Tiles of this store on disk now. */
+    fun evictedCount(): Int = evicted.size
+
+    /**
+     * Calls [action] with the canvas rect of every tile that holds pixels,
+     * in memory or on disk (no disk read). Missing tiles are the default.
+     */
+    fun forEachOccupiedTileRect(action: (Rect) -> Unit) {
+        val r = Rect()
+        val seen = HashSet<Long>(tiles.size + evicted.size)
+        fun emit(k: Long) {
+            if (!seen.add(k)) return
+            val tx = (k shr 32).toInt()
+            val ty = k.toInt()
+            r.set(tx * tileSize, ty * tileSize, min(width, tx * tileSize + tileSize), min(height, ty * tileSize + tileSize))
+            if (!r.isEmpty) action(r)
+        }
+        for (k in tiles.keys) emit(k)
+        for (k in evicted) emit(k)
+    }
+
     /** True when a tile inside [rect] is evicted (it would need a disk read). */
     fun hasEvictedIn(rect: Rect, prefetch: Boolean): Boolean {
         val any = hasEvictedIn(rect)

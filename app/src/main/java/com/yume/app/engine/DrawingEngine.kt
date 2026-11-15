@@ -177,7 +177,42 @@ class DrawingEngine(val width: Int, val height: Int) {
      * was evicted and frames must not block on disk. They stay dirty (their
      * composite pixels are stale) until the prefetched tiles are adopted.
      */
-    private val pending = ArrayList<Rect>()
+    /**
+     * Composite damage waiting for a later frame, one sub-rectangle per tile
+     * (a tile damaged again merges into its entry instead of queueing twice:
+     * undo after undo on a 16K canvas queued the same tiles thousands of
+     * times over).
+     */
+    private val pending = LinkedHashMap<Long, Rect>()
+
+    /** New composite damage, one sub-rectangle per tile (sparse mode). */
+    private val dirtyTiles = LinkedHashMap<Long, Rect>()
+
+    /** Tiles [compositeRegion] put off in the current call. */
+    private var deferredInPass = 0
+
+    /** Splits [r] (inside the canvas) by composite tile into [map], merging. */
+    private fun addDamage(map: LinkedHashMap<Long, Rect>, r: Rect) {
+        val ts = compositeTiles?.tileSize ?: TileStoreConfig.tileSize
+        val x0 = max(0, r.left)
+        val y0 = max(0, r.top)
+        val x1 = min(width, r.right)
+        val y1 = min(height, r.bottom)
+        if (x1 <= x0 || y1 <= y0) return
+        for (ty in y0 / ts..(y1 - 1) / ts) {
+            val ty0 = ty * ts
+            for (tx in x0 / ts..(x1 - 1) / ts) {
+                val tx0 = tx * ts
+                val l = max(x0, tx0)
+                val t = max(y0, ty0)
+                val rr = min(x1, tx0 + ts)
+                val b = min(y1, ty0 + ts)
+                val k = (tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL)
+                val e = map[k]
+                if (e == null) map[k] = Rect(l, t, rr, b) else e.union(l, t, rr, b)
+            }
+        }
+    }
     /** Start of the current flush, for the per-frame composite time budget. */
     private var frameStart = 0L
     /** Cold composite tiles the current flush may still queue for prefetch. */
@@ -266,7 +301,11 @@ class DrawingEngine(val width: Int, val height: Int) {
     fun currentCompositePixel(x: Int, y: Int): Int {
         if (x !in 0 until width || y !in 0 until height) return 0
         val p = Rect(x, y, x + 1, y + 1)
-        if (Rect.intersects(dirty, p) || pending.any { Rect.intersects(it, p) }) {
+        val ts = compositeTiles?.tileSize ?: TileStoreConfig.tileSize
+        val pk = ((x / ts).toLong() shl 32) or ((y / ts).toLong() and 0xFFFFFFFFL)
+        if (Rect.intersects(dirty, p) || dirtyTiles[pk]?.let { Rect.intersects(it, p) } == true ||
+            pending[pk]?.let { Rect.intersects(it, p) } == true
+        ) {
             val cache = TileCache.active
             val old = cache?.blockingLoads
             if (cache != null) cache.blockingLoads = true
@@ -433,10 +472,10 @@ class DrawingEngine(val width: Int, val height: Int) {
         if (layers.size <= 1) return false
         val i = indexOf(id)
         if (i < 0) return false
+        markLayerDirty(layers[i])
         layers.removeAt(i)
         activeIndex = activeIndex.coerceIn(0, layers.size - 1)
         pruneGroups()
-        markDirtyAll()
         return true
     }
 
@@ -681,14 +720,43 @@ class DrawingEngine(val width: Int, val height: Int) {
         val x1 = min(width, r.right)
         val y1 = min(height, r.bottom)
         if (x1 <= x0 || y1 <= y0) return
+        if (sparseMode) {
+            addDamage(dirtyTiles, Rect(x0, y0, x1, y1))
+            return
+        }
         if (dirty.isEmpty) dirty.set(x0, y0, x1, y1) else dirty.union(x0, y0, x1, y1)
     }
 
+    /**
+     * Damage for a change of [layer]'s look (opacity, blend, visibility,
+     * clipping, mask on / off): only where the layer has pixels can the
+     * composite change. A layer with a small drawing on a 16K canvas no longer
+     * recomposites all 4096 tiles per slider step.
+     */
+    fun markLayerDirty(layer: Layer) {
+        val st = layer.tiles as? SparseTileStore
+        if (!sparseMode || st == null || st.defaultPixel != 0) {
+            markDirtyAll()
+            return
+        }
+        st.forEachOccupiedTileRect { markDirty(it) }
+    }
+
+    /** [markLayerDirty] for every layer of group [id]. */
+    fun markGroupDirty(id: Long) {
+        for (l in layers) if (l.groupId == id) markLayerDirty(l)
+    }
+
     fun markDirtyAll() {
+        if (sparseMode) {
+            dirtyTiles.clear()
+            addDamage(dirtyTiles, Rect(0, 0, width, height))
+            return
+        }
         dirty.set(0, 0, width, height)
     }
 
-    fun hasDirty(): Boolean = !dirty.isEmpty || pending.isNotEmpty()
+    fun hasDirty(): Boolean = !dirty.isEmpty || dirtyTiles.isNotEmpty() || pending.isNotEmpty()
 
     /**
      * The document area on screen (set by the renderer each frame; empty =
@@ -705,10 +773,10 @@ class DrawingEngine(val width: Int, val height: Int) {
      * and, at 8K, never converge.
      */
     fun flush(): Boolean {
-        if (dirty.isEmpty && pending.isEmpty()) return false
+        if (dirty.isEmpty && dirtyTiles.isEmpty() && pending.isEmpty()) return false
         frameStart = System.nanoTime()
         prefetchLeft = 4
-        val retry = ArrayList(pending)
+        val retry = ArrayList(pending.values)
         pending.clear()
         val prio = priorityRect
         if (!dirty.isEmpty) {
@@ -735,6 +803,27 @@ class DrawingEngine(val width: Int, val height: Int) {
             }
             if (sparseMode) mipDirtyUnion(d)
         }
+        if (dirtyTiles.isNotEmpty()) {
+            // New damage, tile by tile, the tiles on screen first.
+            val list = ArrayList(dirtyTiles.values)
+            dirtyTiles.clear()
+            if (!prio.isEmpty && list.size > 1) list.sortBy { if (Rect.intersects(it, prio)) 0 else 1 }
+            val cache = TileCache.active
+            for ((n, r) in list.withIndex()) {
+                if (cache != null && !cache.blockingLoads &&
+                    System.nanoTime() - frameStart > cache.frameCompositeBudgetNs
+                ) {
+                    // Out of frame time: queue the rest without visiting it.
+                    for (k in n until list.size) addDamage(pending, list[k])
+                    break
+                }
+                deferredInPass = 0
+                compositeRegion(r)
+                // The mip follows only what was really composited; a deferred
+                // tile marks it when its turn comes.
+                if (deferredInPass == 0) mipDirtyUnion(r)
+            }
+        }
         if (!prio.isEmpty && retry.size > 1) {
             // Deferred tiles on screen go first too.
             retry.sortBy { if (Rect.intersects(it, prio)) 0 else 1 }
@@ -746,11 +835,12 @@ class DrawingEngine(val width: Int, val height: Int) {
             if (cache != null && !cache.blockingLoads &&
                 System.nanoTime() - frameStart > cache.frameCompositeBudgetNs
             ) {
-                for (k in n until retry.size) pending.add(retry[k])
+                for (k in n until retry.size) addDamage(pending, retry[k])
                 break
             }
+            deferredInPass = 0
             compositeRegion(r)
-            if (sparseMode) mipDirtyUnion(r)
+            if (sparseMode && deferredInPass == 0) mipDirtyUnion(r)
         }
         TileCache.active?.let { if (it.evictEveryOp) it.evictTo() }
         return true
@@ -759,12 +849,14 @@ class DrawingEngine(val width: Int, val height: Int) {
     /** Composite area still waiting for prefetched tiles (stale on screen). */
     fun deferredRect(): Rect {
         val out = Rect(dirty)
-        for (r in pending) if (out.isEmpty) out.set(r) else out.union(r)
+        for (r in dirtyTiles.values) if (out.isEmpty) out.set(r) else out.union(r)
+        for (r in pending.values) if (out.isEmpty) out.set(r) else out.union(r)
         return out
     }
 
     fun compositeAll() {
         pending.clear()
+        dirtyTiles.clear()
         compositeRegion(Rect(0, 0, width, height))
         if (sparseMode) mipDirtyUnion(Rect(0, 0, width, height))
         dirty.setEmpty()
@@ -843,7 +935,8 @@ class DrawingEngine(val width: Int, val height: Int) {
                 if (nonBlocking && (overTime || compositeCold || needsDisk(sub, mayPrefetch))) {
                     if (mayPrefetch) prefetchLeft--
                     // Keep the stale composite pixels; retry once the tiles land.
-                    pending.add(Rect(sub))
+                    addDamage(pending, sub)
+                    deferredInPass++
                     cache.deferredTiles++
                     continue
                 }
@@ -969,23 +1062,35 @@ class DrawingEngine(val width: Int, val height: Int) {
 
     var mipTiles: SparseTileStore? = null
         private set
-    private val mipDirty = Rect()
     private var mipPatch: Bitmap? = null
     private val mipPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
 
+    /**
+     * Mip tiles to regenerate, by key, oldest damage first. Tracked per tile:
+     * one rectangle around all the damage covered far more than changed (a
+     * diagonal stroke across a 16K canvas is a box of hundreds of mip tiles).
+     */
+    private val mipDirtyKeys = LinkedHashSet<Long>()
+
+    /** Frames each mip tile has waited for its composite tiles to be prefetched. */
+    private val mipWaits = HashMap<Long, Int>()
+
     private fun mipDirtyUnion(r: Rect) {
-        if (mipDirty.isEmpty) mipDirty.set(r) else mipDirty.union(r)
+        val ts = mipTiles?.tileSize ?: TileStoreConfig.tileSize
+        val span = ts * mipScale
+        val x0 = max(0, r.left)
+        val y0 = max(0, r.top)
+        val x1 = min(width, r.right)
+        val y1 = min(height, r.bottom)
+        if (x1 <= x0 || y1 <= y0) return
+        for (ty in y0 / span..(y1 - 1) / span) {
+            for (tx in x0 / span..(x1 - 1) / span) {
+                mipDirtyKeys.add((tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL))
+            }
+        }
     }
 
-    val hasMipDirty: Boolean get() = !mipDirty.isEmpty || mipRowRest != null
-
-    /**
-     * The rest of a mip row cut short by the frame budget, done first on the
-     * next call. Kept apart from [mipDirty]: merged into that one rectangle it
-     * covered the whole row again, so every frame redid the same first tiles
-     * and the refresh never got past them.
-     */
-    private var mipRowRest: Rect? = null
+    val hasMipDirty: Boolean get() = mipDirtyKeys.isNotEmpty()
 
     /** Materialises the mip store (sparse compositing only). */
     fun enableMip() {
@@ -994,16 +1099,19 @@ class DrawingEngine(val width: Int, val height: Int) {
                 mipWidth, mipHeight, TileStoreConfig.tileSize, null, null, backgroundColor,
                 solidTiles = true
             )
-            mipDirty.set(0, 0, width, height)
+            mipDirtyUnion(Rect(0, 0, width, height))
             mipBuilt = false
         }
     }
 
     /** True when the whole document is covered by the current mip. */
-    fun mipReady(): Boolean = mipTiles != null && mipDirty.isEmpty && mipRowRest == null
+    fun mipReady(): Boolean = mipTiles != null && mipDirtyKeys.isEmpty()
 
-    /** Frames the mip has waited for the current tile's composite to be prefetched. */
-    private var mipWaits = 0
+    /** One line of mip state for the debug log. */
+    fun mipDebug(): String =
+        "mipDirty=${mipDirtyKeys.size} waiting=${mipWaits.size} built=$mipBuilt pending=${pending.size} " +
+            "dirtyTiles=${dirtyTiles.size} evictedComposite=${compositeTiles?.evictedCount() ?: -1} " +
+            "prefetches=${TileCache.active?.pendingPrefetches()}"
 
     /** Set once the mip has been complete: from then on it is always drawable. */
     private var mipBuilt = false
@@ -1019,92 +1127,74 @@ class DrawingEngine(val width: Int, val height: Int) {
     fun mipDrawable(): Boolean = mipTiles != null && (mipBuilt || mipReady())
 
     /**
-     * Rebuilds the mip tiles whose document region changed since the last call.
-     * Each tile is a fresh downscale of the document region it covers, so a
-     * partial update produces the same result as a full rebuild.
+     * Regenerates dirty mip tiles, at least one and then until [budgetNs0]
+     * runs out. Each tile is a fresh downscale of the document region it
+     * covers, so a partial update produces the same result as a full rebuild.
      */
     fun updateMip(budgetNs0: Long = Long.MAX_VALUE): Boolean {
         val st = mipTiles ?: return false
-        if (mipDirty.isEmpty && mipRowRest == null) return false
+        if (mipDirtyKeys.isEmpty()) return false
         // The first build is done in one go (there is nothing to show yet).
-        val budgetNs = if (mipBuilt) budgetNs0 else Long.MAX_VALUE
+        val budgeted = mipBuilt && budgetNs0 != Long.MAX_VALUE
         val t0 = System.nanoTime()
-        mipRowRest?.let { rest ->
-            mipRowRest = null
-            if (!mipPass(st, rest, t0, budgetNs)) return true
+        var done = 0
+        val it = mipDirtyKeys.iterator()
+        while (it.hasNext()) {
+            if (done > 0 && budgeted && System.nanoTime() - t0 > budgetNs0) return true
+            val k = it.next()
+            if (mipTile(st, k, budgeted)) {
+                it.remove()
+                mipWaits.remove(k)
+                done++
+            }
         }
-        if (!mipDirty.isEmpty) {
-            val doc = Rect(mipDirty)
-            mipDirty.setEmpty()
-            if (!mipPass(st, doc, t0, budgetNs)) return true
-        }
-        mipBuilt = true
+        if (mipDirtyKeys.isEmpty()) mipBuilt = true
         return true
     }
 
     /**
-     * Rebuilds the mip tiles over [doc]. False when the frame budget ran out:
-     * the rest of the current row is then in [mipRowRest] and the rows below
-     * are back in [mipDirty].
+     * Regenerates mip tile [k]. False when it has to wait: its composite tiles
+     * are on disk and have been handed to the prefetcher (reading them here,
+     * one by one, inside a frame was a frame of many seconds). After ~60
+     * frames of waiting it is read anyway, so the view always finishes.
      */
-    private fun mipPass(st: SparseTileStore, doc: Rect, t0: Long, budgetNs: Long): Boolean {
+    private fun mipTile(st: SparseTileStore, k: Long, budgeted: Boolean): Boolean {
         val ts = st.tileSize
         val span = ts * mipScale
+        val mtx = (k shr 32).toInt()
+        val mty = k.toInt()
+        val x0 = mtx * span
+        val y0 = mty * span
+        val x1 = min(width, x0 + span)
+        val y1 = min(height, y0 + span)
+        if (x1 <= x0 || y1 <= y0) return true
+        val src = Rect(x0, y0, x1, y1)
+        val mx0 = mtx * ts
+        val my0 = mty * ts
+        val mw = min(ts, mipWidth - mx0)
+        val mh = min(ts, mipHeight - my0)
+        // Every composite tile under it one and the same flat colour: the
+        // downscale is that colour, no 1024 px read and filter.
+        val flat = flatComposite(src)
+        if (flat >= 0L) {
+            st.putSolidTile(mtx, mty, flat.toInt())
+            return true
+        }
+        val cst = compositeTiles
+        if (budgeted && cst != null && cst.hasEvictedIn(src, prefetch = true)) {
+            val w = (mipWaits[k] ?: 0) + 1
+            mipWaits[k] = w
+            if (w < 60) return false
+        }
         val patch = mipPatchBitmap(span)
-        val src = Rect()
-        var done = 0
-        for (mty in doc.top / span..(doc.bottom - 1) / span) {
-            for (mtx in doc.left / span..(doc.right - 1) / span) {
-                val x0 = mtx * span
-                val y0 = mty * span
-                val x1 = min(width, x0 + span)
-                val y1 = min(height, y0 + span)
-                if (x1 <= x0 || y1 <= y0) continue
-                if (x1 <= doc.left || x0 >= doc.right || y1 <= doc.top || y0 >= doc.bottom) continue
-                // Out of frame time (at least one tile per call, so it always
-                // advances): the rest waits for the next frames.
-                if (done > 0 && budgetNs != Long.MAX_VALUE && System.nanoTime() - t0 > budgetNs) {
-                    mipRowRest = Rect(max(x0, doc.left), max(y0, doc.top), doc.right, min(y1, doc.bottom))
-                    if (y1 < doc.bottom) mipDirtyUnion(Rect(doc.left, y1, doc.right, doc.bottom))
-                    return false
-                }
-                done++
-                src.set(x0, y0, x1, y1)
-                val mx0 = mtx * ts
-                val my0 = mty * ts
-                val mw = min(ts, mipWidth - mx0)
-                val mh = min(ts, mipHeight - my0)
-                // Every composite tile under it one and the same flat colour:
-                // the downscale is that colour, no 1024 px read and filter.
-                val flat = flatComposite(src)
-                if (flat >= 0L && mw == min(ts, mipWidth - mx0) && mx0 + mw <= mipWidth) {
-                    st.putSolidTile(mtx, mty, flat.toInt())
-                    continue
-                }
-                // Composite tiles on disk (after a big edit most of a huge
-                // canvas is): reading them here, one by one, inside a frame
-                // was a frame of many seconds. Ask the prefetcher for them and
-                // come back to this tile in a later frame (at most ~60 frames,
-                // then read it anyway so the view always finishes).
-                val cst = compositeTiles
-                if (budgetNs != Long.MAX_VALUE && cst != null && cst.hasEvictedIn(src, prefetch = true) &&
-                    mipWaits++ < 60
-                ) {
-                    mipRowRest = Rect(max(x0, doc.left), max(y0, doc.top), doc.right, min(y1, doc.bottom))
-                    if (y1 < doc.bottom) mipDirtyUnion(Rect(doc.left, y1, doc.right, doc.bottom))
-                    return false
-                }
-                mipWaits = 0
-                readCompositeInto(patch, src)
-                st.editTile(mtx, mty) { c ->
-                    c.drawBitmap(
-                        patch,
-                        Rect(0, 0, x1 - x0, y1 - y0),
-                        Rect(mx0, my0, mx0 + mw, my0 + mh),
-                        mipPaint
-                    )
-                }
-            }
+        readCompositeInto(patch, src)
+        st.editTile(mtx, mty) { c ->
+            c.drawBitmap(
+                patch,
+                Rect(0, 0, x1 - x0, y1 - y0),
+                Rect(mx0, my0, mx0 + mw, my0 + mh),
+                mipPaint
+            )
         }
         return true
     }
@@ -1641,6 +1731,10 @@ class DrawingEngine(val width: Int, val height: Int) {
     }
 
     fun applyPreview(p: LayerPreview?) {
+        // No preview before and none now (undo, redo and every tool switch
+        // clear it): nothing on screen changes. Marking the whole canvas here
+        // made each undo recomposite all 4096 tiles of a 16K document.
+        if (p == null && preview == null) return
         preview = p
         markDirtyAll()
     }
@@ -1898,9 +1992,13 @@ class DrawingEngine(val width: Int, val height: Int) {
             val tile = if (before) c.before else c.after
             store.putTileRegion(c.tx, c.ty, c.clip, tile)
         }
-        store.compactSolids(bounds)
+        // Only the tiles that changed: the bounds of a long diagonal stroke
+        // cover thousands of tiles it never touched.
+        for (c in changes) {
+            store.compactSolids(c.clip)
+            markDirty(c.clip)
+        }
         layer.touch()
-        markDirty(bounds)
     }
 
     /**

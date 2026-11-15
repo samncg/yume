@@ -2583,7 +2583,7 @@ class DrawingSession(
         beginPropertyEdit(id, "Layer opacity")
         layer.opacity = value.coerceIn(0f, 1f)
         touchProperties()
-        engine.markDirtyAll()
+        engine.markLayerDirty(layer)
         requestState()
     }
 
@@ -2612,7 +2612,7 @@ class DrawingSession(
         engine.layerById(id)?.let {
             it.blend = blend
             touchProperties()
-            engine.markDirtyAll()
+            engine.markLayerDirty(it)
             requestState()
         }
     }
@@ -2630,7 +2630,7 @@ class DrawingSession(
         }
         layer.visible = !layer.visible
         touchProperties()
-        engine.markDirtyAll()
+        engine.markLayerDirty(layer)
         requestState()
     }
 
@@ -2654,7 +2654,7 @@ class DrawingSession(
         engine.layerById(id)?.let {
             it.clipping = !it.clipping
             touchProperties()
-            engine.markDirtyAll()
+            engine.markLayerDirty(it)
             requestState()
         }
     }
@@ -2691,7 +2691,7 @@ class DrawingSession(
         layer.maskEnabled = !layer.maskEnabled
         layer.touch()
         touchProperties()
-        engine.markDirtyAll()
+        engine.markLayerDirty(layer)
         requestState()
     }
 
@@ -2719,7 +2719,7 @@ class DrawingSession(
             beginPropertyEdit(id, "Group opacity")
             it.opacity = value.coerceIn(0f, 1f)
             touchProperties()
-            engine.markDirtyAll()
+            engine.markGroupDirty(id)
             requestState()
         }
     }
@@ -2728,7 +2728,7 @@ class DrawingSession(
         engine.groupById(id)?.let {
             it.blend = blend
             touchProperties()
-            engine.markDirtyAll()
+            engine.markGroupDirty(id)
             requestState()
         }
     }
@@ -2737,7 +2737,7 @@ class DrawingSession(
         engine.groupById(id)?.let {
             it.visible = !it.visible
             touchProperties()
-            engine.markDirtyAll()
+            engine.markGroupDirty(id)
             requestState()
         }
     }
@@ -2904,7 +2904,10 @@ class DrawingSession(
         val action = history.peekUndo() ?: return
         if (!ensureHistoryBudget(action, undo = true)) return
         if (history.undo(engine)) {
-            engine.markDirtyAll()
+            // Pixel edits mark exactly the tiles they put back; only layer
+            // structure changes need the whole canvas recomposited (at 16K
+            // that is 4096 tiles, many of them read from disk).
+            if (!marksOwnDamage(action)) engine.markDirtyAll()
             requestState()
         }
     }
@@ -2915,9 +2918,16 @@ class DrawingSession(
         val action = history.peekRedo() ?: return
         if (!ensureHistoryBudget(action, undo = false)) return
         if (history.redo(engine)) {
-            engine.markDirtyAll()
+            if (!marksOwnDamage(action)) engine.markDirtyAll()
             requestState()
         }
+    }
+
+    /** True for steps whose undo / redo marks exactly the area it changes. */
+    private fun marksOwnDamage(action: HistoryAction): Boolean = when (action) {
+        is TilePixelAction, is PixelAction -> true
+        is GroupAction -> action.actions.all { marksOwnDamage(it) }
+        else -> false
     }
 
     /**
