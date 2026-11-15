@@ -1033,3 +1033,14 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 #   the previous gate; features 30/30 MATCH x4; journal, history-spill, png,
 #   sparse-persist, export-parity, lazy-open, save-safety, cache-fail PASS.
 # bleedtest (all new engines, dense vs sparse): 92ef41c0 = 92ef41c0 MATCH.
+
+# --- Responsive curves, instant previews, apply estimates (Nov 2026) --------
+# Adjustment previews no longer copy the layer for undo first (the copy is
+# taken at Apply); one <=2048 px base serves every GPU preview, now including
+# Noise. Apply time is estimated from a learned per-device rate. Posterize and
+# Threshold tone adjustments, swap-colour action, background / canvas size
+# entries in the panels. No change to painting or baking code paths:
+# golden dense PASS (both sizes); sparse vs dense diff lines byte-identical to
+#   the previous gate; features 30/30 MATCH x4; journal, png, cache-fail PASS.
+# bleedtest a0323904 dense = sparse MATCH.
+# stress16k: blur bake + undo MATCH, reopen MATCH, native peak 998 MB.

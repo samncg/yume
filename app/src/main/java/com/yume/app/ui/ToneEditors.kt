@@ -4,8 +4,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +32,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -52,6 +52,30 @@ fun ToneEditor(kind: AdjustmentKind, state: EditorUiState, onLut: (ToneLut) -> U
         AdjustmentKind.Levels -> LevelsEditor(onLut)
         AdjustmentKind.ColorBalance -> ColorBalanceEditor(onLut)
         AdjustmentKind.GradientMap -> GradientMapEditor(state.color, onLut)
+        AdjustmentKind.Posterize -> {
+            var levels by remember { mutableIntStateOf(6) }
+            YumeSlider(
+                value = levels.toFloat(),
+                onChange = { v ->
+                    levels = v.roundToInt().coerceIn(2, 32)
+                    onLut(ToneLut.posterize(levels))
+                },
+                label = "Levels", valueLabel = "$levels", min = 2f, max = 32f
+            )
+            Text("Fewer levels give flatter, poster-like colour.", style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim)
+        }
+        AdjustmentKind.Threshold -> {
+            var cut by remember { mutableStateOf(0.5f) }
+            YumeSlider(
+                value = cut,
+                onChange = { v ->
+                    cut = v
+                    onLut(ToneLut.threshold(cut))
+                },
+                label = "Threshold", valueLabel = "${(cut * 100).roundToInt()}%"
+            )
+            Text("Everything darker turns black, everything lighter white: line art from a sketch or a photo.", style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim)
+        }
         else -> Unit
     }
 }
@@ -75,7 +99,7 @@ private fun CurvesEditor(onLut: (ToneLut) -> Unit) {
     SegmentedRow(options = CHANNELS, selectedIndex = channel, onSelect = { channel = it })
     Spacer(Modifier.height(8.dp))
     val density = LocalDensity.current
-    val reach = with(density) { 22.dp.toPx() }
+    val reach = with(density) { 30.dp.toPx() }
     Box(
         Modifier
             .fillMaxWidth()
@@ -84,56 +108,74 @@ private fun CurvesEditor(onLut: (ToneLut) -> Unit) {
             .background(Color(0xFF17171B))
             .border(1.dp, Color(0x22FFFFFF), RoundedCornerShape(10.dp))
             .pointerInput(channel) {
+                // Reacts to the first touch (no drag needed to start) and keeps
+                // the gesture, so the panel does not scroll away under it. A
+                // press on the curve adds a point there; drag moves it; drag a
+                // point well outside the box, or double tap it, to remove it.
                 val pts = curves[channel]
                 fun toUnit(o: Offset) = (o.x / size.width).coerceIn(0f, 1f) to (1f - o.y / size.height).coerceIn(0f, 1f)
-                detectDragGestures(
-                    onDragStart = { o ->
-                        var best = -1
-                        var bestD = reach
-                        pts.forEachIndexed { i, (x, y) ->
-                            val d = hypot(x * size.width - o.x, (1f - y) * size.height - o.y)
-                            if (d < bestD) { bestD = d; best = i }
-                        }
-                        if (best < 0) {
-                            // Grab the curve anywhere: a new point there.
-                            val (ux, uy) = toUnit(o)
-                            var at = pts.indexOfFirst { it.first > ux }
-                            if (at < 0) at = pts.size
-                            pts.add(at, ux to uy)
-                            best = at
-                        }
-                        dragging = best
-                    },
-                    onDrag = { change, _ ->
-                        val i = dragging
-                        if (i >= 0 && i < pts.size) {
-                            val (ux, uy) = toUnit(change.position)
-                            // Points keep their order; the ends stay at the edges.
-                            val x = when (i) {
-                                0 -> 0f
-                                pts.size - 1 -> 1f
-                                else -> ux.coerceIn(pts[i - 1].first + 0.01f, pts[i + 1].first - 0.01f)
-                            }
-                            pts[i] = x to uy
-                            publish()
-                        }
-                    },
-                    onDragEnd = { dragging = -1 },
-                    onDragCancel = { dragging = -1 }
-                )
-            }
-            .pointerInput(channel) {
-                // Double tap a middle point to remove it.
-                detectTapGestures(onDoubleTap = { o ->
-                    val pts = curves[channel]
-                    val i = pts.indexOfFirst { (x, y) ->
-                        hypot(x * size.width - o.x, (1f - y) * size.height - o.y) < reach
+                var lastTap = 0L
+                var lastTapIndex = -1
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    val o = down.position
+                    var best = -1
+                    var bestD = reach
+                    pts.forEachIndexed { i, (x, y) ->
+                        val d = hypot((x * size.width - o.x).toDouble(), ((1f - y) * size.height - o.y).toDouble()).toFloat()
+                        if (d < bestD) { bestD = d; best = i }
                     }
-                    if (i > 0 && i < pts.size - 1) {
-                        pts.removeAt(i)
+                    val existed = best >= 0
+                    if (best < 0) {
+                        val (ux, uy) = toUnit(o)
+                        var at = pts.indexOfFirst { it.first > ux }
+                        if (at <= 0) at = pts.size - 1
+                        pts.add(at, ux.coerceIn(pts[at - 1].first + 0.01f, pts[at].first - 0.01f) to uy)
+                        best = at
                         publish()
                     }
-                })
+                    dragging = best
+                    var moved = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (!change.pressed) break
+                        change.consume()
+                        if (!moved && (change.position - o).getDistance() > viewConfiguration.touchSlop * 0.4f) moved = true
+                        val i = dragging
+                        if (!moved || i < 0 || i >= pts.size) continue
+                        val far = reach * 1.6f
+                        val outside = change.position.x < -far || change.position.x > size.width + far ||
+                            change.position.y < -far || change.position.y > size.height + far
+                        if (outside && i > 0 && i < pts.size - 1) {
+                            pts.removeAt(i)
+                            dragging = -1
+                            publish()
+                            continue
+                        }
+                        val (ux, uy) = toUnit(change.position)
+                        // Points keep their order; the ends stay at the edges.
+                        val x = when (i) {
+                            0 -> 0f
+                            pts.size - 1 -> 1f
+                            else -> ux.coerceIn(pts[i - 1].first + 0.01f, pts[i + 1].first - 0.01f)
+                        }
+                        pts[i] = x to uy
+                        publish()
+                    }
+                    val now = android.os.SystemClock.uptimeMillis()
+                    val i = dragging
+                    if (!moved && existed && i > 0 && i < pts.size - 1 && lastTapIndex == i && now - lastTap < 380L) {
+                        pts.removeAt(i)
+                        publish()
+                        lastTapIndex = -1
+                    } else if (!moved) {
+                        lastTapIndex = i
+                        lastTap = now
+                    }
+                    dragging = -1
+                }
             }
     ) {
         Canvas(Modifier.fillMaxWidth().aspectRatio(1f)) {
@@ -158,8 +200,8 @@ private fun CurvesEditor(onLut: (ToneLut) -> Unit) {
                 drawPath(path, col, style = Stroke(width = if (c == channel) 2.5f * density.density else 1.2f * density.density))
             }
             curves[channel].forEach { (x, y) ->
-                drawCircle(Color.White, 6f * density.density, Offset(x * w, (1f - y) * h))
-                drawCircle(CHANNEL_COLORS[channel], 4f * density.density, Offset(x * w, (1f - y) * h))
+                drawCircle(Color.White, 9f * density.density, Offset(x * w, (1f - y) * h))
+                drawCircle(CHANNEL_COLORS[channel], 6f * density.density, Offset(x * w, (1f - y) * h))
             }
         }
     }
@@ -171,7 +213,7 @@ private fun CurvesEditor(onLut: (ToneLut) -> Unit) {
             publish()
         }
         Text(
-            "Drag to add or move points; double tap to remove.",
+            "Touch the curve to add a point and drag it. Double tap a point, or drag it out of the box, to remove it.",
             style = MaterialTheme.typography.bodySmall,
             color = YumeColors.textDim
         )

@@ -35,10 +35,13 @@ enum class AdjustmentKind(val label: String) {
     Curves("Curves"),
     Levels("Levels"),
     ColorBalance("Colour balance"),
-    GradientMap("Gradient map");
+    GradientMap("Gradient map"),
+    Posterize("Posterize"),
+    Threshold("Threshold");
 
     /** Driven by a lookup table built from the panel's editor, not the amount. */
-    val isTone: Boolean get() = this == Curves || this == Levels || this == ColorBalance || this == GradientMap
+    val isTone: Boolean get() = this == Curves || this == Levels || this == ColorBalance || this == GradientMap ||
+        this == Posterize || this == Threshold
 }
 
 data class LayerSnapshotData(
@@ -431,7 +434,35 @@ class DrawingSession(
     private var adjustCapture: TileCapture? = null
     private var adjustBounds: Rect = Rect()
     /** True while an adjustment is being previewed, dense or sparse. */
-    private val adjusting: Boolean get() = adjustSnapshot != null || adjustCapture != null
+    private val adjusting: Boolean get() = adjustSnapshot != null || adjustCapture != null || adjustKind != null
+
+    /** Pixels the adjustment being previewed will rewrite (all layers counted). */
+    @Volatile private var adjustPixels = 0L
+
+    /** Expected duration of the operation running now, in ms (0 = unknown). */
+    @Volatile var workEtaMs = 0L
+        private set
+
+    /**
+     * About how long Apply will take for [kind], in seconds (0 when nothing
+     * is being previewed). Learned from earlier applies on this device.
+     */
+    fun adjustEstimateSeconds(kind: AdjustmentKind): Float {
+        val mp = adjustPixels / 1_000_000f
+        if (mp <= 0f) return 0f
+        var rate = synchronized(adjustRates) { adjustRates[kind] } ?: defaultRate(kind)
+        if (kind == AdjustmentKind.MotionBlur) rate *= (0.25f + adjustAmount.coerceIn(0f, 1f) * 1.5f)
+        return mp * rate
+    }
+
+    private fun defaultRate(kind: AdjustmentKind): Float = when (kind) {
+        AdjustmentKind.Hue, AdjustmentKind.Saturation, AdjustmentKind.Brightness -> 0.02f
+        AdjustmentKind.Blur -> 0.15f
+        AdjustmentKind.Noise -> 0.04f
+        AdjustmentKind.Sharpen -> 0.12f
+        AdjustmentKind.MotionBlur -> 0.2f
+        else -> 0.03f
+    }
     private var adjustKind: AdjustmentKind? = null
     private var adjustAmount = 0f
     private var adjustProxy: Bitmap? = null
@@ -1913,6 +1944,12 @@ class DrawingSession(
         requestState()
     }
 
+    /** Back to the colour painted with before this one (and again to return). */
+    fun swapColor() {
+        val other = recentColors.firstOrNull { it != color } ?: return
+        chooseColor(other)
+    }
+
     private fun addRecent(value: Int) {
         if (recentColors.firstOrNull() == value) return
         recentColors.remove(value)
@@ -3026,7 +3063,14 @@ class DrawingSession(
         if (!hasPendingPreview) return false
         hasPendingPreview = false
         val kind = pendingPreviewKind ?: return false
-        applyPreviewInternal(kind, pendingPreviewAmount)
+        // The first preview of a big layer builds its small copy: that shows
+        // the working card like any other slow step.
+        workSince = android.os.SystemClock.uptimeMillis()
+        try {
+            applyPreviewInternal(kind, pendingPreviewAmount)
+        } finally {
+            workSince = 0L
+        }
         return true
     }
 
@@ -3045,14 +3089,23 @@ class DrawingSession(
             val halo = haloOf(kind)
             adjustWork = if (halo > 0) growBounds(base, halo) else base
             adjustBounds = if (halo > 0) growBounds(base, halo * 2) else base
-            if (adjustCapture == null && store.isSparse) {
-                adjustCapture = TileOps.capture(store, adjustBounds)
-            } else if (adjustSnapshot == null && !store.isSparse) {
+            // Sparse layers are not copied here: a preview never touches the
+            // layer, so the undo copy is taken when Apply bakes it. (Copying a
+            // painted 16K layer first made every preview start with a wait.)
+            var px = base.width().toLong() * base.height()
+            if (adjustAllLayers) {
+                for (other in engine.layers) {
+                    if (other === layer || !other.visible || !editable(other)) continue
+                    val ob = editBounds(other.paintStore)
+                    px += ob.width().toLong() * ob.height()
+                }
+            }
+            adjustPixels = px
+            if (adjustSnapshot == null && !store.isSparse) {
                 adjustSnapshot = store.readRect(Rect(0, 0, engine.width, engine.height))
             }
         }
         val snapshot = adjustSnapshot
-        if (store.isSparse && adjustCapture == null) return
         if (!store.isSparse && snapshot == null) return
         adjustKind = kind
         adjustAmount = amount
@@ -3085,14 +3138,13 @@ class DrawingSession(
             // Sharpen and motion blur preview on the GPU (a reduced copy:
             // close, while Apply bakes the exact CPU kernels). Without a GPU,
             // and for noise (grain at preview size would mislead), no preview.
-            AdjustmentKind.Sharpen, AdjustmentKind.MotionBlur ->
+            AdjustmentKind.Sharpen, AdjustmentKind.MotionBlur, AdjustmentKind.Noise ->
                 gpuPreview(store, snapshot, kind, amount)?.let { proxy ->
                     adjustProxy = proxy
                     LayerPreview(layer.id, null, proxy)
                 }
-            AdjustmentKind.Noise -> null
             AdjustmentKind.Curves, AdjustmentKind.Levels, AdjustmentKind.ColorBalance,
-            AdjustmentKind.GradientMap -> {
+            AdjustmentKind.GradientMap, AdjustmentKind.Posterize, AdjustmentKind.Threshold -> {
                 val lut = toneLut ?: return
                 val proxy = toneProxy(store, snapshot, lut)
                 adjustProxy = proxy
@@ -3148,12 +3200,13 @@ class DrawingSession(
      */
     private fun gpuPreview(store: TileStore, snapshot: Bitmap?, kind: AdjustmentKind, amount: Float): Bitmap? {
         if (android.os.Build.VERSION.SDK_INT < 33 || !GpuFilter.available) return null
-        val scale = if (kind == AdjustmentKind.Blur) 0.25f
-        else minOf(1f, 2048f / maxOf(engine.width, engine.height))
+        // One small copy serves every filter, so switching between them
+        // does not rebuild it.
+        val scale = minOf(1f, 2048f / maxOf(engine.width, engine.height))
         val w = max(1, (engine.width * scale).toInt())
         val h = max(1, (engine.height * scale).toInt())
         var base = adjustBase
-        if (base == null || base.isRecycled || base.width != w || base.height != h || adjustBaseKind != kind) {
+        if (base == null || base.isRecycled || base.width != w || base.height != h) {
             base?.recycle()
             if (snapshot == null && !store.isSparse) return null
             base = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
@@ -3177,6 +3230,8 @@ class DrawingSession(
             AdjustmentKind.Sharpen -> GpuFilter.sharpenEffect(amount.coerceIn(0f, 1f) * 2f)
             AdjustmentKind.MotionBlur ->
                 GpuFilter.motionEffect(amount.coerceIn(0f, 1f) * MOTION_MAX_RADIUS * px, motionAngle)
+            AdjustmentKind.Noise ->
+                GpuFilter.noiseEffect((amount.coerceIn(0f, 1f) * 90f).toInt().coerceIn(1, 120) / 255f)
             else -> return null
         } } catch (t: IllegalArgumentException) {
             android.util.Log.w("YumeGpu", "preview shader failed", t)
@@ -3232,7 +3287,7 @@ class DrawingSession(
     private fun commitAdjustmentInternalWork() {
         val layer = engine.activeLayer
         val dense = adjustSnapshot
-        val capture = adjustCapture
+        val eager = adjustCapture
         val bounds = Rect(adjustBounds)
         val kind = adjustKind
         val amount = adjustAmount
@@ -3251,6 +3306,17 @@ class DrawingSession(
             return
         }
         val work = if (adjustWork.isEmpty) bounds else Rect(adjustWork)
+        val pixels = adjustPixels
+        adjustPixels = 0L
+        adjustAmount = amount
+        val startedAt = android.os.SystemClock.uptimeMillis()
+        adjustPixels = pixels
+        workEtaMs = (adjustEstimateSeconds(kind) * 1000f).toLong()
+        adjustPixels = 0L
+        // The undo copy of the layer, taken now that it is really needed.
+        val capture = eager ?: if (dense == null && layer.paintStore.isSparse) {
+            TileOps.capture(layer.paintStore, bounds)
+        } else null
         val actions = ArrayList<HistoryAction>()
         var inFlight: TileCapture? = capture
         val baked = cancellable({
@@ -3290,7 +3356,18 @@ class DrawingSession(
             }
         }
         }
+        workEtaMs = 0L
         if (!baked) return
+        // Remember how fast this device did it, for the next estimate.
+        val mp = pixels / 1_000_000f
+        if (mp > 2f) {
+            var rate = (android.os.SystemClock.uptimeMillis() - startedAt) / 1000f / mp
+            if (kind == AdjustmentKind.MotionBlur) rate /= (0.25f + amount.coerceIn(0f, 1f) * 1.5f)
+            synchronized(adjustRates) {
+                val old = adjustRates[kind]
+                adjustRates[kind] = if (old == null) rate else old * 0.4f + rate * 0.6f
+            }
+        }
         when (actions.size) {
             0 -> Unit
             1 -> history.push(actions[0])
@@ -3340,7 +3417,8 @@ class DrawingSession(
                     Kernels.captureSource(capture)
                 ) { r, bmp -> store.writeRect(r, bmp, Rect(0, 0, r.width(), r.height())) }
                 AdjustmentKind.Curves, AdjustmentKind.Levels, AdjustmentKind.ColorBalance,
-                AdjustmentKind.GradientMap -> toneLut?.let { TileOps.tone(store, work, it) }
+                AdjustmentKind.GradientMap, AdjustmentKind.Posterize, AdjustmentKind.Threshold ->
+                    toneLut?.let { TileOps.tone(store, work, it) }
             }
             // The action covers the whole snapshot region: a blurred tile past
             // the work rect is unchanged, and copying it costs nothing extra.
@@ -3380,7 +3458,7 @@ class DrawingSession(
                     )
                 }
                 AdjustmentKind.Curves, AdjustmentKind.Levels, AdjustmentKind.ColorBalance,
-                AdjustmentKind.GradientMap -> toneLut?.apply(target)
+                AdjustmentKind.GradientMap, AdjustmentKind.Posterize, AdjustmentKind.Threshold -> toneLut?.apply(target)
             }
             val full = Rect(0, 0, engine.width, engine.height)
             layer.tiles.writeRect(full, target)
@@ -3415,6 +3493,7 @@ class DrawingSession(
         adjustCapture = null
         adjustSnapshot = null
         adjustKind = null
+        adjustPixels = 0L
         adjustWork.setEmpty()
         requestState()
     }
@@ -3938,3 +4017,6 @@ const val TOLERANCE_MAX = 255
 
 /** A tolerance as the percentage the sliders show (100% = everything). */
 fun tolerancePercent(tolerance: Int): Int = (tolerance * 100 + TOLERANCE_MAX / 2) / TOLERANCE_MAX
+
+/** Seconds per megapixel each adjustment took on this device (this run). */
+private val adjustRates = HashMap<AdjustmentKind, Float>()

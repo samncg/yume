@@ -106,6 +106,20 @@ class ToneLut private constructor(
             return ToneLut(channel(0), channel(1), channel(2), byLuma = false)
         }
 
+        /** Posterize: each channel reduced to [levels] steps (2..32). */
+        fun posterize(levels: Int): ToneLut {
+            val n = levels.coerceIn(2, 32)
+            val t = IntArray(256) { v -> ((v * n / 256).coerceAtMost(n - 1) * 255 + (n - 1) / 2) / (n - 1) }
+            return ToneLut(t, t.copyOf(), t.copyOf(), byLuma = false)
+        }
+
+        /** Threshold: black below [cut] (0..1) of the luminance, white above. */
+        fun threshold(cut: Float): ToneLut {
+            val c = (cut.coerceIn(0f, 1f) * 255f).toInt()
+            val t = IntArray(256) { v -> if (v >= c) 255 else 0 }
+            return ToneLut(t, t.copyOf(), t.copyOf(), byLuma = true)
+        }
+
         /** Gradient map: colour stops (position 0..1, ARGB colour), sorted by position. */
         fun gradientMap(stops: List<Pair<Float, Int>>): ToneLut {
             val s = if (stops.isEmpty()) listOf(0f to 0xFF000000.toInt(), 1f to -1) else stops.sortedBy { it.first }

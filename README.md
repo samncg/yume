@@ -304,6 +304,15 @@ includes:
   or fill a layer — merely picking a colour does not add it.
 - **Eyedropper** by long-pressing on the canvas, or via the toolbar colour chip.
 
+**Background** — the Layers panel ends with a Background row (white, dark,
+the brush colour, or **None** for a transparent canvas; Actions has the same
+choices). With no background, PNG exports keep the transparency.
+
+**Image and canvas size** — Actions → **Resize image…** scales the picture
+to a new size; **Canvas size (crop / extend)…** changes the canvas around
+it, centred or from the top left. Both make a resized copy and open it, so
+the original document and its undo history stay as they were.
+
 **Gradient tool** — drag on the canvas from the current colour to the end colour. The gradient panel shows a preview bar of the gradient over a checkerboard and has its own picker for the end colour (saturation / value square and hue bar), plus one-tap Transparent, White, Black and Swap, and your recent colours.
 
 ---
@@ -399,8 +408,23 @@ Adjustments apply to the active layer and preview **in real time** as you drag.
 - **Blur**, **Sharpen** and **Motion blur** preview on the GPU (see
   [GPU engine](#gpu-engine)); without a usable GPU, blur falls back to a
   quarter-resolution CPU box-blur proxy and the other two bake on Apply.
-- **Noise** and **film grain**.
+- **Noise** and **film grain**, previewed live on the GPU.
+- **Curves**, **Levels**, **Colour balance**, **Gradient map**, **Posterize**
+  (2–32 levels per channel) and **Threshold** (black / white by luminance).
+  The curves editor reacts to the first touch: press the curve to add a
+  point and drag it; double tap a point or drag it out of the box to remove
+  it. It keeps the gesture, so the panel does not scroll under your finger.
 - **Invert** and **Grayscale** one-tap conversions.
+
+Previews start at once on any canvas: the undo copy of the layer is taken
+when you press Apply, not before the first preview (at 16K that copy was a
+wait of its own), and one small copy of the layer serves every filter. If
+building it takes a moment, the working card shows.
+
+**Time estimates** — once a preview is up, the panel shows about how long
+Apply will take ("Apply: about 12 s"), and the working card counts down
+("About 8 s left"). The estimate is the area being changed times a rate per
+adjustment that the app measures each time one is applied on your device.
 
 The preview composites on the render thread at display rate; nothing is baked
 until you press **Apply**. **Cancel** discards the preview and **closing the

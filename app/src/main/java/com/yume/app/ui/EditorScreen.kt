@@ -416,6 +416,7 @@ fun EditorScreen(
                             session.pushInput(com.yume.app.engine.InputEvent.PickEnd)
                         }
                     }
+                    com.yume.app.data.Customization.Action.SwapColour -> session.swapColor()
                     com.yume.app.data.Customization.Action.BrushStudio -> openPanel(PanelId.Brush)
                     com.yume.app.data.Customization.Action.Layers -> openPanel(PanelId.Layers)
                     com.yume.app.data.Customization.Action.Colours -> openPanel(PanelId.Color)
@@ -499,12 +500,17 @@ fun EditorScreen(
         var showBusy by remember { mutableStateOf(false) }
         var canCancel by remember { mutableStateOf(false) }
         var cancelling by remember { mutableStateOf(false) }
+        // Seconds the running operation still needs (-1 = no estimate).
+        var etaLeft by remember { mutableStateOf(-1f) }
         LaunchedEffect(session) {
             while (true) {
                 val b = session.workingMillis() >= 250L
                 if (b != showBusy) showBusy = b
                 val c = com.yume.app.engine.OpCancel.armed
                 if (c != canCancel) canCancel = c
+                val eta = session.workEtaMs
+                val left = if (b && eta >= 1500L) ((eta - session.workingMillis()) / 1000f) else -1f
+                if (left != etaLeft) etaLeft = left
                 if (!b) cancelling = false
                 delay(if (b) 50L else 90L)
             }
@@ -531,6 +537,14 @@ fun EditorScreen(
                         style = MaterialTheme.typography.titleSmall,
                         color = YumeColors.text
                     )
+                    if (etaLeft >= 0f && !cancelling) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            if (etaLeft < 1.5f) "Almost done" else "About ${formatDuration(etaLeft)} left",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = YumeColors.textDim
+                        )
+                    }
                     Spacer(Modifier.height(12.dp))
                     ProgressLine()
                     if (canCancel && !cancelling) {

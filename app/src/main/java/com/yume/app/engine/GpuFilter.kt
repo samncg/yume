@@ -158,6 +158,28 @@ object GpuFilter {
         return RenderEffect.createRuntimeShaderEffect(s, "content")
     }
 
+    private const val NOISE = """
+        uniform shader content;
+        uniform float strength;
+        half4 main(float2 p) {
+            half4 c = content.eval(p);
+            if (c.a <= 0.0) { return c; }
+            float2 q = floor(p);
+            float n = fract(sin(dot(q, float2(12.9898, 78.233))) * 43758.5453);
+            half d = half((n * 2.0 - 1.0) * strength);
+            half3 rgb = clamp(c.rgb / c.a + half3(d), half3(0), half3(1));
+            return half4(rgb * c.a, c.a);
+        }
+    """
+
+    /** Film grain of up to +-[strength] (0..1) per pixel, like the noise bake. */
+    @androidx.annotation.RequiresApi(33)
+    fun noiseEffect(strength: Float): RenderEffect {
+        val s = RuntimeShader(NOISE)
+        s.setFloatUniform("strength", strength)
+        return RenderEffect.createRuntimeShaderEffect(s, "content")
+    }
+
     private const val MOTION = """
         uniform shader content;
         uniform float2 dir;

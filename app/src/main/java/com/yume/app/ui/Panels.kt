@@ -423,6 +423,18 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
             }
         }
 
+        // The paper under the layers: its colour, or none at all.
+        Row(
+            Modifier.fillMaxWidth().padding(top = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("Background", style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim, modifier = Modifier.weight(1f))
+            ColorSwatch(0xFFFFFFFF.toInt(), state.backgroundColor == 0xFFFFFFFF.toInt(), { session.setBackgroundColor(0xFFFFFFFF.toInt()) })
+            ColorSwatch(0xFF121214.toInt(), state.backgroundColor == 0xFF121214.toInt(), { session.setBackgroundColor(0xFF121214.toInt()) })
+            ColorSwatch(state.color or 0xFF000000.toInt(), false, { session.setBackgroundColor(state.color or 0xFF000000.toInt()) })
+            SmallButton(if (state.backgroundColor == 0x00000000) "• None" else "None") { session.setBackgroundColor(0x00000000) }
+        }
         DividerLine()
         Row(verticalAlignment = Alignment.CenterVertically) {
             YumeIconButton(Glyph.Plus, { session.addLayer() }, size = 36.dp, iconSize = 18.dp, label = "Add layer")
@@ -1711,6 +1723,16 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                 session.cancelAdjustment()
                 amount = 0f
             }
+            // How long Apply will take on this canvas, once it is worth saying.
+            val eta = session.adjustEstimateSeconds(kind).also { state.strokeCount }
+            if (eta >= 1.5f) {
+                Text(
+                    text = "Apply: about ${formatDuration(eta)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YumeColors.textDim,
+                    modifier = Modifier.align(Alignment.CenterVertically)
+                )
+            }
         }
         DividerLine()
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1737,8 +1759,7 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
         ) {
             Spacer(Modifier.height(6.dp))
             Text(
-                text = if (kind == AdjustmentKind.Noise) "Noise is applied when you press Apply."
-                else "The preview is approximate; Apply gives the exact result.",
+                text = "The preview is approximate; Apply gives the exact result.",
                 style = MaterialTheme.typography.bodySmall,
                 color = YumeColors.textDim
             )
@@ -1779,11 +1800,12 @@ fun CanvasSizeDialog(
     width: Int,
     height: Int,
     onDismiss: () -> Unit,
+    initialScale: Boolean = true,
     onCreate: (Int, Int, Boolean, Boolean) -> Unit
 ) {
     var wText by remember { mutableStateOf(width.toString()) }
     var hText by remember { mutableStateOf(height.toString()) }
-    var scale by remember { mutableStateOf(true) }
+    var scale by remember { mutableStateOf(initialScale) }
     var center by remember { mutableStateOf(true) }
     var keepRatio by remember { mutableStateOf(true) }
     val w = wText.toIntOrNull()?.coerceIn(16, com.yume.app.engine.MemoryBudget.MAX_SPARSE_EDGE)
@@ -2398,10 +2420,12 @@ fun ActionsPanel(
     onSettings: () -> Unit = {}
 ) {
     var sizeDialog by remember { mutableStateOf(false) }
+    var sizeScale by remember { mutableStateOf(true) }
     if (sizeDialog) {
         CanvasSizeDialog(
             width = state.width,
             height = state.height,
+            initialScale = sizeScale,
             onDismiss = { sizeDialog = false },
             onCreate = { w, h, scale, center ->
                 sizeDialog = false
@@ -2433,6 +2457,21 @@ fun ActionsPanel(
                 session.setBackgroundColor(0x00000000)
             })
         }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmallButton(if (state.backgroundColor == 0x00000000) "• Transparent" else "Transparent") {
+                session.setBackgroundColor(0x00000000)
+            }
+            SmallButton("Use brush colour") { session.setBackgroundColor(state.color or 0xFF000000.toInt()) }
+        }
+        if (state.backgroundColor == 0x00000000) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "No background: PNG exports keep the transparency.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YumeColors.textDim
+            )
+        }
         DividerLine()
         ToggleRow(Glyph.Brush, "QuickShape hold", state.quickShape) {
             session.setQuickShape(it)
@@ -2453,7 +2492,8 @@ fun ActionsPanel(
         MenuRow(Glyph.Picture, "Import image as layer") { onImport() }
         MenuRow(Glyph.Picture, if (onRemoveReference != null) "Replace reference image…" else "Reference image…") { onReference() }
         if (onRemoveReference != null) MenuRow(Glyph.Close, "Remove reference image") { onRemoveReference() }
-        MenuRow(Glyph.Select, "Crop or resize canvas…") { sizeDialog = true }
+        MenuRow(Glyph.Transform, "Resize image…") { sizeScale = true; sizeDialog = true }
+        MenuRow(Glyph.Select, "Canvas size (crop / extend)…") { sizeScale = false; sizeDialog = true }
         MenuRow(Glyph.Droplet, "Fill layer with colour") { session.fillLayer(state.color) }
         MenuRow(Glyph.Share, "Export…") { onExport() }
         MenuRow(Glyph.Save, "Save now") { onSave() }
@@ -2483,4 +2523,10 @@ fun ActionsPanel(
             )
         }
     }
+}
+
+/** "8 s", "1 min 20 s": a rough duration for estimates. */
+internal fun formatDuration(seconds: Float): String {
+    val s = seconds.roundToInt().coerceAtLeast(1)
+    return if (s < 60) "$s s" else "${s / 60} min ${(s % 60) / 10 * 10} s"
 }
