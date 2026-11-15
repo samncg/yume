@@ -283,6 +283,132 @@ fun YumeSlider(
     }
 }
 
+/**
+ * The canvas-edge slider (brush size, opacity), in the manner of Procreate's
+ * sidebar: a dark rounded track with a small light handle, no fill.
+ *
+ * - Dragging is relative: grabbing anywhere moves the handle from where it
+ *   is, so touching the track never makes the value jump. A tap (no drag)
+ *   jumps to the tapped spot.
+ * - Precision: the further the finger moves sideways away from the track
+ *   while dragging, the slower the value follows (1 / (1 + distance / 70 dp)).
+ * - While dragging, a bubble beside the rail (on the side facing the canvas)
+ *   shows the name and value.
+ *
+ * [fraction] is 0..1 (bottom..top); [toValue] turns it into the label.
+ */
+@Composable
+fun RailSlider(
+    fraction: Float,
+    onFraction: (Float) -> Unit,
+    label: String,
+    valueText: String,
+    modifier: Modifier = Modifier,
+    bubbleOnRight: Boolean = true,
+    onDragEnd: () -> Unit = {}
+) {
+    val current = androidx.compose.runtime.rememberUpdatedState(fraction)
+    val change = androidx.compose.runtime.rememberUpdatedState(onFraction)
+    val end = androidx.compose.runtime.rememberUpdatedState(onDragEnd)
+    var dragging by remember { mutableStateOf(false) }
+    val thumbH = 15.dp
+    Box(modifier.width(32.dp)) {
+        Canvas(
+            Modifier
+                .matchParentSize()
+                .pointerInput(Unit) {
+                    val slop = viewConfiguration.touchSlop
+                    val pad = thumbH.toPx() / 2f + 2.dp.toPx()
+                    val precisionPx = 70.dp.toPx()
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+                        val track = (size.height - pad * 2f).coerceAtLeast(1f)
+                        var f = current.value
+                        var moved = false
+                        var lastY = down.position.y
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val c = ev.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!c.pressed) {
+                                if (!moved) {
+                                    // A tap: jump there.
+                                    change.value(((size.height - pad - down.position.y) / track).coerceIn(0f, 1f))
+                                }
+                                break
+                            }
+                            if (!moved && kotlin.math.abs(c.position.y - down.position.y) > slop / 2f) {
+                                moved = true
+                                dragging = true
+                                lastY = c.position.y
+                            }
+                            if (moved) {
+                                val dx = kotlin.math.abs(c.position.x - size.width / 2f) - size.width / 2f
+                                val gain = 1f / (1f + dx.coerceAtLeast(0f) / precisionPx)
+                                f = (f - (c.position.y - lastY) / track * gain).coerceIn(0f, 1f)
+                                lastY = c.position.y
+                                change.value(f)
+                            }
+                            c.consume()
+                        }
+                        dragging = false
+                        end.value()
+                    }
+                }
+        ) {
+            val w = size.width
+            val pad = thumbH.toPx() / 2f + 2.dp.toPx()
+            val r = 9.dp.toPx()
+            drawRoundRect(
+                color = Color(0x40000000),
+                size = size,
+                cornerRadius = CornerRadius(r, r)
+            )
+            drawRoundRect(
+                color = Color(0x1FFFFFFF),
+                size = size,
+                cornerRadius = CornerRadius(r, r),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx())
+            )
+            val track = (size.height - pad * 2f).coerceAtLeast(1f)
+            val cy = size.height - pad - fraction.coerceIn(0f, 1f) * track
+            val tw = w - 7.dp.toPx()
+            val th = thumbH.toPx()
+            drawRoundRect(
+                color = Color(0x55000000),
+                topLeft = Offset((w - tw) / 2f, cy - th / 2f + 1.dp.toPx()),
+                size = Size(tw, th),
+                cornerRadius = CornerRadius(5.dp.toPx(), 5.dp.toPx())
+            )
+            drawRoundRect(
+                color = if (dragging) Color.White else Color(0xFFD9D9DE),
+                topLeft = Offset((w - tw) / 2f, cy - th / 2f),
+                size = Size(tw, th),
+                cornerRadius = CornerRadius(5.dp.toPx(), 5.dp.toPx())
+            )
+        }
+        if (dragging) {
+            // The value, beside the rail on the canvas side.
+            androidx.compose.ui.window.Popup(
+                alignment = if (bubbleOnRight) Alignment.CenterStart else Alignment.CenterEnd,
+                offset = with(androidx.compose.ui.platform.LocalDensity.current) {
+                    IntOffset(if (bubbleOnRight) 52.dp.roundToPx() else (-52).dp.roundToPx(), 0)
+                }
+            ) {
+                Column(
+                    Modifier
+                        .glass(corner = 16f, weight = GlassWeight.Heavy)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(label, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, color = YumeColors.textDim)
+                    Text(valueText, style = androidx.compose.material3.MaterialTheme.typography.titleMedium, color = YumeColors.text)
+                }
+            }
+        }
+    }
+}
+
 /** Tall slider used for brush size and opacity on the canvas edge. */
 @Composable
 fun YumeVerticalSlider(
@@ -562,8 +688,12 @@ fun Modifier.claimCanvasTouches(): Modifier = this.pointerInput(Unit) {
             // sliders, buttons) have already handled the event in Main, but
             // the change is still marked handled, so the canvas interop view
             // behind the panel never receives it and cannot start a stroke.
-            val event = awaitPointerEvent(PointerEventPass.Final)
-            event.changes.forEach { it.consume() }
+            // Listening is enough: a pointer handler covering the panel makes
+            // it the hit target, so the canvas below is never hit. Consuming
+            // here (an ancestor's Final pass runs before its descendants')
+            // made every scroll container inside cancel its own drag: it
+            // checks the Final pass for a parent that took the gesture.
+            awaitPointerEvent(PointerEventPass.Final)
         }
     }
 }

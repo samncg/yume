@@ -232,6 +232,19 @@ cores take more): a 300 px wet-bleed dab went from ~75 ms to ~7 ms, so the
 blender keeps up with the pen (`smudgeperf` harness: 6–11 ms per frame at 40,
 120 and 300 px, was 12–87 ms).
 
+**Side rail** — brush size and opacity in the manner of Procreate's sidebar:
+size on top, a square button (eyedropper), opacity below, then undo / redo.
+Each slider is a dark track with a small light handle. Dragging is relative,
+so touching the track never makes the value jump (a tap jumps to the spot);
+moving the finger sideways away from the rail while dragging slows the value
+down for fine control (1 / (1 + distance / 70 dp)). While dragging, a bubble
+beside the rail shows the value. Size runs 1–900 px on a curve, so small
+sizes get most of the track.
+
+**Brush Studio** — two panes: the tool, groups and brushes on the left, the
+selected brush's stroke preview and settings on the right; each side scrolls
+on its own.
+
 **Brush cursor** — while the pen hovers, the cursor is the dab the next
 stroke lays down at the lowest pressure, computed with the stroke's own rules
 (`StrokePainter.cursorDab`): the size through the brush's pressure curve,

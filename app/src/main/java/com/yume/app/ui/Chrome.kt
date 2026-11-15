@@ -13,6 +13,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -340,24 +341,40 @@ fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f
                     Box(Modifier.size(d).clip(CircleShape).background(YumeColors.text.copy(alpha = state.brushOpacity.coerceIn(0.25f, 1f))))
                 }
             } else {
-                Row(Modifier.height(240.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                    YumeVerticalSlider(
-                        value = state.brushSize,
-                        onChange = { session.setBrushSize(it) },
-                        label = "Size",
-                        valueLabel = state.brushSize.roundToInt().toString(),
-                        min = 1f,
-                        max = 300f
-                    )
-                    YumeVerticalSlider(
-                        value = state.brushOpacity,
-                        onChange = { session.setBrushOpacity(it) },
-                        label = "Opacity",
-                        valueLabel = formatPercent(state.brushOpacity),
-                        min = 0.02f
-                    )
-                }
-                Spacer(Modifier.height(6.dp))
+                // Procreate's order: size, the square button, opacity.
+                val onRight = ox.value + railSize.width / 2f < maxW / 2f
+                // Size on a curve (1..900 px): small sizes get most of the
+                // track, where fine control matters.
+                RailSlider(
+                    fraction = kotlin.math.sqrt(((state.brushSize - 1f) / 899f).coerceIn(0f, 1f)),
+                    onFraction = { f -> session.setBrushSize(1f + 899f * f * f) },
+                    label = "Size",
+                    valueText = "${state.brushSize.roundToInt()} px",
+                    bubbleOnRight = onRight,
+                    modifier = Modifier.height(150.dp)
+                )
+                Spacer(Modifier.height(8.dp))
+                // The square button: eyedropper.
+                Box(
+                    Modifier
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0x40000000))
+                        .border(1.dp, Color(0x40FFFFFF), RoundedCornerShape(6.dp))
+                        .clickable {
+                            com.yume.app.data.Customization.dispatcher?.invoke(com.yume.app.data.Customization.Action.Eyedropper)
+                        }
+                )
+                Spacer(Modifier.height(8.dp))
+                RailSlider(
+                    fraction = ((state.brushOpacity - 0.02f) / 0.98f).coerceIn(0f, 1f),
+                    onFraction = { f -> session.setBrushOpacity(0.02f + 0.98f * f) },
+                    label = "Opacity",
+                    valueText = formatPercent(state.brushOpacity),
+                    bubbleOnRight = onRight,
+                    modifier = Modifier.height(150.dp)
+                )
+                Spacer(Modifier.height(8.dp))
                 RepeatButton(Glyph.Undo, "Undo", state.canUndo, { session.undo() }, { session.redo() }) { session.undo() }
                 RepeatButton(Glyph.Redo, "Redo", state.canRedo, { session.undo() }, { session.redo() }) { session.redo() }
                 Spacer(Modifier.height(4.dp))

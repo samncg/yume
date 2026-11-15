@@ -833,8 +833,13 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
     var showSaveDialog by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf("") }
     val preset = state.presets.firstOrNull { it.id == state.activePresetId }
-    PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
+    // Wide, in two panes: the brushes on the left, the selected brush (its
+    // stroke preview and settings) on the right.
+    val screenW = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
+    PanelCard(Modifier.width(minOf(780, screenW - 24).dp)) {
         PanelHeader("Brush Studio", onClose)
+        Row(Modifier.weight(1f, fill = false)) {
+        Column(Modifier.width(310.dp)) {
         SegmentedRow(
             options = listOf("Brush", "Eraser", "Smudge"),
             selectedIndex = when (state.category) {
@@ -894,15 +899,14 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                 modifier = Modifier.padding(vertical = 10.dp)
             )
         }
-        // Two rows of brushes at a time; the grid scrolls on its own so the
-        // stroke preview below always stays in view.
+        // The brush grid scrolls on its own, beside the settings.
         Column(
             Modifier
-                .heightIn(max = 148.dp)
+                .weight(1f, fill = false)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            shown.chunked(4).forEach { chunk ->
+            shown.chunked(3).forEach { chunk ->
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     chunk.forEach { item ->
                         Box(Modifier.weight(1f)) {
@@ -917,11 +921,13 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                             }
                         }
                     }
-                    repeat(4 - chunk.size) { Spacer(Modifier.weight(1f)) }
+                    repeat(3 - chunk.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
         }
-        DividerLine()
+        }
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
         if (preset != null) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -944,7 +950,7 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
             Spacer(Modifier.height(6.dp))
             BrushStrokePreview(preset, state.color)
             Spacer(Modifier.height(8.dp))
-            // Only the settings scroll; everything above stays put.
+            // Only the settings scroll; the preview above stays put.
             Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
             YumeSlider(
                 value = state.assist,
@@ -958,7 +964,7 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                 label = "Size",
                 valueLabel = "${preset.size.roundToInt()} px",
                 min = 1f,
-                max = 300f
+                max = 900f
             )
             YumeSlider(
                 value = preset.opacity,
@@ -1067,6 +1073,8 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
             }
             Spacer(Modifier.height(4.dp))
             }
+        }
+        }
         }
     }
 
