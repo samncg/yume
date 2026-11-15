@@ -821,8 +821,10 @@ class StrokePainter(private val engine: DrawingEngine) {
         // The layer under the brush, exactly as stored (both stores alike).
         val sub = if (patch.width == w && patch.height == h) patch
         else Bitmap.createBitmap(patch, 0, 0, w, h)
+        val b0 = System.nanoTime()
         target.paintStore.readRectInto(rect, sub)
         sub.getPixels(bleedPx, 0, w, 0, 0, w, h)
+        bleedRead += System.nanoTime() - b0
         // The widened dab as the bleed mask, scaled by the stroke's alpha.
         mc.drawColor(0, BlendMode.CLEAR)
         bleedDst.set(x - reach - rect.left, y - reach - rect.top, x + reach - rect.left, y + reach - rect.top)
@@ -838,10 +840,18 @@ class StrokePainter(private val engine: DrawingEngine) {
             brushColor, paintAmount.coerceIn(0f, 1f) * (brush.opacity * brush.flow).coerceIn(0f, 1f),
             target.alphaLock
         )
+        val b1 = System.nanoTime()
         sub.setPixels(bleedPx, 0, w, 0, 0, w, h)
         blitReplace(sub, rect)
+        bleedWrite += System.nanoTime() - b1
+        bleedDabs++
         if (sub !== patch) sub.recycle()
     }
+
+    /** Wet-bleed stage timings (ns) and dab count, read by the harness. */
+    var bleedRead = 0L
+    var bleedWrite = 0L
+    var bleedDabs = 0
 
     /** Writes [src] (its top-left [rect] size) over [rect] of the layer, 1:1, replacing. */
     private fun blitReplace(src: Bitmap, rect: Rect) {

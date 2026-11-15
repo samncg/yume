@@ -224,7 +224,13 @@ is darkened a little. The result is written back 1:1, so dense and sparse
 layers give identical pixels (`bleedtest` harness). Every step rounds rather
 than truncates, an even wash is left exactly as it is, and only pigment that
 arrives darkens, so scrubbing the same spot again and again mixes the colours
-without sinking them toward black (`opacitytest` harness).
+without sinking them toward black (`opacitytest` harness). The diffusion blur
+is computed on a copy reduced so its radius is ~6 px and sampled back
+bilinearly, the displacement noise on a canvas-fixed grid a quarter feature
+apart, and the per-pixel pass is spread over all cores in small chunks (big
+cores take more): a 300 px wet-bleed dab went from ~75 ms to ~7 ms, so the
+blender keeps up with the pen (`smudgeperf` harness: 6–11 ms per frame at 40,
+120 and 300 px, was 12–87 ms).
 
 **Importing brushes from other apps** — *Import brushes…* (More settings)
 reads Yume's own `.yumebrush` files and:

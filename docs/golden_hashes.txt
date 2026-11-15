@@ -1087,3 +1087,14 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 # mipstalepainted (16K textured layer + empty layer): undo caught up in
 #   0.19 s / 0.07 s (was 91 s, 4096 tiles recomposited); strokes < 1 s.
 # stress16k: blur undo MATCH, reopen MATCH, native peak 900 MB.
+
+# --- Fast wet bleed (Nov 2026) ----------------------------------------------
+# Wet bleed: blur on a reduced copy (radius ~6 px) sampled bilinearly, the
+# displacement noise on a canvas-fixed grid (>= 2 px), the passes split over
+# all cores in small work-stealing chunks. Only bleed brushes change (no
+# harness golden brush bleeds): golden output byte-identical to the previous
+# gate; features 30/30 MATCH x4; bleedtest d57dcacf dense = sparse MATCH;
+# opacitytest 205/255 and wet bleed 148.8 -> 169.1 (no darkening), MATCH.
+# smudgeperf (4K painted, 30 frames of 40 px): wet bleed 40/120/300 px
+#   10.8/6.3/8.8 ms per frame (was 12.1/31.9/85.0), worst 18 ms (was 181);
+#   classic smudge presets 1.5-3.4 ms per frame, unchanged.

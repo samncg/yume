@@ -294,6 +294,9 @@ class DrawingSession(
      */
     @Volatile var predictedTip: FloatArray? = null
 
+    /** The stroke painter, for harness timings. */
+    internal fun painterForDebug(): StrokePainter = painter
+
     /** True while a brush / eraser / smudge stroke is being painted. */
     val strokeInProgress: Boolean get() = painter.isActive
 

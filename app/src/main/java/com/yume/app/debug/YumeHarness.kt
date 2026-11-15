@@ -192,6 +192,8 @@ object YumeHarness {
                     out.append(ScenePainter.paintSunset(app, save = only == "sunset"))
                 } else if (only == "bleedtest") {
                     out.append(scoreBleedTest(app))
+                } else if (only == "smudgeperf") {
+                    out.append(scoreSmudgePerf())
                 } else if (only == "opacitytest") {
                     out.append(scoreOpacityTest())
                 } else if (only == "motionuser") {
@@ -4006,6 +4008,81 @@ object YumeHarness {
      * 2. The wet-bleed blender scrubbed 40 times over red / yellow / blue
      *    stripes mixes them but must not darken the area (it went to black).
      */
+    /**
+     * Smudge cost on a painted 4K layer: every smudge preset at three sizes,
+     * one stroke of 30 input events 40 px apart (a brisk hand at 60 Hz). Per
+     * event = per frame of drawing: the worst one is the stutter.
+     */
+    private fun scoreSmudgePerf(): String {
+        val out = StringBuilder()
+        val size = 4096
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        try {
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = 0xFFFFFFFF.toInt()
+            val session = DrawingSession("sp", "SP", engine, History())
+            identityView(session, size, size)
+            session.presets = com.yume.app.engine.BrushLibrary.defaults
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            val l = engine.newLayer("Paint")
+            engine.selectLayer(l.id)
+            val noise = (0 until 4).map { noiseTile(900 + it, 256, opaque = true) }
+            for (ty in 0 until 16) for (tx in 0 until 16) {
+                l.tiles.writeRect(Rect(tx * 256, ty * 256, tx * 256 + 256, ty * 256 + 256), noise[(tx + ty * 3) % 4], Rect(0, 0, 256, 256))
+            }
+            l.touch()
+            engine.compositeAll()
+            val ids = session.presets.filter { it.category == BrushCategory.Smudge }.map { it.id }
+            for (id in ids) {
+                for (bs in floatArrayOf(40f, 120f, 300f)) {
+                    val p = session.presets.first { it.id == id }
+                    pick(session, p, p.category)
+                    session.runCommands()
+                    session.setBrushSize(bs)
+                    session.runCommands()
+                    val y = 300f + (ids.indexOf(id) * 3 + (if (bs < 50f) 0 else if (bs < 200f) 1 else 2)) * 170f
+                    var worst = 0.0
+                    var total = 0.0
+                    val wb = com.yume.app.engine.WetBleed
+                    wb.tPremul = 0; wb.tBlur = 0; wb.tMain = 0
+                    val pp = session.painterForDebug()
+                    pp.bleedRead = 0; pp.bleedWrite = 0; pp.bleedDabs = 0
+                    session.pushInput(InputEvent.Down(0, 200f, y, 1f, 0f, true, false))
+                    session.runInput()
+                    for (i in 1..30) {
+                        val t0 = System.nanoTime()
+                        session.pushInput(InputEvent.Move(0, floatArrayOf(200f + i * 40f), floatArrayOf(y + (i % 2) * 6f), floatArrayOf(1f), 0f))
+                        session.runInput()
+                        engine.flush()
+                        val ms = (System.nanoTime() - t0) / 1e6
+                        worst = max(worst, ms)
+                        total += ms
+                    }
+                    val e0 = System.nanoTime()
+                    session.pushInput(InputEvent.Up(0))
+                    session.runInput()
+                    session.runCommands()
+                    val endMs = (System.nanoTime() - e0) / 1e6
+                    out.append("smudgeperf $id size ${bs.toInt()}: per frame avg ${"%.1f".format(total / 30)} ms worst ${"%.1f".format(worst)} ms, stroke end ${"%.0f".format(endMs)} ms")
+                    if (pp.bleedDabs > 0) {
+                        val d = pp.bleedDabs * 1e6
+                        out.append(" | ${pp.bleedDabs} bleed dabs, per dab: read ${"%.2f".format(pp.bleedRead / d)} premul ${"%.2f".format(wb.tPremul / d)} " +
+                            "blur ${"%.2f".format(wb.tBlur / d)} main ${"%.2f".format(wb.tMain / d)} write ${"%.2f".format(pp.bleedWrite / d)} ms")
+                    }
+                    out.append("\n")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "smudgeperf failed", t)
+            out.append("smudgeperf: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
     private fun scoreOpacityTest(): String {
         val out = StringBuilder()
         val w = 900
