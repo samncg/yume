@@ -349,7 +349,63 @@ private fun GesturesTab() {
     ToggleRow(Glyph.Undo, "Hold or slide undo / redo", AppSettings.holdToRepeatUndo) { AppSettings.updateHoldToRepeatUndo(it) }
     Hint("Hold the undo or redo button to keep stepping; slide up and down along it to scrub through history.")
     DividerLine()
+    RingSettings()
+    DividerLine()
     PenGestureSettings()
+}
+
+/** What the shortcut ring holds, in order clockwise from the top. */
+@Composable
+private fun RingSettings() {
+    SectionLabel("Shortcut ring")
+    Hint("Clockwise from the top. Drag the handle (or long-press a row) to reorder. With the ring open under two fingers, orbit one finger around the other to point at an item, then lift to choose it.")
+    val ring = Customization.ringItems
+    ReorderColumn(
+        items = ring,
+        key = { it.name },
+        onMove = { from, to -> Customization.moveRingItem(from, to) }
+    ) { a, handle ->
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(YumeColors.panelAlt)
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(handle.size(36.dp), contentAlignment = Alignment.Center) {
+                GlyphIcon(Glyph.Grip, YumeColors.textDim, size = 16.dp)
+            }
+            Spacer(Modifier.width(6.dp))
+            val (glyph, text) = ringFace(a)
+            Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+                when {
+                    glyph != null -> GlyphIcon(glyph, YumeColors.text, size = 18.dp)
+                    text != null -> Text(text, style = MaterialTheme.typography.labelSmall, color = YumeColors.text, maxLines = 1)
+                    else -> Box(Modifier.size(16.dp).clip(CircleShape).background(YumeColors.accent))
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(a.label, style = MaterialTheme.typography.bodyMedium, color = YumeColors.text, modifier = Modifier.weight(1f))
+            if (ring.size > Customization.RING_MIN) {
+                SmallButton("\u2212") { Customization.removeRingItem(a) }
+            }
+        }
+    }
+    val more = Customization.RING_CHOICES.filter { it !in ring }
+    if (ring.size < Customization.RING_MAX && more.isNotEmpty()) {
+        Spacer(Modifier.height(8.dp))
+        Text("Add to the ring", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
+        Spacer(Modifier.height(6.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            more.forEach { a -> SmallChip("+ " + a.label, selected = false) { Customization.addRingItem(a) } }
+        }
+    } else if (ring.size >= Customization.RING_MAX) {
+        Hint("The ring holds up to ${Customization.RING_MAX} items.")
+    }
+    Spacer(Modifier.height(8.dp))
+    SmallButton("Reset ring") { Customization.resetRing() }
 }
 
 // ----------------------------------------------------------------- Shortcuts
@@ -398,7 +454,7 @@ private fun ShortcutsTab() {
 @Composable
 private fun LayoutTab() {
     SectionLabel("Top bar")
-    Hint("The pills along the top of the editor. Drag the handle (or long-press a row) to change their order, and choose where each one sits, or hide it. A hidden Document pill leaves the gallery a back gesture away; hidden panels stay reachable through gestures and shortcuts.")
+    Hint("The pills along the top of the editor. Drag the handle (or long-press a row) to change their order, and choose where each one sits, or hide it. A hidden Document pill leaves the gallery a back gesture away; hidden panels stay reachable through gestures and shortcuts. History & actions always stays, so Settings is never out of reach.")
     ReorderColumn(
         items = Customization.pillOrder,
         key = { it.name },
@@ -427,10 +483,11 @@ private fun LayoutTab() {
                 }
             }
             Spacer(Modifier.height(6.dp))
+            val slots = Customization.PillSlot.entries.filter { pill.hidable || it != Customization.PillSlot.Hidden }
             SegmentedRow(
-                options = Customization.PillSlot.entries.map { it.label },
-                selectedIndex = Customization.PillSlot.entries.indexOf(slot),
-                onSelect = { Customization.setPillSlot(pill, Customization.PillSlot.entries[it]) }
+                options = slots.map { it.label },
+                selectedIndex = slots.indexOf(slot),
+                onSelect = { Customization.setPillSlot(pill, slots[it]) }
             )
         }
     }
@@ -584,4 +641,102 @@ private fun DefaultsTab() {
     ToggleRow(Glyph.Shape, "QuickShape", Customization.defaultQuickShape) {
         Customization.setDefaultQuickShapeValue(it)
     }
+    ToolDefaults()
+}
+
+@Composable
+private fun <E : Enum<E>> DefaultChoice(label: String, key: String, entries: List<E>, def: E, name: (E) -> String) {
+    val cur = entries.firstOrNull { it.name == Customization.tdString(key, def.name) } ?: def
+    Text(label, style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim)
+    Spacer(Modifier.height(4.dp))
+    SegmentedRow(entries.map(name), entries.indexOf(cur), { Customization.setTd(key, entries[it].name) })
+    Spacer(Modifier.height(8.dp))
+}
+
+@Composable
+private fun DefaultToggle(glyph: Glyph, label: String, key: String, def: Boolean) {
+    ToggleRow(glyph, label, Customization.tdBool(key, def)) { Customization.setTd(key, it) }
+}
+
+/** Each tool's starting options. */
+@Composable
+private fun ToolDefaults() {
+    val C = Customization
+    DividerLine()
+    SectionLabel("Selection")
+    Spacer(Modifier.height(6.dp))
+    DefaultChoice("Shape", "selectionShape", com.yume.app.engine.SelectionShape.entries, com.yume.app.engine.SelectionShape.Lasso) { it.label }
+    YumeSlider(
+        value = C.tdInt("wandTolerance", 30).toFloat(),
+        onChange = { C.setTd("wandTolerance", it.roundToInt()) },
+        label = "Auto-select tolerance",
+        valueLabel = "${C.tdInt("wandTolerance", 30)}",
+        min = 1f, max = 100f
+    )
+    DividerLine()
+    SectionLabel("Paint bucket")
+    Spacer(Modifier.height(6.dp))
+    DefaultToggle(Glyph.Layers, "Fill using the current layer only", "fillLayerOnly", false)
+    DefaultToggle(Glyph.Select, "Tap inside a selection fills all of it", "fillSelection", true)
+    YumeSlider(
+        value = C.tdInt("fillExpand", 1).toFloat(),
+        onChange = { C.setTd("fillExpand", it.roundToInt()) },
+        label = "Grow under edges",
+        valueLabel = "${C.tdInt("fillExpand", 1)} px",
+        min = 0f, max = 8f
+    )
+    DividerLine()
+    SectionLabel("Gradient")
+    Spacer(Modifier.height(6.dp))
+    DefaultChoice("Kind", "gradientKind", com.yume.app.engine.Gradients.Kind.entries, com.yume.app.engine.Gradients.Kind.Linear) { it.label }
+    DividerLine()
+    SectionLabel("Shape")
+    Spacer(Modifier.height(6.dp))
+    DefaultChoice("Shape", "shapeKind", com.yume.app.engine.ShapeKind.entries, com.yume.app.engine.ShapeKind.Ellipse) { it.label }
+    DefaultToggle(Glyph.Shape, "Perfect (square, circle)", "shapePerfect", false)
+    YumeSlider(
+        value = C.tdInt("shapeSides", 5).toFloat(),
+        onChange = { C.setTd("shapeSides", it.roundToInt()) },
+        label = "Polygon / star sides",
+        valueLabel = "${C.tdInt("shapeSides", 5)}",
+        min = 3f, max = 12f
+    )
+    DividerLine()
+    SectionLabel("Liquify")
+    Spacer(Modifier.height(6.dp))
+    DefaultChoice("Mode", "liquifyMode", com.yume.app.engine.LiquifyMode.entries, com.yume.app.engine.LiquifyMode.Push) { it.label }
+    YumeSlider(
+        value = C.tdFloat("liquifySize", 160f),
+        onChange = { C.setTd("liquifySize", it.roundToInt().toFloat()) },
+        label = "Size",
+        valueLabel = "${C.tdFloat("liquifySize", 160f).roundToInt()} px",
+        min = 10f, max = 600f
+    )
+    YumeSlider(
+        value = C.tdFloat("liquifyStrength", 0.5f),
+        onChange = { C.setTd("liquifyStrength", it) },
+        label = "Strength",
+        valueLabel = formatPercent(C.tdFloat("liquifyStrength", 0.5f))
+    )
+    DividerLine()
+    SectionLabel("Text")
+    Spacer(Modifier.height(6.dp))
+    Text("Font", style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim)
+    Spacer(Modifier.height(4.dp))
+    SegmentedRow(TEXT_FONT_LABELS, C.tdInt("textFont", 0).coerceIn(0, TEXT_FONT_LABELS.size - 1), { C.setTd("textFont", it) })
+    Spacer(Modifier.height(8.dp))
+    YumeSlider(
+        value = C.tdFloat("textSize", 96f),
+        onChange = { C.setTd("textSize", it.roundToInt().toFloat()) },
+        label = "Size",
+        valueLabel = "${C.tdFloat("textSize", 96f).roundToInt()} px",
+        min = 12f, max = 600f
+    )
+    DefaultToggle(Glyph.Text, "Bold", "textBold", false)
+    DefaultToggle(Glyph.Text, "Italic", "textItalic", false)
+    Text("Alignment", style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim)
+    Spacer(Modifier.height(4.dp))
+    SegmentedRow(listOf("Left", "Centre", "Right"), C.tdInt("textAlign", 0).coerceIn(0, 2), { C.setTd("textAlign", it) })
+    Spacer(Modifier.height(10.dp))
+    SmallButton("Reset tool options") { C.resetToolDefaults() }
 }

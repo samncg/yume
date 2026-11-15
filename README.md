@@ -233,7 +233,7 @@ blender keeps up with the pen (`smudgeperf` harness: 6–11 ms per frame at 40,
 120 and 300 px, was 12–87 ms).
 
 **Side rail** — brush size and opacity in the manner of Procreate's sidebar:
-size on top, a square button (eyedropper), opacity below, then undo / redo.
+size on top, opacity below, then undo / redo.
 Each slider is a dark track with a small light handle. Dragging is relative,
 so touching the track never makes the value jump (a tap jumps to the spot);
 moving the finger sideways away from the rail while dragging slows the value
@@ -244,15 +244,43 @@ sizes get most of the track.
 **Brush Studio** — two panes at a constant height: the tool, groups and
 brushes on the left, the selected brush's stroke preview and settings on the
 right; each side scrolls on its own, and rows passing out of view blur
-gradually at the edges (Android 13+, an AGSL-masked blur). Beside the
-settings a blank strip carries the scrollbar: dragging there only scrolls,
-so scrolling never nudges a slider.
+gradually at the edges (Android 13+): a progressive blur of three strengths,
+each kept by an AGSL mask only in its own band of the edge and cross-faded
+with its neighbours, so text softens steadily instead of doubling; outside the
+list counts as empty and rows fade out at the very edge. Beside the grid and
+beside the settings a blank strip carries a scrollbar that works as a slider
+(the thumb follows the finger, a touch on the track jumps there), so
+scrolling never nudges a setting. *Default* beside *Favorite* makes any brush,
+eraser or blender, imported and saved ones included, the one new projects
+start with. Switching to another tool and back keeps the brush (and eraser,
+blender) last used in each family.
 
 **Layout settings** — *Settings → Layout*: the top-bar pills (Document,
 History & actions, Tools, Layers & colour) can be dragged into a new order
-and each placed Left, Centre or Right, or hidden; the toolbar's tools can be
+and each placed Left, Centre or Right, or hidden (History & actions can't be
+hidden: it holds the way back to Settings); the toolbar's tools can be
 dragged into order (handle, or long-press the row, like the layers list),
 removed with − and added back from *More tools*.
+
+**Shortcut ring** — two fingers held still (or the pen's squeeze) open a
+ring of shortcuts. Its items are set in *Settings → Gestures* (2–10 of any
+action, dragged into order, clockwise from the top). With the two fingers
+still down, orbit one finger around the other: the direction from the resting
+finger to the moving one points at an item (it grows and its name shows in
+the middle), and lifting a finger runs it. Tapping still works.
+
+**Tool defaults** — *Settings → Defaults* also sets each tool's starting
+options: selection shape and auto-select tolerance, the paint bucket's
+layer / selection / grow options, gradient kind, shape kind, perfect shapes
+and sides, liquify mode, size and strength, and the text tool's font, size,
+bold, italic and alignment.
+
+**Large brushes keep drawing while the finger moves** — the render loop
+paints at most 10 ms of queued input before it draws a frame. Before, a brush
+that costs more to paint than the finger takes to move (a 300 px pen at 0 %
+spacing across a 4K canvas: ~0.6 ms per dab) drained the whole queue in one
+go, so nothing showed until the stroke ended; now the stroke appears as it is
+drawn, a frame every ~17 ms.
 
 **Brush cursor** — while the pen hovers, the cursor is the dab the next
 stroke lays down at the lowest pressure, computed with the stroke's own rules

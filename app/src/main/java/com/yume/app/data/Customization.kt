@@ -106,7 +106,8 @@ object Customization {
         pillSlots = runCatching {
             val o = JSONObject(p.getString("pillSlots", null) ?: error("none"))
             Pill.entries.associateWith { pill ->
-                PillSlot.entries.firstOrNull { it.name == o.optString(pill.name) } ?: pill.defaultSlot
+                (PillSlot.entries.firstOrNull { it.name == o.optString(pill.name) } ?: pill.defaultSlot)
+                    .takeIf { pill.hidable || it != PillSlot.Hidden } ?: pill.defaultSlot
             }
         }.getOrDefault(Pill.entries.associateWith { it.defaultSlot })
         persistToolSettings = p.getBoolean("persistToolSettings", false)
@@ -119,6 +120,13 @@ object Customization {
         defaultFillTolerance = p.getInt("defaultFillTolerance", 30)
         defaultQuickShape = p.getBoolean("defaultQuickShape", true)
         toolState = p.getString("toolState", null)
+        toolDefaults = runCatching { JSONObject(p.getString("toolDefaults", null) ?: error("none")) }
+            .getOrDefault(JSONObject()).toString()
+        ringItems = runCatching {
+            val a = JSONArray(p.getString("ringItems", null) ?: error("none"))
+            (0 until a.length()).mapNotNull { i -> Action.entries.firstOrNull { it.name == a.getString(i) } }
+                .filter { it in RING_CHOICES }.distinct()
+        }.getOrNull()?.takeIf { it.size >= RING_MIN } ?: DEFAULT_RING
     }
 
     private fun put(block: SharedPreferences.Editor.() -> Unit) {
@@ -318,9 +326,11 @@ object Customization {
     // ---------------------------------------------------------- top pills
 
     /** The glass pills along the top of the editor. */
-    enum class Pill(val label: String, val detail: String, val defaultSlot: PillSlot) {
+    enum class Pill(val label: String, val detail: String, val defaultSlot: PillSlot, val hidable: Boolean = true) {
         Document("Document", "Gallery button and the name", PillSlot.Left),
-        Edit("History & actions", "History, Actions, Guides", PillSlot.Left),
+        // Holds Actions (and with it the way back to Settings): never hidden,
+        // so the editor can't be locked out of its own menus.
+        Edit("History & actions", "History, Actions, Guides", PillSlot.Left, hidable = false),
         Tools("Tools", "Selection, brush, fill… (order set below)", PillSlot.Right),
         Panels("Layers & colour", "Adjustments, Layers, colour", PillSlot.Right)
     }
@@ -344,6 +354,7 @@ object Customization {
     }
 
     fun setPillSlot(p: Pill, slot: PillSlot) {
+        if (slot == PillSlot.Hidden && !p.hidable) return
         pillSlots = pillSlots + (p to slot)
         put { putString("pillSlots", JSONObject(pillSlots.mapKeys { it.key.name }.mapValues { it.value.name }).toString()) }
     }
@@ -393,6 +404,75 @@ object Customization {
     var defaultQuickShape by mutableStateOf(true)
         private set
     fun setDefaultQuickShapeValue(v: Boolean) { defaultQuickShape = v; put { putBoolean("defaultQuickShape", v) } }
+
+    /**
+     * Each tool's starting options (selection shape, fill, gradient, shape,
+     * liquify, text…), as JSON text so the UI follows changes. Missing keys
+     * mean the built-in default.
+     */
+    var toolDefaults by mutableStateOf("{}")
+        private set
+
+    private fun td(): JSONObject = runCatching { JSONObject(toolDefaults) }.getOrDefault(JSONObject())
+
+    fun tdInt(key: String, def: Int): Int = td().optInt(key, def)
+    fun tdFloat(key: String, def: Float): Float = td().optDouble(key, def.toDouble()).toFloat()
+    fun tdBool(key: String, def: Boolean): Boolean = td().optBoolean(key, def)
+    fun tdString(key: String, def: String): String = td().optString(key, def)
+
+    fun setTd(key: String, value: Any) {
+        val o = td()
+        o.put(key, if (value is Float) value.toDouble() else value)
+        toolDefaults = o.toString()
+        put { putString("toolDefaults", toolDefaults) }
+    }
+
+    fun resetToolDefaults() {
+        toolDefaults = "{}"
+        put { remove("toolDefaults") }
+    }
+
+    // ---------------------------------------------------- shortcut ring
+
+    val DEFAULT_RING: List<Action> = listOf(
+        Action.Brush, Action.Eraser, Action.Smudge, Action.Colours, Action.Redo, Action.Undo
+    )
+    const val RING_MIN = 2
+    const val RING_MAX = 10
+
+    /** What the shortcut ring offers, clockwise from the top. */
+    var ringItems by mutableStateOf(DEFAULT_RING)
+        private set
+
+    private fun saveRing() { put { putString("ringItems", JSONArray(ringItems.map { it.name }).toString()) } }
+
+    fun moveRingItem(from: Int, to: Int) {
+        val list = ringItems.toMutableList()
+        if (from !in list.indices || to !in list.indices || from == to) return
+        list.add(to, list.removeAt(from))
+        ringItems = list
+        saveRing()
+    }
+
+    fun removeRingItem(a: Action) {
+        if (ringItems.size <= RING_MIN) return
+        ringItems = ringItems - a
+        saveRing()
+    }
+
+    fun addRingItem(a: Action) {
+        if (a in ringItems || ringItems.size >= RING_MAX || a !in RING_CHOICES) return
+        ringItems = ringItems + a
+        saveRing()
+    }
+
+    fun resetRing() {
+        ringItems = DEFAULT_RING
+        put { remove("ringItems") }
+    }
+
+    /** Everything the ring can hold (not itself, not "nothing"). */
+    val RING_CHOICES: List<Action> get() = Action.entries.filter { it != Action.None && it != Action.ShortcutMenu }
 
     /** The last session's tool settings (JSON), for [persistToolSettings]. */
     var toolState: String? = null

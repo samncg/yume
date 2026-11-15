@@ -147,7 +147,7 @@ class SurfaceRenderer(
             while (running) {
                 var work = false
                 session.runCommands()
-                if (session.runInput()) work = true
+                if (session.runInput(INPUT_BUDGET_NS)) work = true
                 if (session.consumePendingPreview()) work = true
                 if (session.tickFrame()) work = true
                 session.rebuildTransformIfNeeded()
@@ -777,3 +777,6 @@ class SurfaceRenderer(
         canvas.drawCircle(mapped[0], mapped[1], radius, overlay)
     }
 }
+
+/** Input painted per render-loop turn before a frame is drawn (the rest waits a turn). */
+private const val INPUT_BUDGET_NS = 10_000_000L

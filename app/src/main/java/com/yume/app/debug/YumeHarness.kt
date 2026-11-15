@@ -200,6 +200,8 @@ object YumeHarness {
                     out.append(scoreLiftEnd(app))
                 } else if (only == "smudgeperf") {
                     out.append(scoreSmudgePerf())
+                } else if (only == "bigstroke") {
+                    out.append(scoreBigStroke())
                 } else if (only == "opacitytest") {
                     out.append(scoreOpacityTest())
                 } else if (only == "motionuser") {
@@ -4220,6 +4222,71 @@ object YumeHarness {
         } catch (t: Throwable) {
             Log.e(TAG, "liftend failed", t)
             out.append("liftend: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /**
+     * A big brush swept fast across a 4K canvas, as a finger does: per input
+     * batch cost and the cost at lift, for a few brushes at 300 px (Studio Pen
+     * also at spacing 0, as users set it).
+     */
+    private fun scoreBigStroke(): String {
+        val out = StringBuilder()
+        val size = 4096
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        try {
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = 0xFFFFFFFF.toInt()
+            val session = DrawingSession("bs", "BS", engine, History())
+            identityView(session, size, size)
+            session.presets = com.yume.app.engine.BrushLibrary.defaults.map {
+                if (it.id == "studio-pen") it.copy(spacing = 0f) else it
+            } + com.yume.app.engine.BrushLibrary.defaults.first { it.id == "studio-pen" }.copy(id = "studio-pen-5", name = "sp5")
+            session.assist = 0.3f
+            session.quickShapeEnabled = false
+            val l = engine.newLayer("Paint")
+            engine.selectLayer(l.id)
+            engine.compositeAll()
+            val cases = listOf("studio-pen", "studio-pen-5", "soft-brush", "pencil-6b", "airbrush")
+            for ((ci, id) in cases.withIndex()) {
+                val p = session.presets.first { it.id == id }
+                pick(session, p, p.category)
+                session.runCommands()
+                session.setBrushSize(300f)
+                session.runCommands()
+                val y = 400f + ci * 700f
+                var worst = 0.0
+                var total = 0.0
+                val n = 30
+                session.pushInput(InputEvent.Down(0, 100f, y, 0.6f, 0f, false, false))
+                session.runInput()
+                for (i in 1..n) {
+                    val t0 = System.nanoTime()
+                    // ~130 px per event batch: a quick finger across the screen.
+                    val xs = FloatArray(4) { k -> 100f + (i - 1) * 130f + (k + 1) * 32.5f }
+                    val ys = FloatArray(4) { k -> y + kotlin.math.sin((i * 4 + k) * 0.12f) * 120f }
+                    session.pushInput(InputEvent.Move(0, xs, ys, FloatArray(4) { 0.6f }, 0f))
+                    session.runInput()
+                    engine.flush()
+                    val ms = (System.nanoTime() - t0) / 1e6
+                    worst = max(worst, ms)
+                    total += ms
+                }
+                val e0 = System.nanoTime()
+                session.pushInput(InputEvent.Up(0))
+                session.runInput()
+                session.runCommands()
+                engine.flush()
+                val endMs = (System.nanoTime() - e0) / 1e6
+                out.append("bigstroke $id 300px spacing ${p.spacing}: per batch avg ${"%.1f".format(total / n)} ms worst ${"%.1f".format(worst)} ms, lift ${"%.0f".format(endMs)} ms\n")
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "bigstroke failed", t)
+            out.append("bigstroke: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
         } finally {
             TileStoreConfig.useSparseLayers = oldS
         }

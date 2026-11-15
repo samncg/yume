@@ -26,6 +26,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlin.math.roundToInt
 
+/** The text tool's font names, for Settings. */
+internal val TEXT_FONT_LABELS: List<String> get() = FONTS.map { it.first }
+
 /** System font families offered by the text tool: label, Android family name, preview. */
 private val FONTS = listOf(
     Triple("Sans", "sans-serif", FontFamily.SansSerif),
@@ -46,11 +49,13 @@ fun TextDialog(
     onAdd: (text: String, sizePx: Float, font: String, bold: Boolean, italic: Boolean, align: Int) -> Unit
 ) {
     var text by rememberSaveable { mutableStateOf("") }
-    var font by rememberSaveable { mutableIntStateOf(0) }
-    var size by rememberSaveable { mutableFloatStateOf(96f) }
-    var bold by rememberSaveable { mutableStateOf(false) }
-    var italic by rememberSaveable { mutableStateOf(false) }
-    var align by rememberSaveable { mutableIntStateOf(0) }
+    // Starts from the user's text defaults (Settings, Defaults).
+    val d = com.yume.app.data.Customization
+    var font by rememberSaveable { mutableIntStateOf(d.tdInt("textFont", 0).coerceIn(0, FONTS.size - 1)) }
+    var size by rememberSaveable { mutableFloatStateOf(d.tdFloat("textSize", 96f).coerceIn(12f, 600f)) }
+    var bold by rememberSaveable { mutableStateOf(d.tdBool("textBold", false)) }
+    var italic by rememberSaveable { mutableStateOf(d.tdBool("textItalic", false)) }
+    var align by rememberSaveable { mutableIntStateOf(d.tdInt("textAlign", 0).coerceIn(0, 2)) }
     Dialog(onDismissRequest = onDismiss) {
         PanelCard(Modifier.width(380.dp)) {
             PanelHeader("Add text", onClose = onDismiss)

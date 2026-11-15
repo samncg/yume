@@ -343,7 +343,10 @@ class CanvasView(
         }
 
         if (twoFinger) {
-            if (menuHoldFired) return
+            if (menuHoldFired) {
+                if (ringFingers) aimRing(event)
+                return
+            }
             if (event.pointerCount >= 2) {
                 sendGesture(event)
                 // Panning, pinching or rotating cancels the hold. Measured from
@@ -373,6 +376,7 @@ class CanvasView(
 
     private fun onPointerUp(event: MotionEvent) {
         if (stylusActive) return
+        releaseRing()
         cancelMenuHold()
         // Rebase the pinch maths on the fingers that are still down.
         if (twoFinger) {
@@ -381,6 +385,7 @@ class CanvasView(
     }
 
     private fun onUp(event: MotionEvent) {
+        releaseRing()
         // A quick single tap (fill, text, auto-select) lifts inside the hold.
         if (mode == Mode.Pending) commitPending()
         cancelScheduledLongPress()
@@ -424,6 +429,8 @@ class CanvasView(
     }
 
     private fun cancelEverything() {
+        ringFingers = false
+        com.yume.app.input.PenGestures.ringAim = null
         session.predictedTip = null
         dropPending()
         cancelScheduledLongPress()
@@ -530,6 +537,9 @@ class CanvasView(
                 menuHoldFired = true
                 performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
                 if (holdAction == com.yume.app.data.Customization.Action.ShortcutMenu) {
+                    ringFingers = true
+                    ringStart.clear()
+                    com.yume.app.input.PenGestures.ringAim = null
                     com.yume.app.input.PenGestures.onMenuAt?.invoke(gestureFocusX, gestureFocusY)
                 } else {
                     com.yume.app.data.Customization.dispatch(holdAction)
@@ -543,6 +553,46 @@ class CanvasView(
     private fun cancelMenuHold() {
         menuHoldAction?.let { handler.removeCallbacks(it) }
         menuHoldAction = null
+    }
+
+    /** The ring opened under these two fingers; orbiting one picks an item. */
+    private var ringFingers = false
+    private val ringStart = HashMap<Int, FloatArray>()
+
+    /**
+     * Orbit selection: the finger that has moved furthest since the ring
+     * opened circles the one resting; the direction between them points at
+     * an item.
+     */
+    private fun aimRing(event: MotionEvent) {
+        if (event.pointerCount != 2) return
+        for (i in 0 until 2) {
+            ringStart.getOrPut(event.getPointerId(i)) { floatArrayOf(event.getX(i), event.getY(i)) }
+        }
+        val d = FloatArray(2) { i ->
+            val s = ringStart[event.getPointerId(i)]!!
+            hypot(event.getX(i) - s[0], event.getY(i) - s[1])
+        }
+        val mover = if (d[0] >= d[1]) 0 else 1
+        val pivot = 1 - mover
+        if (d[mover] < RING_AIM_DP * density && com.yume.app.input.PenGestures.ringAim == null) return
+        val a = Math.toDegrees(
+            kotlin.math.atan2(
+                (event.getY(mover) - event.getY(pivot)).toDouble(),
+                (event.getX(mover) - event.getX(pivot)).toDouble()
+            )
+        ).toFloat()
+        com.yume.app.input.PenGestures.ringAim = a
+    }
+
+    /** A finger lifted while aiming: run the aimed item (once). */
+    private fun releaseRing() {
+        if (!ringFingers) return
+        ringFingers = false
+        if (com.yume.app.input.PenGestures.ringAim != null) {
+            com.yume.app.input.PenGestures.onRingRelease?.invoke()
+            com.yume.app.input.PenGestures.ringAim = null
+        }
     }
 
     private var holdAnchorX = 0f
@@ -738,6 +788,8 @@ class CanvasView(
 private const val MENU_HOLD_MS = 520L
 private const val MENU_HOLD_SLOP_DP = 14f
 private const val MENU_HOLD_TURN_DEG = 6.0
+/** How far a finger orbits before the open ring starts following it. */
+private const val RING_AIM_DP = 28f
 
 /** How long the pen rests before QuickShape snaps, and how still it must be. */
 private const val QUICKSHAPE_SLOP_DP = 11f

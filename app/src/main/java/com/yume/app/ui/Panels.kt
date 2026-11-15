@@ -844,7 +844,7 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
     PanelCard(Modifier.width(minOf(780, screenW - 24).dp).height(panelH.dp)) {
         PanelHeader("Brush Studio", onClose)
         Row(Modifier.weight(1f)) {
-        Column(Modifier.width(310.dp)) {
+        Column(Modifier.width(336.dp)) {
         SegmentedRow(
             options = listOf("Brush", "Eraser", "Smudge"),
             selectedIndex = when (state.category) {
@@ -907,6 +907,8 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
         // The brush grid scrolls on its own, beside the settings; brushes
         // passing out of view blur gradually at its top and bottom.
         val gridScroll = rememberScrollState()
+        // A scrollbar strip beside the grid, as beside the settings.
+        Row(Modifier.weight(1f)) {
         Column(
             Modifier
                 .weight(1f)
@@ -933,8 +935,10 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                 }
             }
         }
+        ScrollGutter(gridScroll, Modifier.width(26.dp).fillMaxHeight())
         }
-        Spacer(Modifier.width(16.dp))
+        }
+        Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
         if (preset != null) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -952,6 +956,29 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
                         .clickable { com.yume.app.data.BrushPrefs.toggleFavorite(preset.id) }
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                )
+                // The brush (eraser, blender) new projects start with: any
+                // brush, imported and custom ones included.
+                val cu = com.yume.app.data.Customization
+                val isDefault = when (preset.category) {
+                    BrushCategory.Brush -> cu.defaultBrush == preset.id
+                    BrushCategory.Eraser -> cu.defaultEraser == preset.id
+                    BrushCategory.Smudge -> cu.defaultSmudge == preset.id
+                }
+                Text(
+                    text = if (isDefault) "● Default" else "○ Default",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (isDefault) YumeColors.accent else YumeColors.textDim,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable(enabled = !isDefault) {
+                            when (preset.category) {
+                                BrushCategory.Brush -> cu.setDefaultBrushValue(preset.id)
+                                BrushCategory.Eraser -> cu.setDefaultEraserValue(preset.id)
+                                BrushCategory.Smudge -> cu.setDefaultSmudgeValue(preset.id)
+                            }
+                        }
                         .padding(horizontal = 10.dp, vertical = 5.dp)
                 )
             }

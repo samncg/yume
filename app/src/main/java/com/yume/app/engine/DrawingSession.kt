@@ -681,9 +681,15 @@ class DrawingSession(
         return if (s == 0L) 0L else now - s
     }
 
-    fun runInput(): Boolean {
+    fun runInput(budgetNs: Long = Long.MAX_VALUE): Boolean {
         var changed = false
+        // A time budget: a big brush can take longer to paint than the
+        // finger takes to move, and draining the queue in one go would show
+        // nothing until the stroke ends. Past the budget the frame is drawn
+        // and the rest is painted in the next turns.
+        val start = System.nanoTime()
         while (true) {
+            if (changed && System.nanoTime() - start > budgetNs && inputs.isNotEmpty()) break
             val event = inputs.poll() ?: break
             val timed = event !is InputEvent.Move && event !is InputEvent.Hover &&
                 event !is InputEvent.PickMove && event !is InputEvent.Gesture
@@ -1825,6 +1831,7 @@ class DrawingSession(
         color0: Int, assist0: Float, fillTolerance0: Int, quickShape0: Boolean
     ) {
         // The eraser and blender pick their default when first chosen.
+        defaultPresetFor[BrushCategory.Brush] = brushId
         defaultPresetFor[BrushCategory.Eraser] = eraserId
         defaultPresetFor[BrushCategory.Smudge] = smudgeId
         presets.firstOrNull { it.id == brushId && it.category == BrushCategory.Brush }?.let { activePresetId = it.id }
@@ -1832,12 +1839,37 @@ class DrawingSession(
         assist = assist0.coerceIn(0f, 1f)
         fillTolerance = fillTolerance0
         quickShapeEnabled = quickShape0
+        applyToolOptionDefaults(com.yume.app.data.Customization.toolDefaults)
         if (tool0 != Tool.Brush && tool0 != Tool.Transform) chooseTool(tool0)
         requestState()
     }
 
+    /** Each tool's starting options from Settings (JSON; missing keys keep the built-in ones). */
+    fun applyToolOptionDefaults(json: String) {
+        val o = runCatching { org.json.JSONObject(json) }.getOrNull() ?: return
+        SelectionShape.entries.firstOrNull { it.name == o.optString("selectionShape") }?.let { selectionShape = it }
+        wandTolerance = o.optInt("wandTolerance", wandTolerance).coerceIn(1, 100)
+        fillLayerOnly = o.optBoolean("fillLayerOnly", fillLayerOnly)
+        fillSelection = o.optBoolean("fillSelection", fillSelection)
+        fillExpand = o.optInt("fillExpand", fillExpand).coerceIn(0, 8)
+        Gradients.Kind.entries.firstOrNull { it.name == o.optString("gradientKind") }?.let { gradientKind = it }
+        ShapeKind.entries.firstOrNull { it.name == o.optString("shapeKind") }?.let { shapeKind = it }
+        shapePerfect = o.optBoolean("shapePerfect", shapePerfect)
+        shapeSides = o.optInt("shapeSides", shapeSides).coerceIn(3, 12)
+        LiquifyMode.entries.firstOrNull { it.name == o.optString("liquifyMode") }?.let { liquifyMode = it }
+        liquifySize = o.optDouble("liquifySize", liquifySize.toDouble()).toFloat().coerceIn(10f, 600f)
+        liquifyStrength = o.optDouble("liquifyStrength", liquifyStrength.toDouble()).toFloat().coerceIn(0f, 1f)
+    }
+
     /** Preset each brush family starts with when first chosen (id, empty = first). */
     private val defaultPresetFor = HashMap<BrushCategory, String>()
+
+    /** The preset last used in each brush family, so switching back restores it. */
+    private val lastPresetFor = HashMap<BrushCategory, String>()
+
+    private fun rememberActivePreset() {
+        presets.firstOrNull { it.id == activePresetId }?.let { lastPresetFor[it.category] = it.id }
+    }
 
     fun chooseTool(newTool: Tool) {
         if (newTool == tool) return
@@ -1849,6 +1881,7 @@ class DrawingSession(
             post { commitAdjustmentInternal() }
         }
         if (tool == Tool.Liquify && newTool != Tool.Liquify) post { liquify.releaseBase() }
+        rememberActivePreset()
         tool = newTool
         when (newTool) {
             Tool.Brush -> category = BrushCategory.Brush
@@ -1860,8 +1893,11 @@ class DrawingSession(
         if (newTool == Tool.Brush || newTool == Tool.Eraser || newTool == Tool.Smudge) {
             val list = presetsOf(category)
             if (list.none { it.id == activePresetId }) {
+                // The one used last in this family, else the user's default.
+                val last = lastPresetFor[category]
                 val wanted = defaultPresetFor[category]
-                activePresetId = list.firstOrNull { it.id == wanted }?.id ?: list.first().id
+                activePresetId = list.firstOrNull { it.id == last }?.id
+                    ?: list.firstOrNull { it.id == wanted }?.id ?: list.first().id
             }
         }
         if (newTool == Tool.Transform) {
@@ -1871,6 +1907,7 @@ class DrawingSession(
     }
 
     fun selectPreset(id: String) {
+        rememberActivePreset()
         activePresetId = id
         presets.firstOrNull { it.id == id }?.let { p ->
             when (p.category) {

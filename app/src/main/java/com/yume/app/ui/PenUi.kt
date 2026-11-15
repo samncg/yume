@@ -38,9 +38,50 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
+/** How an action looks on the shortcut ring: an icon, a short text, or (both null) the colour swatch. */
+internal fun ringFace(a: com.yume.app.data.Customization.Action): Pair<Glyph?, String?> = when (a.name) {
+    "Undo" -> Glyph.Undo to null
+    "Redo" -> Glyph.Redo to null
+    "ToggleUi" -> Glyph.Eye to null
+    "Brush" -> Glyph.Brush to null
+    "Eraser" -> Glyph.Eraser to null
+    "Smudge" -> Glyph.Smudge to null
+    "ToggleEraser" -> null to "B⇄E"
+    "Fill" -> Glyph.Bucket to null
+    "Selection" -> Glyph.Select to null
+    "Transform" -> Glyph.Transform to null
+    "Eyedropper" -> Glyph.Droplet to null
+    "SwapColour" -> Glyph.Palette to null
+    "BrushStudio" -> Glyph.Sparkle to null
+    "Layers" -> Glyph.Layers to null
+    "Colours" -> null to null
+    "Adjustments" -> Glyph.Sliders to null
+    "NewLayer" -> Glyph.Plus to null
+    "ClearLayer" -> Glyph.Clear to null
+    "SelectAll" -> null to "All"
+    "Deselect" -> null to "None"
+    "FitToScreen" -> Glyph.Fit to null
+    "ActualSize" -> null to "1:1"
+    "FlipView" -> Glyph.FlipH to null
+    "SizeUp" -> null to "Size+"
+    "SizeDown" -> null to "Size−"
+    "OpacityUp" -> null to "Opac+"
+    "OpacityDown" -> null to "Opac−"
+    else -> null to a.label.take(5)
+}
+
+/** The ring item [deg] (screen degrees, 0 = right, clockwise) points at, of [n] starting at the top. */
+private fun ringIndex(deg: Float, n: Int): Int {
+    val step = 360f / n
+    val t = ((deg + 90f) % 360f + 360f) % 360f
+    return (t / step).roundToInt() % n
+}
+
 /**
- * The squeeze menu: a ring of tools around the pen tip, like Mi Canvas. Tap
- * one to switch; tap anywhere else (or squeeze again) to close.
+ * The shortcut ring around the pen tip (or between two held fingers), like
+ * Mi Canvas. Its items are the user's (Settings, Gestures). Tap one; or,
+ * with the two fingers still down, orbit one around the other to point at an
+ * item and lift to choose it. Tap anywhere else to close.
  */
 @Composable
 fun PenShortcutMenu(
@@ -55,6 +96,34 @@ fun PenShortcutMenu(
         open.snapTo(0f)
         open.animateTo(1f, AppleSpring.sheet())
     }
+    val actions = com.yume.app.data.Customization.ringItems
+    fun run(a: com.yume.app.data.Customization.Action) {
+        if (a == com.yume.app.data.Customization.Action.Colours) onColor()
+        else com.yume.app.data.Customization.dispatch(a)
+        onDismiss()
+    }
+    val n = actions.size
+    val aim = PenGestures.ringAim
+    val aimed: Int? = if (aim != null && n > 0) ringIndex(aim, n) else null
+    val currentActions = androidx.compose.runtime.rememberUpdatedState(actions)
+    val currentDismiss = androidx.compose.runtime.rememberUpdatedState(onDismiss)
+    val currentColor = androidx.compose.runtime.rememberUpdatedState(onColor)
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        PenGestures.onRingRelease = {
+            val a = PenGestures.ringAim
+            val list = currentActions.value
+            if (a != null && list.isNotEmpty()) {
+                val action = list[ringIndex(a, list.size)]
+                if (action == com.yume.app.data.Customization.Action.Colours) currentColor.value()
+                else com.yume.app.data.Customization.dispatch(action)
+                currentDismiss.value()
+            }
+        }
+        onDispose {
+            PenGestures.onRingRelease = null
+            PenGestures.ringAim = null
+        }
+    }
     BoxWithConstraints(
         Modifier
             .fillMaxSize()
@@ -62,64 +131,82 @@ fun PenShortcutMenu(
             .pointerInput(Unit) { detectTapGestures { onDismiss() } }
     ) {
         val density = LocalDensity.current
-        val radius = with(density) { 70.dp.toPx() }
+        // More items, a wider ring, so the buttons never overlap.
+        val radiusDp = maxOf(70f, n * 60f / (2f * Math.PI.toFloat()))
+        val radius = with(density) { radiusDp.dp.toPx() }
         val button = with(density) { 50.dp.toPx() }
         val reach = radius + button / 2f + with(density) { 8.dp.toPx() }
         // Keep the whole ring on screen.
         val cx = at.x.coerceIn(reach, (constraints.maxWidth - reach).coerceAtLeast(reach))
         val cy = at.y.coerceIn(reach, (constraints.maxHeight - reach).coerceAtLeast(reach))
-        data class Item(val glyph: Glyph?, val label: String, val selected: Boolean, val run: () -> Unit)
-        val items = listOf(
-            Item(Glyph.Brush, "Paint", state.tool == Tool.Brush) { session.chooseTool(Tool.Brush) },
-            Item(Glyph.Eraser, "Erase", state.tool == Tool.Eraser) { session.chooseTool(Tool.Eraser) },
-            Item(Glyph.Smudge, "Smudge", state.tool == Tool.Smudge) { session.chooseTool(Tool.Smudge) },
-            Item(null, "Colour", false) { onColor() },
-            Item(Glyph.Redo, "Redo", false) { session.redo() },
-            Item(Glyph.Undo, "Undo", false) { session.undo() }
-        )
-        items.forEachIndexed { i, item ->
+        // The aimed item's name in the middle.
+        if (aimed != null) {
+            val halfW = with(density) { 60.dp.toPx() }
+            val halfH = with(density) { 14.dp.toPx() }
+            Box(
+                Modifier
+                    .offset { IntOffset((cx - halfW).roundToInt(), (cy - halfH).roundToInt()) }
+                    .width(120.dp)
+                    .height(28.dp)
+                    .glass(corner = 14f, weight = GlassWeight.Heavy),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(actions[aimed].label, style = MaterialTheme.typography.labelMedium, color = YumeColors.text, maxLines = 1)
+            }
+        }
+        actions.forEachIndexed { i, action ->
             // Start at the top and go clockwise.
-            val angle = Math.toRadians(-90.0 + i * 360.0 / items.size)
+            val angle = Math.toRadians(-90.0 + i * 360.0 / n)
             val t = open.value
+            val hot = aimed == i
             val px = cx + (radius * t * cos(angle)).toFloat() - button / 2f
             val py = cy + (radius * t * sin(angle)).toFloat() - button / 2f
+            val selected = when (action.name) {
+                "Brush" -> state.tool == Tool.Brush
+                "Eraser" -> state.tool == Tool.Eraser
+                "Smudge" -> state.tool == Tool.Smudge
+                "Fill" -> state.tool == Tool.Fill
+                "Selection" -> state.tool == Tool.Selection
+                "Transform" -> state.tool == Tool.Transform
+                else -> false
+            }
+            val (glyph, text) = ringFace(action)
             Box(
                 Modifier
                     .offset { IntOffset(px.roundToInt(), py.roundToInt()) }
                     .size(50.dp)
                     .graphicsLayer {
-                        val s = 0.5f + 0.5f * t
+                        val s = (0.5f + 0.5f * t) * (if (hot) 1.22f else 1f)
                         scaleX = s
                         scaleY = s
                         alpha = t.coerceIn(0f, 1f)
                     }
-                    .glass(corner = 25f, weight = GlassWeight.Heavy),
+                    .glass(corner = 25f, weight = GlassWeight.Heavy)
+                    .then(if (hot) Modifier.border(2.dp, YumeColors.accent, CircleShape) else Modifier),
                 contentAlignment = Alignment.Center
             ) {
-                if (item.glyph != null) {
-                    YumeIconButton(
-                        item.glyph,
-                        {
-                            item.run()
-                            onDismiss()
-                        },
-                        selected = item.selected,
+                when {
+                    glyph != null -> YumeIconButton(
+                        glyph, { run(action) },
+                        selected = selected || hot,
                         size = 50.dp,
                         iconSize = 22.dp,
-                        label = item.label
+                        label = action.label
                     )
-                } else {
-                    Box(
+                    text != null -> Box(
+                        Modifier
+                            .size(50.dp)
+                            .pointerInput(action) { detectTapGestures { run(action) } },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text, style = MaterialTheme.typography.labelMedium, color = if (hot) YumeColors.accent else YumeColors.text)
+                    }
+                    else -> Box(
                         Modifier
                             .size(26.dp)
                             .background(Color(state.color), CircleShape)
                             .border(2.dp, Color.White.copy(alpha = 0.85f), CircleShape)
-                            .pointerInput(Unit) {
-                                detectTapGestures {
-                                    item.run()
-                                    onDismiss()
-                                }
-                            }
+                            .pointerInput(action) { detectTapGestures { run(action) } }
                     )
                 }
             }

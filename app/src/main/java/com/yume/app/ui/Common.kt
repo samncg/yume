@@ -44,6 +44,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
@@ -791,35 +792,60 @@ private object EdgeBlur {
 }
 
 /**
- * A blank strip beside a scrolling column with its scrollbar: a vertical drag
- * here only scrolls (it can never move a slider), and the thumb shows where
- * you are. Dragging works like touching the content (pull up to go down).
+ * A blank strip beside a scrolling column with its scrollbar, which works
+ * as a slider: the thumb follows the finger, and touching the track jumps
+ * there. Nothing in the strip can move a setting by accident.
  */
 @Composable
 fun ScrollGutter(state: androidx.compose.foundation.ScrollState, modifier: Modifier = Modifier) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var viewport by remember { mutableStateOf(0) }
+    var dragging by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
+    // Track geometry in px: top inset, track length, thumb length.
+    fun geometry(height: Float): Triple<Float, Float, Float> {
+        val inset = with(density) { 6.dp.toPx() }
+        val track = height - inset * 2f
+        val content = (viewport + state.maxValue).coerceAtLeast(1)
+        val thumb = (track * viewport / content).coerceIn(with(density) { 36.dp.toPx() }, track)
+        return Triple(inset, track, thumb)
+    }
     Canvas(
         modifier
             .onSizeChanged { viewport = it.height }
             .pointerInput(state) {
-                detectVerticalDragGestures { change, dy ->
-                    change.consume()
-                    scope.launch { state.scrollBy(-dy) }
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    if (state.maxValue <= 0) return@awaitEachGesture
+                    val (inset, track, thumb) = geometry(size.height.toFloat())
+                    val room = (track - thumb).coerceAtLeast(1f)
+                    fun valueAtThumbTop(top: Float) = ((top - inset) / room * state.maxValue).coerceIn(0f, state.maxValue.toFloat())
+                    val thumbTop = inset + room * state.value / state.maxValue
+                    // Grab the thumb where it was touched; off the thumb, it
+                    // jumps so its middle sits under the finger.
+                    val grab = if (down.position.y in thumbTop..(thumbTop + thumb)) down.position.y - thumbTop
+                    else thumb / 2f
+                    dragging = true
+                    var target = valueAtThumbTop(down.position.y - grab)
+                    scope.launch { state.scrollTo(target.roundToInt()) }
+                    drag(down.id) { change ->
+                        change.consume()
+                        target = valueAtThumbTop(change.position.y - grab)
+                        scope.launch { state.scrollTo(target.roundToInt()) }
+                    }
+                    dragging = false
                 }
             }
     ) {
         if (state.maxValue <= 0 || viewport <= 0) return@Canvas
-        val content = viewport + state.maxValue
-        val trackTop = 6.dp.toPx()
-        val track = size.height - trackTop * 2f
-        val thumbH = (track * viewport / content).coerceAtLeast(28.dp.toPx())
-        val y = trackTop + (track - thumbH) * state.value / state.maxValue
-        val w = 4.dp.toPx()
+        val (inset, track, thumbH) = geometry(size.height)
+        val y = inset + (track - thumbH) * state.value / state.maxValue
+        val w = (if (dragging) 8.dp else 5.dp).toPx()
         val x = size.width / 2f - w / 2f
-        drawRoundRect(Color(0x14FFFFFF), Offset(x, trackTop), Size(w, track), CornerRadius(w / 2f, w / 2f))
+        drawRoundRect(Color(0x1AFFFFFF), Offset(x, inset), Size(w, track), CornerRadius(w / 2f, w / 2f))
         drawRoundRect(
-            if (state.isScrollInProgress) Color(0xB3FFFFFF) else Color(0x66FFFFFF),
+            if (dragging || state.isScrollInProgress) Color(0xCCFFFFFF) else Color(0x73FFFFFF),
             Offset(x, y), Size(w, thumbH), CornerRadius(w / 2f, w / 2f)
         )
     }

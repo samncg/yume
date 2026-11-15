@@ -341,7 +341,7 @@ fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f
                     Box(Modifier.size(d).clip(CircleShape).background(YumeColors.text.copy(alpha = state.brushOpacity.coerceIn(0.25f, 1f))))
                 }
             } else {
-                // Procreate's order: size, the square button, opacity.
+                // Size above opacity.
                 val onRight = ox.value + railSize.width / 2f < maxW / 2f
                 // Size on a curve (1..900 px): small sizes get most of the
                 // track, where fine control matters.
@@ -352,18 +352,6 @@ fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f
                     valueText = "${state.brushSize.roundToInt()} px",
                     bubbleOnRight = onRight,
                     modifier = Modifier.height(150.dp)
-                )
-                Spacer(Modifier.height(8.dp))
-                // The square button: eyedropper.
-                Box(
-                    Modifier
-                        .size(26.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0x40000000))
-                        .border(1.dp, Color(0x40FFFFFF), RoundedCornerShape(6.dp))
-                        .clickable {
-                            com.yume.app.data.Customization.dispatcher?.invoke(com.yume.app.data.Customization.Action.Eyedropper)
-                        }
                 )
                 Spacer(Modifier.height(8.dp))
                 RailSlider(

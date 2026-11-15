@@ -1120,3 +1120,19 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 #   .brushset 6 (was 16: Reset/ copies and QuickLook previews skipped);
 #   .sutg 6 and each .sut 1, every one with its real tip (was round), the
 #   textured ones with their texture; materials up to 7 MB read in pieces.
+
+# --- Live big strokes, tool defaults, shortcut ring orbit, erasers (Nov 2026)
+# The render loop paints at most 10 ms of queued input per turn before drawing
+# (DrawingSession.runInput(budget); the harness still drains the queue in one
+# call). Seven new built-in erasers (appended to the library). Remembered
+# preset per brush family, per-tool option defaults, ring items and orbit
+# selection, Edit pill never hidden: UI and session state only.
+# golden output byte-identical to the previous gate; features byte-identical
+# (MATCH x4); bleedtest dense = sparse MATCH on three runs (20ab3415,
+# 0bd6f58d; the hash itself varies run to run, dense and sparse always agree);
+# opacitytest PASS (205/255; wet bleed 148.8 -> 169.2, no darkening).
+# bigstroke (new, 4096^2, 300 px, 4-sample batches of ~130 px): Studio Pen at
+#   spacing 0: 17.5 ms per batch (worst 43), at 5 %: 6.3 ms; soft brush 6.4;
+#   6B pencil 3.7; airbrush 9.7. On device a 300 px / 0 % finger swipe across
+#   the 4K canvas used to paint in one 577 ms runInput call with no frame
+#   until the lift; now a frame every ~17 ms while it paints.

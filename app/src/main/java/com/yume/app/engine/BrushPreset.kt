@@ -564,6 +564,41 @@ object BrushLibrary {
             pressureSize = 0.4f, pressureOpacity = 0.3f
         ),
         BrushPreset(
+            id = "eraser-precise", group = "Erasers", name = "Precise Eraser", category = BrushCategory.Eraser,
+            size = 4f, hardness = 1f, flow = 1f, spacing = 0.04f, smoothing = 0.55f,
+            pressureSize = 0.2f, pressureOpacity = 0f
+        ),
+        BrushPreset(
+            id = "eraser-block", group = "Erasers", name = "Block Eraser", category = BrushCategory.Eraser,
+            size = 160f, hardness = 1f, flow = 1f, spacing = 0.05f, smoothing = 0.35f,
+            pressureSize = 0f, pressureOpacity = 0f
+        ),
+        BrushPreset(
+            id = "eraser-air", group = "Erasers", name = "Airbrush Eraser", category = BrushCategory.Eraser,
+            size = 120f, hardness = 0.05f, flow = 0.2f, spacing = 0.04f, smoothing = 0.3f,
+            pressureSize = 0.3f, pressureOpacity = 0.8f
+        ),
+        BrushPreset(
+            id = "eraser-kneaded", group = "Erasers", name = "Kneaded Eraser", category = BrushCategory.Eraser,
+            size = 35f, hardness = 0.45f, flow = 0.35f, spacing = 0.06f, smoothing = 0.4f, grain = 0.3f,
+            grainId = "yume-paper", pressureSize = 0.5f, pressureOpacity = 0.8f
+        ),
+        BrushPreset(
+            id = "eraser-chalk", group = "Erasers", name = "Chalk Eraser", category = BrushCategory.Eraser,
+            size = 45f, hardness = 0.5f, flow = 0.75f, spacing = 0.1f, smoothing = 0.2f, grain = 0.75f,
+            grainId = "yume-paper", shapeId = "yume-chalk", rotationMode = 3, pressureSize = 0.6f, pressureOpacity = 0.5f
+        ),
+        BrushPreset(
+            id = "eraser-flat", group = "Erasers", name = "Flat Eraser", category = BrushCategory.Eraser,
+            size = 40f, hardness = 0.95f, flow = 1f, spacing = 0.02f, smoothing = 0.5f, shapeId = "yume-flat",
+            rotationMode = 1, rotation = 90f, pressureSize = 0.3f, pressureOpacity = 0f
+        ),
+        BrushPreset(
+            id = "eraser-splatter", group = "Erasers", name = "Splatter Eraser", category = BrushCategory.Eraser,
+            size = 80f, hardness = 0.9f, spacing = 0.5f, smoothing = 0.1f, jitter = 0.4f,
+            shapeId = "yume-splatter", rotationMode = 3, pressureSize = 0.6f, pressureOpacity = 0.2f
+        ),
+        BrushPreset(
             id = "blend-soft", group = "Blending", name = "Soft Blender", category = BrushCategory.Smudge,
             size = 80f, hardness = 0.2f, flow = 0.6f, spacing = 0.03f, smoothing = 0.5f, smudgeAmount = 0.5f,
             pressureSize = 0.5f, pressureOpacity = 0.5f

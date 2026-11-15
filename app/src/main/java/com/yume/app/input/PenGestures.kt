@@ -84,6 +84,16 @@ object PenGestures {
     /** Opens the shortcut ring at canvas-view px (two-finger hold); null outside the editor. */
     var onMenuAt: ((Float, Float) -> Unit)? = null
 
+    /**
+     * While the ring is open under two fingers: the direction (degrees,
+     * screen space, 0 = right, clockwise) from the resting finger to the one
+     * orbiting it, or null until a finger has moved far enough.
+     */
+    var ringAim by mutableStateOf<Float?>(null)
+
+    /** Runs the ring item under [ringAim] (set by the open ring). */
+    var onRingRelease: (() -> Unit)? = null
+
     fun init(context: Context) {
         if (prefs != null) return
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
