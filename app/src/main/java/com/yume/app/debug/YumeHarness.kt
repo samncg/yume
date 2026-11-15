@@ -187,6 +187,8 @@ object YumeHarness {
                     out.append(scoreCancel(app))
                 } else if (only == "hist16k") {
                     out.append(scoreHistory16k(app))
+                } else if (only == "sunset" || only == "sunsetdraft") {
+                    out.append(ScenePainter.paintSunset(app, save = only == "sunset"))
                 } else if (only == "bleedtest") {
                     out.append(scoreBleedTest(app))
                 } else if (only == "motionuser") {

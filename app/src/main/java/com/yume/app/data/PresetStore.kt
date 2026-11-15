@@ -25,7 +25,10 @@ class PresetStore(context: Context) {
                 if (id.isEmpty()) continue
                 val base = BrushLibrary.defaults.firstOrNull { it.id == id }
                     ?: BrushLibrary.defaults.first()
-                out.add(BrushPreset.fromJson(o, base))
+                // One preset per id; a built-in keeps its current library name.
+                if (out.any { it.id == id }) continue
+                val loaded = BrushPreset.fromJson(o, base)
+                out.add(if (loaded.builtIn && base.id == id) loaded.copy(name = base.name) else loaded)
             }
             if (out.isEmpty()) return@runCatching BrushLibrary.defaults
             // Built-ins added by a newer version join the saved library.

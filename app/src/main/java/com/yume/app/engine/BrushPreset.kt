@@ -622,7 +622,7 @@ object BrushLibrary {
             wetEdges = 0.3f, blend = "Multiply"
         ),
         BrushPreset(
-            id = "wc-splatter", group = "Watercolour", name = "Splatter", size = 120f, hardness = 0.9f, flow = 0.8f,
+            id = "wc-splatter", group = "Watercolour", name = "Watercolour Splatter", size = 120f, hardness = 0.9f, flow = 0.8f,
             spacing = 0.6f, smoothing = 0.2f, jitter = 1f, pressureSize = 0.3f, pressureOpacity = 0.3f,
             sprayCount = 10, sprayParticle = 0.12f, sizeJitter = 0.8f, opacityJitter = 0.5f
         ),
@@ -664,13 +664,13 @@ object BrushLibrary {
             smudgeAmount = 0.6f, pressureSize = 0.5f, pressureOpacity = 0.5f
         ),
         BrushPreset(
-            id = "gouache", group = "Painting", name = "Gouache", size = 38f, hardness = 0.8f, flow = 0.95f,
+            id = "gouache-opaque", group = "Painting", name = "Opaque Gouache", size = 38f, hardness = 0.8f, flow = 0.95f,
             spacing = 0.05f, smoothing = 0.3f, grain = 0.15f, pressureSize = 0.5f, pressureOpacity = 0.25f, wetMix = 0.2f
         ),
 
         // ---- Drawing media
         BrushPreset(
-            id = "pastel", group = "Sketching", name = "Soft Pastel", size = 34f, hardness = 0.4f, flow = 0.75f,
+            id = "pastel", group = "Sketching", name = "Chalk Pastel", size = 34f, hardness = 0.4f, flow = 0.75f,
             spacing = 0.07f, smoothing = 0.25f, grain = 0.85f, grainId = "yume-canvas",
             pressureSize = 0.5f, pressureOpacity = 0.5f, tiltSize = 0.6f, tiltOpacity = 0.3f, satJitter = 0.05f
         ),
@@ -711,7 +711,8 @@ object BrushLibrary {
 
         // ---- Nature and effects (spray, scatter, colour variation)
         BrushPreset(
-            id = "foliage", group = "Elements", name = "Foliage", size = 70f, hardness = 0.85f, flow = 0.9f,
+            id = "leaf-scatter", group = "Elements", name = "Scattered Leaves", size = 70f, hardness = 0.85f, flow = 0.9f,
+            shapeId = "yume-foliage",
             spacing = 0.4f, smoothing = 0.25f, jitter = 0.8f, pressureSize = 0.4f, pressureOpacity = 0.2f,
             sprayCount = 5, sprayParticle = 0.35f, sizeJitter = 0.7f, angleJitter = 180f,
             hueJitter = 0.06f, lumJitter = 0.15f
