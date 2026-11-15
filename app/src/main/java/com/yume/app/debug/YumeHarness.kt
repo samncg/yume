@@ -200,10 +200,14 @@ object YumeHarness {
                     out.append(scoreLiftEnd(app))
                 } else if (only == "smudgeperf") {
                     out.append(scoreSmudgePerf())
+                } else if (only == "histpersist") {
+                    out.append(scoreHistPersist(app))
                 } else if (only == "overlaytest") {
                     out.append(scoreOverlayTest())
                 } else if (only == "bigstroke") {
                     out.append(scoreBigStroke())
+                } else if (only == "bigstroke6k") {
+                    out.append(scoreBigStroke(6144, 900f))
                 } else if (only == "opacitytest") {
                     out.append(scoreOpacityTest())
                 } else if (only == "motionuser") {
@@ -3733,6 +3737,117 @@ object YumeHarness {
      * for saving and the history files. A fill is 4096 tile changes; flat ones
      * must not be copied (they were 1 GB of copies, an out-of-memory crash).
      */
+    /**
+     * Undo history across a reopen, as the editor does it: strokes (some
+     * spilled to the disk tier, one big enough to be streamed), a layer
+     * opacity change, a save, then a fresh session restored from disk that
+     * must undo to the blank start and redo to the final picture.
+     */
+    private fun scoreHistPersist(app: YumeApp): String {
+        val out = StringBuilder()
+        val size = 6144
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        var cache: TileCache? = null
+        val ps = app.projectStore
+        val project = ps.createProject("harness-histpersist", size, size, BG)
+        try {
+            val am = app.getSystemService(android.app.ActivityManager::class.java)
+            cache = TileCache.open(app.cacheDir, project.id, TileCache.defaultBudget(am))
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("hp", "HP", engine, History())
+            session.history.spill = com.yume.app.engine.HistorySpill(File(cache!!.dir, "history.spill"))
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            val l = engine.newLayer("Ink")
+            engine.selectLayer(l.id)
+            engine.compositeAll()
+            fun hashNow(e: DrawingEngine): String { e.compositeAll(); return e.flatten().let { b -> val h = hashBitmap(b); b.recycle(); h } }
+            // The picture after each step: states[k] = after k steps.
+            val states = ArrayList<String>()
+            states.add(hashNow(engine))
+            session.setBrushSize(900f)
+            session.runCommands()
+            for (k in 0 until 8) {
+                session.color = (0xFF000000.toInt() or (k * 0x1F3A57))
+                val y = 500f + k * 650f
+                session.stroke(listOf(P(200f, y), P(3000f, y + 200f), P(5900f, y - 100f)))
+                session.runCommands()
+                states.add(hashNow(engine))
+            }
+            val final = states.last()
+            val steps = session.history.totalCount
+            out.append("histpersist: $steps steps, spilled ${session.history.spilledActions}\n")
+            // Save as the editor does: the pixels, then the history; again
+            // until every step is on disk (each save copies a bounded amount,
+            // the steps already written are reused).
+            var hist: com.yume.app.engine.PersistedHistory? = null
+            var rounds = 0
+            do {
+                val snapDoc = session.snapshotNow()
+                hist = session.historyForDiskNow(ps.savedHistoryIds(project.id))
+                ps.saveProject(project.id, snapDoc)
+                ps.saveHistory(project.id, hist!!, ps.historyStamp(project.id))
+                hist!!.entries.forEach { e -> e.tiles?.forEach { t -> t.before?.recycle(); t.after?.recycle() } }
+                rounds++
+            } while (hist!!.entries.size < steps && rounds < 6)
+            out.append("histpersist: saved ${hist!!.entries.size} of $steps steps in $rounds saves (applied ${hist!!.appliedCount})\n")
+            session.history.spill?.close()
+
+            // Reopen.
+            val loaded = ps.loadProject(project.id)!!
+            val e2 = DrawingEngine(size, size)
+            e2.backgroundColor = loaded.background
+            for (d in loaded.layers) {
+                val ly = e2.newLayer(name = d.name, bitmap = d.bitmap, backingFile = d.file)
+                ly.adoptMask(d.mask, d.maskFile)
+                ly.opacity = d.opacity
+                ly.blend = d.blend
+                ly.visible = d.visible
+                ly.maskEnabled = d.maskEnabled
+            }
+            // Layer ids are new in this engine: map by position, as the file does.
+            val back = ps.loadHistory(project.id, ps.historyStamp(project.id))
+            if (back == null) {
+                out.append("histpersist: reload FAIL (no history)\n")
+            } else {
+                val s2 = DrawingSession("hp2", "HP2", e2, History())
+                identityView(s2, size, size)
+                val ids = HashMap<Long, Long>()
+                loaded.layers.forEachIndexed { i, d -> if (d.id != 0L) ids[d.id] = e2.layers[i].id }
+                s2.restoreHistory(back, emptyMap(), ids)
+                s2.runCommands()
+                val reopened = hashNow(e2)
+                // Undo one step at a time: each must match the picture painted then.
+                var matches = 0
+                var undos = 0
+                while (s2.history.canUndo && undos < 100) {
+                    s2.undo(); s2.runCommands(); undos++
+                    if (hashNow(e2) == states.getOrNull(steps - undos)) matches++
+                }
+                var guard = 0
+                while (s2.history.canRedo && guard++ < 100) { s2.redo(); s2.runCommands() }
+                val redone = hashNow(e2)
+                out.append("histpersist: reload ${back.entries.size} steps; reopened ${if (reopened == final) "= final" else "!= final"}, " +
+                    "$matches/$undos undo states match, redo all ${if (redone == final) "= final" else "!= final"} " +
+                    (if (back.entries.size == steps && reopened == final && matches == undos && undos == steps && redone == final) "PASS" else "FAIL") + "\n")
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "histpersist failed", t)
+            out.append("histpersist: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
     private fun scoreHistory16k(app: YumeApp): String {
         val out = StringBuilder()
         val size = 16384
@@ -4235,9 +4350,8 @@ object YumeHarness {
      * batch cost and the cost at lift, for a few brushes at 300 px (Studio Pen
      * also at spacing 0, as users set it).
      */
-    private fun scoreBigStroke(): String {
+    private fun scoreBigStroke(size: Int = 4096, brushPx: Float = 300f): String {
         val out = StringBuilder()
-        val size = 4096
         val oldS = TileStoreConfig.useSparseLayers
         TileStoreConfig.useSparseLayers = true
         try {
@@ -4258,12 +4372,14 @@ object YumeHarness {
                 val p = session.presets.first { it.id == id }
                 pick(session, p, p.category)
                 session.runCommands()
-                session.setBrushSize(300f)
+                session.setBrushSize(brushPx)
                 session.runCommands()
-                val y = 400f + ci * 700f
+                val y = 400f + ci * (size / 6f)
                 var worst = 0.0
                 var total = 0.0
                 val n = 30
+                var paintNs = 0L
+                var flushNs = 0L
                 session.pushInput(InputEvent.Down(0, 100f, y, 0.6f, 0f, false, false))
                 session.runInput()
                 for (i in 1..n) {
@@ -4272,8 +4388,12 @@ object YumeHarness {
                     val xs = FloatArray(4) { k -> 100f + (i - 1) * 130f + (k + 1) * 32.5f }
                     val ys = FloatArray(4) { k -> y + kotlin.math.sin((i * 4 + k) * 0.12f) * 120f }
                     session.pushInput(InputEvent.Move(0, xs, ys, FloatArray(4) { 0.6f }, 0f))
+                    val tp = System.nanoTime()
                     session.runInput()
+                    paintNs += System.nanoTime() - tp
+                    val tf = System.nanoTime()
                     engine.flush()
+                    flushNs += System.nanoTime() - tf
                     val ms = (System.nanoTime() - t0) / 1e6
                     worst = max(worst, ms)
                     total += ms
@@ -4284,7 +4404,7 @@ object YumeHarness {
                 session.runCommands()
                 engine.flush()
                 val endMs = (System.nanoTime() - e0) / 1e6
-                out.append("bigstroke $id 300px spacing ${p.spacing}: per batch avg ${"%.1f".format(total / n)} ms worst ${"%.1f".format(worst)} ms, lift ${"%.0f".format(endMs)} ms\n")
+                out.append("bigstroke $id ${brushPx.toInt()}px at $size spacing ${p.spacing}: per batch avg ${"%.1f".format(total / n)} ms worst ${"%.1f".format(worst)} ms, lift ${"%.0f".format(endMs)} ms (paint ${paintNs / 1_000_000 / n} + composite ${flushNs / 1_000_000 / n} ms per batch)\n")
             }
         } catch (t: Throwable) {
             Log.e(TAG, "bigstroke failed", t)

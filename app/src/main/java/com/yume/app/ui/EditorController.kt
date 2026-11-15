@@ -170,7 +170,14 @@ class EditorController(
             runCatching { store.loadHistory(projectId, store.historyStamp(projectId)) }
                 .getOrNull()
                 ?.takeIf { it.entries.isNotEmpty() }
-                ?.let { _session.value?.restoreHistory(it, groupIdMap) }
+                ?.let { h ->
+                    // The ids the history was saved with -> this session's.
+                    val layerIdMap = HashMap<Long, Long>()
+                    _session.value?.engine?.layers?.forEachIndexed { i, l ->
+                        project.layers.getOrNull(i)?.id?.takeIf { it != 0L }?.let { layerIdMap[it] = l.id }
+                    }
+                    _session.value?.restoreHistory(h, groupIdMap, layerIdMap)
+                }
             // Allocate the dab scratch before the first gesture so the first
             // stroke does not pay for the allocation inside its first frame.
             _session.value?.warmup()
@@ -243,6 +250,7 @@ class EditorController(
                 var batch: com.yume.app.engine.JournalBatch? = null
                 var bigger = false
                 var hist: com.yume.app.engine.PersistedHistory? = null
+                var protect: Set<Long> = emptySet()
                 val saved = store.savedHistoryIds(projectId)
                 val ran = session.runOnOwner {
                     batch = session.collectJournal(
@@ -251,7 +259,10 @@ class EditorController(
                     )
                     if (batch == null) bigger = true
                     // The undo history of exactly these pixels.
-                    else hist = runCatching { session.historyForDiskNow(saved) }.getOrNull()
+                    else {
+                        hist = runCatching { session.historyForDiskNow(saved) }.getOrNull()
+                        protect = runCatching { session.fileBackedHistoryIds() }.getOrDefault(emptySet())
+                    }
                 }
                 val b = batch
                 if (!ran || b == null) {
@@ -264,7 +275,7 @@ class EditorController(
                     journalBroken = true
                     _message.value = "Autosave journal failed (${it.message}); saving in full"
                 }.onSuccess {
-                    hist?.let { h -> runCatching { store.saveHistory(projectId, h, store.historyStamp(projectId)) } }
+                    hist?.let { h -> runCatching { store.saveHistory(projectId, h, store.historyStamp(projectId), protect) } }
                 }
                 hist?.entries?.forEach { e -> e.tiles?.forEach { t -> t.before?.recycle(); t.after?.recycle() } }
             }
@@ -317,6 +328,7 @@ class EditorController(
         // (possibly long, at 8K) layer writes, while the editor is certainly
         // alive; written after the document.
         var historyToSave: com.yume.app.engine.PersistedHistory? = null
+        var protectIds: Set<Long> = emptySet()
         val savedIds = store.savedHistoryIds(projectId)
         // Take the pending journal changes in the same owner turn as the
         // snapshot: a change made after it stays pending for the next autosave.
@@ -327,6 +339,7 @@ class EditorController(
                 snapshot = session.snapshotNow()
                 // The undo history of exactly this snapshot.
                 historyToSave = runCatching { session.historyForDiskNow(savedIds) }.getOrNull()
+                protectIds = runCatching { session.fileBackedHistoryIds() }.getOrDefault(emptySet())
             }
         ) return
         val snap = snapshot ?: return
@@ -346,7 +359,7 @@ class EditorController(
             _message.value = it
         }
         historyToSave?.let { history ->
-            runCatching { if (saved) store.saveHistory(projectId, history, store.historyStamp(projectId)) }
+            runCatching { if (saved) store.saveHistory(projectId, history, store.historyStamp(projectId), protectIds) }
             // The crops were copies for this write.
             history.entries.forEach { e -> e.tiles?.forEach { t -> t.before?.recycle(); t.after?.recycle() } }
         }
@@ -411,6 +424,7 @@ class EditorController(
     fun exportTo(format: com.yume.app.data.ExportFormat, uri: Uri) {
         val session = _session.value ?: return
         if (_busy.value) return
+        com.yume.app.data.Exporter.progress = -1f
         _busy.value = true
         scope.launch {
             val ok = runCatching { store.openOutput(uri)?.use { writeFormat(session, format, it) } ?: false }.getOrDefault(false)
@@ -423,6 +437,7 @@ class EditorController(
     fun exportShare(format: com.yume.app.data.ExportFormat) {
         val session = _session.value ?: return
         if (_busy.value) return
+        com.yume.app.data.Exporter.progress = -1f
         _busy.value = true
         scope.launch {
             val dir = java.io.File(store.cacheRoot(), "exports").apply { mkdirs() }
@@ -473,19 +488,32 @@ class EditorController(
 
     fun export() {
         val session = _session.value ?: return
+        if (_busy.value) return
+        com.yume.app.data.Exporter.progress = -1f
+        _busy.value = true
         scope.launch {
+            try {
+                exportToGallery(session)
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    private suspend fun exportToGallery(session: com.yume.app.engine.DrawingSession) {
+        run {
             if (session.engine.compositeIsSparse) {
                 // Stage 3c: no canvas-sized bitmap; rows stream from the tiles.
                 val uri = runCatching {
                     store.exportPngStream(session.title) { out -> session.exportBandedTo(out) }
                 }.getOrNull()
                 _message.value = if (uri != null) "Exported to Pictures/Yume" else "Export failed"
-                return@launch
+                return
             }
             val flat = session.flattenBlocking()
             if (flat == null) {
                 _message.value = "Export failed"
-                return@launch
+                return
             }
             val uri = runCatching { store.exportPng(flat, session.title) }.getOrNull()
             flat.recycle()

@@ -264,19 +264,58 @@ removed with − and added back from *More tools*.
 
 **Shortcut ring** — two fingers held still (or the pen's squeeze) open a
 ring of shortcuts. Its items are set in *Settings → Gestures* (2–10 of any
-action, dragged into order, clockwise from the top). With the two fingers
-still down, orbit one finger around the other: the direction from the resting
-finger to the moving one points at an item (it grows and its name shows in
-the middle), and lifting a finger runs it. Tapping still works.
+action, dragged into order, clockwise from the top). Touch an item to run
+it: a new finger runs it on contact; one of the two fingers that opened the
+ring can slide onto an item (it grows and its name shows in the middle) and
+run it when lifted.
 
 **Tool defaults** — *Settings → Defaults* also sets each tool's starting
 options: selection shape and auto-select tolerance, the paint bucket's
 layer / selection / grow options, gradient kind, shape kind, perfect shapes
 and sides, liquify mode, size and strength, and the text tool's font, size,
-bold, italic and alignment.
+bold, italic and alignment. Any colour can be the default colour (picker
+and hex), and Brush Studio's *Default* makes any brush, eraser or blender,
+custom and imported ones too, the one new artworks start with.
+
+**Undo history survives reopening, everywhere** — the history is written
+with every autosave journal and every full save, stamped with the pixel state
+it belongs to (`s<saveSeq>` or `s<saveSeq>/j<journal length>`); opening a
+project, crash recovery included, restores it only when the stamp matches.
+Layer ids are kept in the manifest and mapped to the new session's ids, so
+pixel steps find their layer and layer-structure steps (add, order,
+properties, groups) are saved too. Steps whose crops are on disk (spilled or
+streamed, e.g. a 900 px stroke across a 6K canvas) are read for the save
+without being loaded back, and restored steps keep their crops in the saved
+PNGs, decoded only when undone or redone, so a big canvas's history never has
+to fit in memory. The newest unbroken run is kept when a step cannot be
+rebuilt. `histpersist` harness: eight 900 px strokes on 6K (seven on disk)
+save, reopen to the same picture, undo step by step to each earlier picture
+and redo to the last.
+
+**Clipped layers with a blend mode** — a clipping layer set to Overlay (or
+any mode but Normal) is kept to the base's alpha with a DST_IN save-layer
+and blended on its own; before, the base's own pixels were blended with
+themselves too. Normal clipping is unchanged (`overlaytest` harness).
+
+**Zoomed-out painting** — below 40 % the view shows a downscaled mip that is
+refreshed a few milliseconds per frame. Tiles whose mip is out of date (the
+stroke being painted) are drawn straight from the full-resolution composite
+until it catches up, and while painting the mip work drops to 1 ms per frame,
+so the stroke shows at the pen.
+
+**Interface** — light themes (Paper, Cloud, Sand) with theme-aware text,
+veils and glass; interface size 60–160 %; Material Symbols (Rounded) icons,
+with icons for the adjustment types; a plain frosted top bar and gallery
+header; scrollbar strips (slider-like) in Settings, Actions, Layers, Colour and
+Brush Studio; a tool's settings panel follows when another tool is picked;
+time spent per artwork in the gallery and in Actions; export progress (PNG
+rows, PDF, OpenRaster layers, timelapse frames) in the Export dialog; a
+step-by-step Guide (17 steps, ending with what Settings can change) with the
+gesture tables as a quick reference; *Settings → About* with the version,
+commit and build time. Motion filtering defaults to 100 %.
 
 **Large brushes keep drawing while the finger moves** — the render loop
-paints at most 10 ms of queued input before it draws a frame. Before, a brush
+paints at most 12 ms of queued input before it draws a frame. Before, a brush
 that costs more to paint than the finger takes to move (a 300 px pen at 0 %
 spacing across a 4K canvas: ~0.6 ms per dab) drained the whole queue in one
 go, so nothing showed until the stroke ended; now the stroke appears as it is

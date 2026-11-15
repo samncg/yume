@@ -1142,3 +1142,15 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 # features, bleedtest, opacitytest and overlaytest still to be run on it.
 # overlaytest (new) passed during development: Overlay bands and a clipped
 # Overlay layer match the overlay formula, dense and sparse.
+
+# --- History everywhere, export progress, tutorial, About (Nov 2026) -----------
+# features byte-identical to the previous gate; bleedtest and opacitytest
+# dense = sparse MATCH, PASS; overlaytest PASS; histpersist (new, 6144^2,
+# eight 900 px strokes, seven on disk) PASS: saved in 2 saves, reopened =
+# final, 8/8 undo states match, redo = final.
+# golden: every line identical EXCEPT 35-comp-clip (C=4f370efa -> 5e04c64a),
+# from the clipped-blend fix of the previous commit: a clipped Color Dodge
+# layer no longer dodges its base with itself. NOT accepted: awaiting the
+# user's decision (keep the fix and append a new oracle section, or revert).
+# bigstroke6k (new, 6144^2, 900 px): Studio Pen at 0 % spacing paints
+#   ~3,400 canvas px/s (30 ms paint + 5 ms composite per 130 px); 5 %: ~9,000.

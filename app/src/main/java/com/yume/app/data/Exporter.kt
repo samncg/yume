@@ -42,6 +42,12 @@ enum class ExportFormat(val label: String, val ext: String, val mime: String) {
  * needs one in memory (JPEG / WebP), which is capped at [MAX_RASTER_PIXELS].
  */
 object Exporter {
+    /**
+     * How far the running export is, 0..1, or -1 while it cannot tell (the
+     * export dialog shows a moving bar then).
+     */
+    @Volatile @JvmField var progress: Float = -1f
+
     /** JPEG and WebP are encoded from one bitmap: at most this many pixels (16.8 MP). */
     const val MAX_RASTER_PIXELS = 4096L * 4096L
 
@@ -182,6 +188,7 @@ object Exporter {
             val l = layers.getJSONObject(i)
             val gid = l.optLong("group", 0L)
             fun layerXml(o: JSONObject): String {
+                progress = n.toFloat() / layers.length().coerceAtLeast(1)
                 val src = "data/layer${n++}.png"
                 val f = File(projectDir, o.getString("file"))
                 zip.putNextEntry(ZipEntry(src))
@@ -353,7 +360,8 @@ object Exporter {
                 drain(false)
             }
             var last: Bitmap? = null
-            for (f in frames) {
+            for ((fi, f) in frames.withIndex()) {
+                progress = fi.toFloat() / frames.size
                 val b = BitmapFactory.decodeFile(f.absolutePath) ?: continue
                 draw(b)
                 last?.recycle()

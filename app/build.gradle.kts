@@ -14,8 +14,15 @@ android {
         applicationId = "com.yume.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
+        // Shown in Settings > About: which commit and when this build was made.
+        val gitSha = runCatching {
+            providers.exec { commandLine("git", "rev-parse", "--short", "HEAD") }
+                .standardOutput.asText.get().trim()
+        }.getOrDefault("unknown")
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+        buildConfigField("long", "BUILD_TIME", "${System.currentTimeMillis()}L")
     }
 
     // Release signing comes from keystore.properties (never committed):

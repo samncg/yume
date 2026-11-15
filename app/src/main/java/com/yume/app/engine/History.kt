@@ -308,6 +308,9 @@ class History(
      * Destructive structure (delete, merge, clear) still ends the span, because
      * the patches before it may no longer apply meaningfully.
      */
+    /** Every step, undo and redo. */
+    fun actionsForPersist(): List<HistoryAction> = undoStack.toList() + redoStack.toList()
+
     fun persistableRun(): Pair<List<HistoryAction>, Int> = persistableRun { action ->
         action is PixelAction || action is TilePixelAction
     }

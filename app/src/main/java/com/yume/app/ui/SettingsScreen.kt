@@ -56,7 +56,7 @@ object SettingsHost {
     var open by mutableStateOf(false)
 }
 
-private val SETTINGS_TABS = listOf("Appearance", "Drawing", "Gestures", "Shortcuts", "Layout", "Defaults")
+private val SETTINGS_TABS = listOf("Appearance", "Drawing", "Gestures", "Shortcuts", "Layout", "Defaults", "About")
 
 /**
  * Settings, in tabs: appearance, drawing, what every gesture does, keyboard
@@ -125,7 +125,8 @@ fun SettingsScreen(onClose: () -> Unit) {
                         2 -> GesturesTab()
                         3 -> ShortcutsTab()
                         4 -> LayoutTab()
-                        else -> DefaultsTab()
+                        5 -> DefaultsTab()
+                        else -> AboutTab()
                     }
                     Spacer(Modifier.height(8.dp))
                 }
@@ -564,6 +565,31 @@ private fun LayoutTab() {
         min = 0.6f,
         max = 1.6f
     )
+}
+
+// ------------------------------------------------------------------ About
+
+@Composable
+private fun AboutTab() {
+    val b = com.yume.app.BuildConfig.BUILD_TIME
+    @Composable
+    fun line(label: String, value: String) {
+        Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = YumeColors.textDim, modifier = Modifier.width(150.dp))
+            Text(value, style = MaterialTheme.typography.bodyMedium, color = YumeColors.text)
+        }
+    }
+    SectionLabel("Yume")
+    Spacer(Modifier.height(6.dp))
+    line("Version", "${com.yume.app.BuildConfig.VERSION_NAME} (${com.yume.app.BuildConfig.VERSION_CODE})")
+    line("Build", "${com.yume.app.BuildConfig.BUILD_TYPE} · ${com.yume.app.BuildConfig.GIT_SHA}")
+    line("Built", java.text.SimpleDateFormat("MMM d, yyyy HH:mm", java.util.Locale.getDefault()).format(java.util.Date(b)))
+    DividerLine()
+    SectionLabel("Device")
+    Spacer(Modifier.height(6.dp))
+    line("Model", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
+    line("Android", "${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})")
+    line("Memory for Yume", "${Runtime.getRuntime().maxMemory() / (1024 * 1024)} MB")
 }
 
 // ------------------------------------------------------------------ Defaults

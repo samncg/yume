@@ -12,6 +12,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -41,7 +43,6 @@ fun ExportDialog(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SmallButton("Save PNG to Gallery", enabled = !busy) {
                     controller.export()
-                    onDismiss()
                 }
             }
             DividerLine()
@@ -67,8 +68,34 @@ fun ExportDialog(
                 }
             }
             if (busy) {
-                Spacer(Modifier.height(8.dp))
-                Text("Exporting…", style = MaterialTheme.typography.bodySmall, color = YumeColors.accent)
+                // The exporter's progress, polled while it runs.
+                var p by androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(-1f) }
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    while (true) {
+                        p = Exporter.progress
+                        kotlinx.coroutines.delay(100)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    if (p >= 0f) "Exporting… ${(p * 100).toInt().coerceIn(0, 100)}%" else "Exporting…",
+                    style = MaterialTheme.typography.bodySmall, color = YumeColors.accent
+                )
+                Spacer(Modifier.height(6.dp))
+                if (p >= 0f) {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = { p.coerceIn(0f, 1f) },
+                        color = YumeColors.accent,
+                        trackColor = YumeColors.track,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        color = YumeColors.accent,
+                        trackColor = YumeColors.track,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
         }
     }

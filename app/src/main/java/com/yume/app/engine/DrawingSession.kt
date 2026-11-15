@@ -162,7 +162,10 @@ class PersistedTile(
      * shared solid it was. A whole-canvas fill at 16K is 4096 such tiles.
      */
     val beforeSolid: Long = -1L,
-    val afterSolid: Long = -1L
+    val afterSolid: Long = -1L,
+    /** Loaded history: the crop's saved PNG, decoded only when needed. */
+    val beforeFile: java.io.File? = null,
+    val afterFile: java.io.File? = null
 )
 
 data class PersistedHistory(
@@ -3780,6 +3783,7 @@ class DrawingSession(
         return try {
             val before = st.modCount
             BandedPng.encode(out, w, h, bandRows) { y0, rows, px ->
+                com.yume.app.data.Exporter.progress = (y0 + rows).toFloat() / h
                 rect.set(0, y0, w, y0 + rows)
                 if (!runOnOwner { st.readRectInto(rect, band) }) {
                     throw java.io.IOException("timed out")
@@ -3833,6 +3837,13 @@ class DrawingSession(
 
     /** Saved group id -> this session's group id (groups get new ids when a project opens). */
     private var restoreGroupIds: Map<Long, Long> = emptyMap()
+    /** Saved layer id -> this session's layer id (layers get new ids when a project opens). */
+    private var restoreLayerIds: Map<Long, Long> = emptyMap()
+
+    /** Ids of history steps that read their crops from the saved history files (owner thread). */
+    fun fileBackedHistoryIds(): Set<Long> = history.actionsForPersist().filterIsInstance<TilePixelAction>()
+        .filter { a -> a.changes.any { it.beforeFile != null || it.afterFile != null } }
+        .mapTo(HashSet()) { it.id }
 
     /** True when every layer and group [s] names is in the document now. */
     private fun stateResolvable(s: DocumentState): Boolean =
@@ -3866,7 +3877,10 @@ class DrawingSession(
         val layers = ArrayList<LayerState>(la.length())
         for (i in 0 until la.length()) {
             val j = la.getJSONObject(i)
-            val layer = engine.layerById(j.optLong("id")) ?: return null
+            val lid = j.optLong("id")
+            // Without an id map (a project saved before layer ids were kept)
+            // a structure step cannot be matched to its layers.
+            val layer = engine.layerById(restoreLayerIds[lid] ?: return null) ?: return null
             layers.add(LayerState(layer, LayerProps(
                 name = j.optString("name", layer.name),
                 opacity = j.optDouble("opacity", 1.0).toFloat(),
@@ -3913,6 +3927,7 @@ class DrawingSession(
                 }
             }
             val entries = ArrayList<PersistedHistoryEntry>(run.size)
+            var copied = 0L
             // Walk newest to oldest, stopping at an edit whose layer is gone or
             // whose legacy rectangle would exceed the persist budget.
             for (action in run.asReversed()) {
@@ -3953,16 +3968,38 @@ class DrawingSession(
                         layerId = action.layerId
                     )
                     is TilePixelAction -> {
-                        // A streamed step (too big to hold in memory) is not
-                        // saved with the project: its copies alone would be
-                        // gigabytes. The saved history ends after it.
-                        if (action.stream != null && !action.isResident) break
-                        // A spilled (disk-tier) step is read back for the write.
-                        if (!history.ensureLoaded(action)) break
                         val layerNow = engine.layers[index]
                         val store = if (action.mask) layerNow.maskTiles ?: break else layerNow.tiles
                         // Copies: the save writes them off this thread while
-                        // the history may trim or spill the originals.
+                        // the history may trim or spill the originals. Crops on
+                        // disk (spilled, streamed or restored) are read here as
+                        // fresh bitmaps, without pulling the step into memory.
+                        // One step too big to copy ends the saved history.
+                        val stepBytes = action.changes.size.toLong() * store.tileSize * store.tileSize * 8L
+                        if (stepBytes > PERSIST_STEP_MAX || copied + stepBytes > PERSIST_TOTAL_MAX) break
+                        val spill = action.stream ?: history.spill
+                        val tiles = try {
+                            action.changes.map { c ->
+                                val bRaw = c.before?.let { SolidTiles.rawOf(it) }
+                                val aRaw = c.after?.let { SolidTiles.rawOf(it) }
+                                fun side(before: Boolean, raw: Int?): Bitmap? {
+                                    if (raw != null) return null
+                                    val (b, owned) = c.cropFor(before, spill)
+                                    return if (b == null) null else if (owned) b else b.copy(Bitmap.Config.ARGB_8888, false)
+                                }
+                                PersistedTile(
+                                    c.tx, c.ty, Rect(c.clip),
+                                    side(true, bRaw),
+                                    side(false, aRaw),
+                                    beforeSolid = bRaw?.let { it.toLong() and 0xFFFFFFFFL } ?: -1L,
+                                    afterSolid = aRaw?.let { it.toLong() and 0xFFFFFFFFL } ?: -1L
+                                )
+                            }
+                        } catch (e: java.io.IOException) {
+                            android.util.Log.w("YumeHistory", "step ${action.id} unreadable, saved history ends there", e)
+                            break
+                        }
+                        copied += stepBytes
                         PersistedHistoryEntry(
                             actionId = action.id,
                             label = action.label,
@@ -3974,17 +4011,7 @@ class DrawingSession(
                             before = null,
                             after = null,
                             mask = action.mask,
-                            tiles = action.changes.map { c ->
-                                val bRaw = c.before?.let { SolidTiles.rawOf(it) }
-                                val aRaw = c.after?.let { SolidTiles.rawOf(it) }
-                                PersistedTile(
-                                    c.tx, c.ty, Rect(c.clip),
-                                    if (bRaw != null) null else c.before?.copy(Bitmap.Config.ARGB_8888, false),
-                                    if (aRaw != null) null else c.after?.copy(Bitmap.Config.ARGB_8888, false),
-                                    beforeSolid = bRaw?.let { it.toLong() and 0xFFFFFFFFL } ?: -1L,
-                                    afterSolid = aRaw?.let { it.toLong() and 0xFFFFFFFFL } ?: -1L
-                                )
-                            },
+                            tiles = tiles,
                             tileSize = store.tileSize,
                             layerId = action.layerId
                         )
@@ -4000,29 +4027,36 @@ class DrawingSession(
     }
 
     /** Re-attaches edits restored from disk to the freshly loaded layers. */
-    fun restoreHistory(persisted: PersistedHistory, groupIds: Map<Long, Long> = emptyMap()) {
+    fun restoreHistory(
+        persisted: PersistedHistory,
+        groupIds: Map<Long, Long> = emptyMap(),
+        layerIds: Map<Long, Long> = emptyMap()
+    ) {
         restoreGroupIds = groupIds
+        restoreLayerIds = layerIds
         post {
             val actions = ArrayList<HistoryAction>(persisted.entries.size)
-            for (entry in persisted.entries) {
+            fun build(entry: PersistedHistoryEntry): HistoryAction? {
                 val structure = entry.structure
                 if (structure != null) {
-                    val o = runCatching { org.json.JSONObject(structure) }.getOrNull() ?: break
-                    val b = o.optJSONObject("before")?.let { stateFromJson(it) } ?: break
-                    val a = o.optJSONObject("after")?.let { stateFromJson(it) } ?: break
+                    val o = runCatching { org.json.JSONObject(structure) }.getOrNull() ?: return null
+                    val b = o.optJSONObject("before")?.let { stateFromJson(it) } ?: return null
+                    val a = o.optJSONObject("after")?.let { stateFromJson(it) } ?: return null
                     val action = LayersAction(b, a, entry.label, entry.kind)
                     action.id = entry.actionId
                     HistoryAction.bumpCounterTo(entry.actionId)
-                    actions.add(action)
-                    continue
+                    return action
                 }
-                val layer = (if (entry.layerId >= 0L) engine.layerById(entry.layerId) else null)
-                    ?: engine.layers.getOrNull(entry.layerIndex) ?: continue
+                // By saved id through the open's id map; by position for
+                // histories saved before ids were recorded.
+                val mapped = if (entry.layerId >= 0L) restoreLayerIds[entry.layerId] else null
+                val layer = (if (mapped != null) engine.layerById(mapped) else null)
+                    ?: engine.layers.getOrNull(entry.layerIndex) ?: return null
                 val tiles = entry.tiles
                 if (tiles != null) {
                     val store = if (entry.mask) layer.maskTiles else layer.tiles
                     // Tile steps only fit a store with the same tile grid.
-                    if (store == null || !store.isSparse || store.tileSize != entry.tileSize) break
+                    if (store == null || !store.isSparse || store.tileSize != entry.tileSize) return null
                     val action = TilePixelAction(
                         layerId = layer.id,
                         bounds = Rect(entry.rect),
@@ -4033,7 +4067,11 @@ class DrawingSession(
                                 it.tx, it.ty, Rect(it.clip),
                                 it.before ?: solid(it.beforeSolid),
                                 it.after ?: solid(it.afterSolid)
-                            )
+                            ).apply {
+                                // Left in the saved PNGs until undone or redone.
+                                beforeFile = it.beforeFile
+                                afterFile = it.afterFile
+                            }
                         },
                         label = entry.label,
                         kind = entry.kind,
@@ -4043,11 +4081,10 @@ class DrawingSession(
                     )
                     action.id = entry.actionId
                     HistoryAction.bumpCounterTo(entry.actionId)
-                    actions.add(action)
-                    continue
+                    return action
                 }
-                val before = entry.before ?: continue
-                val after = entry.after ?: continue
+                val before = entry.before ?: return null
+                val after = entry.after ?: return null
                 val action = PixelAction(
                     layerId = layer.id,
                     rect = Rect(entry.rect),
@@ -4061,9 +4098,27 @@ class DrawingSession(
                 )
                 action.id = entry.actionId
                 HistoryAction.bumpCounterTo(entry.actionId)
-                actions.add(action)
+                return action
+                        }
+            // A step that cannot be rebuilt (its layer is gone, a file is
+            // missing) cuts the history there: an undo step drops itself and
+            // everything older, a redo step itself and everything newer, so the
+            // steps kept always undo straight back from what is on screen.
+            var applied = persisted.appliedCount
+            for ((i, entry) in persisted.entries.withIndex()) {
+                val action = build(entry)
+                if (action != null) {
+                    actions.add(action)
+                    continue
+                }
+                if (i < persisted.appliedCount) {
+                    actions.clear()
+                    applied = persisted.appliedCount - (i + 1)
+                } else {
+                    break
+                }
             }
-            history.restoreFromDisk(actions, persisted.appliedCount.coerceIn(0, actions.size))
+            history.restoreFromDisk(actions, applied.coerceIn(0, actions.size))
             engine.markDirtyAll()
             requestState()
         }
@@ -4281,3 +4336,7 @@ fun formatTimeSpent(ms: Long): String {
         else -> "${m / 60}h ${m % 60}m"
     }
 }
+
+/** One saved history step may copy at most this much, and one save in all. */
+private const val PERSIST_STEP_MAX = 192L * 1024 * 1024
+private const val PERSIST_TOTAL_MAX = 320L * 1024 * 1024

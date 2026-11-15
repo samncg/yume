@@ -611,7 +611,8 @@ class ProjectStore(private val context: Context) {
                         maskFile = maskFile,
                         maskEnabled = o.optBoolean("maskEnabled", true),
                         groupId = o.optLong("group", 0L),
-                        file = if (exists) file else null
+                        file = if (exists) file else null,
+                        id = o.optLong("id", 0L)
                     )
                 )
             }
@@ -867,6 +868,8 @@ class ProjectStore(private val context: Context) {
         maskFile: String = "mask_$index.png"
     ): JSONObject = JSONObject().apply {
         put("file", file)
+        // The id the undo history refers to this layer by.
+        if (layer.id != 0L) put("id", layer.id)
         put("name", layer.name)
         put("opacity", layer.opacity.toDouble())
         put("blend", layer.blend.name)
@@ -1189,7 +1192,7 @@ class ProjectStore(private val context: Context) {
     }
 
     @Synchronized
-    fun saveHistory(id: String, history: PersistedHistory, stamp: String? = null) {
+    fun saveHistory(id: String, history: PersistedHistory, stamp: String? = null, protect: Set<Long> = emptySet()) {
         // A project deleted while its last save was still running must not
         // come back as a folder of undo history with no document.
         if (!File(projectDir(id), "manifest.json").exists()) return
@@ -1324,6 +1327,14 @@ class ProjectStore(private val context: Context) {
             }
         }.isSuccess
         if (ok) {
+            // Steps still in the session that read their crops from these
+            // files keep them (and their records), even out of the run.
+            for (pid in protect) {
+                if (pid in records) continue
+                val prev = previous[pid] ?: continue
+                recordFiles(prev, keep)
+                records[pid] = prev
+            }
             historyRecords[id] = records
             hdir.listFiles()?.forEach { file -> if (file.name !in keep) file.delete() }
         }
@@ -1372,20 +1383,22 @@ class ProjectStore(private val context: Context) {
                 for (k in 0 until tilesJson.length()) {
                     val t = tilesJson.getJSONObject(k)
                     val c = t.optJSONArray("clip")
-                    fun crop(key: String): Pair<Boolean, Bitmap?> {
-                        if (t.isNull(key)) return true to null
-                        val b = decodePatch(File(hdir, t.optString(key)))
-                        return (b != null) to b
+                    // Not decoded here: a big canvas's history is far more than
+                    // memory. The step reads its PNGs when undone or redone.
+                    fun crop(key: String): Pair<Boolean, File?> {
+                        if (t.isNull(key) || !t.has(key)) return true to null
+                        val f = File(hdir, t.optString(key))
+                        return f.exists() to f
                     }
                     val bSolid = t.optLong("bSolid", -1L)
                     val aSolid = t.optLong("aSolid", -1L)
-                    val (okB, b) = if (bSolid >= 0L) true to null else crop("b")
-                    val (okA, a) = if (aSolid >= 0L) true to null else crop("a")
+                    val (okB, bf) = if (bSolid >= 0L) true to null else crop("b")
+                    val (okA, af) = if (aSolid >= 0L) true to null else crop("a")
                     if (!okB || !okA) { ok = false; break }
                     tiles.add(com.yume.app.engine.PersistedTile(
                         t.optInt("tx"), t.optInt("ty"),
                         android.graphics.Rect(c?.optInt(0) ?: 0, c?.optInt(1) ?: 0, c?.optInt(2) ?: 0, c?.optInt(3) ?: 0),
-                        b, a, bSolid, aSolid
+                        null, null, bSolid, aSolid, beforeFile = bf, afterFile = af
                     ))
                 }
                 // A step with a missing crop cannot be undone exactly: stop

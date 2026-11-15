@@ -198,7 +198,7 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                 modifier = Modifier
                     .fillMaxSize()
                     .navigationBarsPadding()
-                    .then(GalleryEdge.blurModifier(headerPx + with(density) { 20.dp.toPx() }))
+                    .then(GalleryEdge.blurModifier(headerPx.toFloat()))
             ) {
                 items(shownProjects.size, key = { shownProjects[it].id }) { idx ->
                     val meta = shownProjects[idx]
@@ -215,24 +215,21 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                 }
             }
         }
-        // The fade: solid behind the title, clear a little below the header.
+        // A frosted bar: the cards passing under the header show through,
+        // blurred (Android 13+) and veiled a little, with a clean edge.
         if (headerPx > 0) {
-            val bg = YumeColors.bg
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .height(headerDp + 20.dp)
-                    .background(
-                        // Solid behind the logo and the buttons, so they read
-                        // against the background and never against a thumbnail;
-                        // the fade only starts under them.
-                        androidx.compose.ui.graphics.Brush.verticalGradient(
-                            0f to bg,
-                            0.8f to bg.copy(alpha = 0.98f),
-                            0.9f to bg.copy(alpha = 0.8f),
-                            1f to bg.copy(alpha = 0f)
-                        )
-                    )
+                    .height(headerDp)
+                    .background(YumeColors.bg.copy(alpha = if (android.os.Build.VERSION.SDK_INT >= 33) 0.72f else 0.94f))
+            )
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = headerDp)
+                    .height(1.dp)
+                    .background(YumeColors.hairline)
             )
         }
         Column(
@@ -704,8 +701,8 @@ private object GalleryEdge {
         uniform float edge;
         half4 main(float2 p) {
             half4 c = content.eval(p);
-            // 1 at the top, easing to 0 at the bottom of the header.
-            float t = 1.0 - smoothstep(edge * 0.6, edge, p.y);
+            // Blurred under the header bar, sharp below it.
+            float t = 1.0 - smoothstep(edge - 1.0, edge, p.y);
             return c * t;
         }
     """
@@ -725,7 +722,7 @@ private object GalleryEdge {
         cached?.let { if (cachedEdge == edgePx) return it }
         val shader = android.graphics.RuntimeShader(MASK)
         shader.setFloatUniform("edge", edgePx)
-        val blur = android.graphics.RenderEffect.createBlurEffect(48f, 48f, android.graphics.Shader.TileMode.CLAMP)
+        val blur = android.graphics.RenderEffect.createBlurEffect(28f, 28f, android.graphics.Shader.TileMode.CLAMP)
         val masked = android.graphics.RenderEffect.createChainEffect(
             android.graphics.RenderEffect.createRuntimeShaderEffect(shader, "content"),
             blur

@@ -66,7 +66,7 @@ object AppSettings {
      * on the pen path that removes hand tremor while slow, and stays out of
      * the way of fast, deliberate strokes.
      */
-    var motionFiltering by mutableFloatStateOf(0.35f)
+    var motionFiltering by mutableFloatStateOf(1f)
         private set
     fun setMotionFilteringValue(v: Float) { motionFiltering = v.coerceIn(0f, 1f); put { putFloat("motionFiltering", motionFiltering) } }
 

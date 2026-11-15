@@ -120,6 +120,37 @@ class TileChange(
     /** Spill keys while the crop lives on disk (Stage 3c); -1 = in memory. */
     var beforeKey: Long = -1L
     var afterKey: Long = -1L
+
+    /**
+     * A step restored from the project's saved history keeps its crops in
+     * the saved PNGs and decodes them only when it is undone or redone.
+     */
+    var beforeFile: java.io.File? = null
+    var afterFile: java.io.File? = null
+
+    /** The crop for one side: in memory, in the spill, or in a saved PNG (a fresh copy for the last two). */
+    fun cropFor(before: Boolean, spill: HistorySpill?): Pair<Bitmap?, Boolean> {
+        val key = if (before) beforeKey else afterKey
+        if (key >= 0 && spill != null) return spill.read(key) to true
+        val inMemory = if (before) this.before else this.after
+        if (inMemory != null) return inMemory to false
+        val file = if (before) beforeFile else afterFile
+        if (file != null) {
+            val b = TileChange.decode(file) ?: throw java.io.IOException("history crop ${file.name} unreadable")
+            return b to true
+        }
+        return null to false
+    }
+
+    companion object {
+        fun decode(file: java.io.File): Bitmap? {
+            if (!file.exists()) return null
+            return android.graphics.BitmapFactory.decodeFile(
+                file.absolutePath,
+                android.graphics.BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+            )
+        }
+    }
 }
 
 /**
@@ -244,9 +275,13 @@ class TilePixelAction(
 
     override fun redo(engine: DrawingEngine) = apply(engine, before = false)
 
+    /** True when some crops are only in the project's saved history files. */
+    internal val fileBacked: Boolean
+        get() = changes.any { (it.beforeFile != null && it.before == null) || (it.afterFile != null && it.after == null) }
+
     private fun apply(engine: DrawingEngine, before: Boolean) {
         val s = stream
-        if (s == null || isResident) {
+        if ((s == null || isResident) && !fileBacked) {
             engine.applyTileChanges(layerId, changes, bounds, before = before, mask = mask)
             return
         }
@@ -264,16 +299,13 @@ class TilePixelAction(
             box.setEmpty()
         }
         for (c in changes) {
-            val key = if (before) c.beforeKey else c.afterKey
-            val bmp = if (key >= 0) {
-                try {
-                    s.read(key).also { temps.add(it) }
-                } catch (e: java.io.IOException) {
-                    android.util.Log.w("YumeHistory", "streamed crop unreadable, tile skipped", e)
-                    continue
-                }
-            } else {
-                if (before) c.before else c.after
+            val bmp = try {
+                val (b, owned) = c.cropFor(before, s)
+                if (owned && b != null) temps.add(b)
+                b
+            } catch (e: java.io.IOException) {
+                android.util.Log.w("YumeHistory", "history crop unreadable, tile skipped", e)
+                continue
             }
             chunk.add(TileChange(c.tx, c.ty, c.clip, bmp, bmp))
             if (box.isEmpty) box.set(c.clip) else box.union(c.clip)
