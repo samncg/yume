@@ -42,6 +42,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -835,10 +836,14 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
     val preset = state.presets.firstOrNull { it.id == state.activePresetId }
     // Wide, in two panes: the brushes on the left, the selected brush (its
     // stroke preview and settings) on the right.
-    val screenW = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
-    PanelCard(Modifier.width(minOf(780, screenW - 24).dp)) {
+    // A constant height: switching brushes or opening "More settings" never
+    // makes the panel jump.
+    val config = androidx.compose.ui.platform.LocalConfiguration.current
+    val screenW = config.screenWidthDp
+    val panelH = (config.screenHeightDp - 130).coerceIn(360, 720)
+    PanelCard(Modifier.width(minOf(780, screenW - 24).dp).height(panelH.dp)) {
         PanelHeader("Brush Studio", onClose)
-        Row(Modifier.weight(1f, fill = false)) {
+        Row(Modifier.weight(1f)) {
         Column(Modifier.width(310.dp)) {
         SegmentedRow(
             options = listOf("Brush", "Eraser", "Smudge"),
@@ -899,11 +904,14 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                 modifier = Modifier.padding(vertical = 10.dp)
             )
         }
-        // The brush grid scrolls on its own, beside the settings.
+        // The brush grid scrolls on its own, beside the settings; brushes
+        // passing out of view blur gradually at its top and bottom.
+        val gridScroll = rememberScrollState()
         Column(
             Modifier
-                .weight(1f, fill = false)
-                .verticalScroll(rememberScrollState()),
+                .weight(1f)
+                .edgeBlur(gridScroll)
+                .verticalScroll(gridScroll),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             shown.chunked(3).forEach { chunk ->
@@ -950,8 +958,12 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
             Spacer(Modifier.height(6.dp))
             BrushStrokePreview(preset, state.color)
             Spacer(Modifier.height(8.dp))
-            // Only the settings scroll; the preview above stays put.
-            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+            // Only the settings scroll; the preview above stays put. A blank
+            // strip on the right carries the scrollbar: dragging there only
+            // scrolls, never moves a slider.
+            val settingsScroll = rememberScrollState()
+            Row(Modifier.weight(1f)) {
+            Column(Modifier.weight(1f).edgeBlur(settingsScroll, 18.dp).verticalScroll(settingsScroll)) {
             YumeSlider(
                 value = state.assist,
                 onChange = { session.updateAssist(it) },
@@ -1072,6 +1084,8 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                 }
             }
             Spacer(Modifier.height(4.dp))
+            }
+            ScrollGutter(settingsScroll, Modifier.width(30.dp).fillMaxHeight())
             }
         }
         }

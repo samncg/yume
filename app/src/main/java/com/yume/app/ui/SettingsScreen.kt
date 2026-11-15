@@ -397,37 +397,98 @@ private fun ShortcutsTab() {
 
 @Composable
 private fun LayoutTab() {
+    SectionLabel("Top bar")
+    Hint("The pills along the top of the editor. Drag the handle (or long-press a row) to change their order, and choose where each one sits, or hide it. A hidden Document pill leaves the gallery a back gesture away; hidden panels stay reachable through gestures and shortcuts.")
+    ReorderColumn(
+        items = Customization.pillOrder,
+        key = { it.name },
+        onMove = { from, to -> Customization.movePill(from, to) }
+    ) { pill, handle ->
+        val slot = Customization.pillSlots[pill] ?: pill.defaultSlot
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = 3.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(YumeColors.panelAlt)
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(handle.size(32.dp), contentAlignment = Alignment.Center) {
+                    GlyphIcon(Glyph.Grip, YumeColors.textDim, size = 16.dp)
+                }
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        pill.label, style = MaterialTheme.typography.bodyMedium,
+                        color = if (slot == Customization.PillSlot.Hidden) YumeColors.textDim else YumeColors.text
+                    )
+                    Text(pill.detail, style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim)
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            SegmentedRow(
+                options = Customization.PillSlot.entries.map { it.label },
+                selectedIndex = Customization.PillSlot.entries.indexOf(slot),
+                onSelect = { Customization.setPillSlot(pill, Customization.PillSlot.entries[it]) }
+            )
+        }
+    }
+    Spacer(Modifier.height(8.dp))
+    SmallButton("Reset top bar") { Customization.resetPills() }
+    DividerLine()
+
     SectionLabel("Toolbar")
-    Hint("The order of the tools, and which ones are shown. Hidden tools stay reachable through gestures and shortcuts.")
-    Customization.toolOrder.forEachIndexed { i, t ->
+    Hint("Drag the handle (or long-press a row) to reorder the tools. Remove a tool with −, add one back from More tools. Removed tools stay reachable through gestures and shortcuts.")
+    val shown = Customization.visibleTools
+    ReorderColumn(
+        items = shown,
+        key = { it.name },
+        onMove = { from, to -> Customization.moveVisibleTool(from, to) }
+    ) { t, handle ->
         val (glyph, label, _) = toolChrome(t)
-        val hidden = t in Customization.hiddenTools
         Row(
             Modifier
                 .fillMaxWidth()
                 .padding(vertical = 2.dp)
                 .clip(RoundedCornerShape(10.dp))
                 .background(YumeColors.panelAlt)
-                .padding(horizontal = 12.dp, vertical = 5.dp),
+                .padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            GlyphIcon(glyph, if (hidden) YumeColors.textDim else YumeColors.text, size = 18.dp)
+            Box(handle.size(36.dp), contentAlignment = Alignment.Center) {
+                GlyphIcon(Glyph.Grip, YumeColors.textDim, size = 16.dp)
+            }
+            Spacer(Modifier.width(6.dp))
+            GlyphIcon(glyph, YumeColors.text, size = 18.dp)
             Spacer(Modifier.width(12.dp))
-            Text(
-                label,
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (hidden) YumeColors.textDim else YumeColors.text,
-                modifier = Modifier.weight(1f)
-            )
-            YumeIconButton(Glyph.ChevronUp, { Customization.moveTool(t, -1) }, size = 36.dp, iconSize = 14.dp, label = "Move up", enabled = i > 0)
-            YumeIconButton(
-                Glyph.ChevronDown, { Customization.moveTool(t, 1) }, size = 36.dp, iconSize = 14.dp,
-                label = "Move down", enabled = i < Customization.toolOrder.size - 1
-            )
-            YumeIconButton(
-                if (hidden) Glyph.EyeOff else Glyph.Eye, { Customization.setToolHidden(t, !hidden) },
-                size = 36.dp, iconSize = 16.dp, label = if (hidden) "Show" else "Hide", enabled = t != Tool.Brush
-            )
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = YumeColors.text, modifier = Modifier.weight(1f))
+            if (t != com.yume.app.engine.Tool.Brush) {
+                SmallButton("−") { Customization.setToolHidden(t, true) }
+            }
+        }
+    }
+    val more = Customization.toolOrder.filter { it in Customization.hiddenTools }
+    if (more.isNotEmpty()) {
+        Spacer(Modifier.height(10.dp))
+        Text("More tools", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
+        Spacer(Modifier.height(4.dp))
+        more.forEach { t ->
+            val (glyph, label, _) = toolChrome(t)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 2.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(YumeColors.panelAlt.copy(alpha = 0.6f))
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                GlyphIcon(glyph, YumeColors.textDim, size = 18.dp)
+                Spacer(Modifier.width(12.dp))
+                Text(label, style = MaterialTheme.typography.bodyMedium, color = YumeColors.textDim, modifier = Modifier.weight(1f))
+                SmallButton("+ Add") { Customization.setToolHidden(t, false) }
+            }
         }
     }
     Spacer(Modifier.height(8.dp))

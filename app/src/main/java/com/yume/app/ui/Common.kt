@@ -1,5 +1,14 @@
 package com.yume.app.ui
 
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.scrollBy
+import kotlinx.coroutines.launch
+import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -700,3 +709,180 @@ fun Modifier.claimCanvasTouches(): Modifier = this.pointerInput(Unit) {
 
 /** Claims touches inside a panel so they never reach the canvas. */
 fun Modifier.claimCanvasTouchesInside(): Modifier = claimCanvasTouches()
+
+// ------------------------------------------------------------- list helpers
+
+/**
+ * A gradual blur at the top and bottom edges of a scrolling list: rows
+ * passing out of view soften instead of being cut off. An edge blurs only
+ * while there is more content past it. Android 13+ (GPU, AGSL mask over a
+ * blurred copy of the layer); older versions are left sharp.
+ */
+fun Modifier.edgeBlur(state: androidx.compose.foundation.ScrollState, edge: androidx.compose.ui.unit.Dp = 28.dp): Modifier {
+    if (android.os.Build.VERSION.SDK_INT < 33) return this
+    return this.graphicsLayer {
+        val e = edge.toPx()
+        val top = if (state.value > 0) e else 0f
+        val bottom = if (state.value < state.maxValue) e else 0f
+        renderEffect = if (top == 0f && bottom == 0f) null else EdgeBlur.effect(top, bottom, size.height)
+    }
+}
+
+private object EdgeBlur {
+    private const val MASK = """
+        uniform shader content;
+        uniform float top;
+        uniform float bottom;
+        uniform float h;
+        half4 main(float2 p) {
+            half4 c = content.eval(p);
+            float t = 0.0;
+            if (top > 0.0) t = max(t, 1.0 - smoothstep(0.0, top, p.y));
+            if (bottom > 0.0) t = max(t, smoothstep(h - bottom, h, p.y));
+            return c * t;
+        }
+    """
+    private const val FADE = """
+        uniform shader content;
+        uniform float top;
+        uniform float bottom;
+        uniform float h;
+        half4 main(float2 p) {
+            half4 c = content.eval(p);
+            float a = 1.0;
+            if (top > 0.0) a *= mix(0.25, 1.0, smoothstep(0.0, top * 0.7, p.y));
+            if (bottom > 0.0) a *= mix(0.25, 1.0, 1.0 - smoothstep(h - bottom * 0.7, h, p.y));
+            return c * a;
+        }
+    """
+    private val cache = HashMap<Triple<Float, Float, Float>, androidx.compose.ui.graphics.RenderEffect>()
+
+    @androidx.annotation.RequiresApi(33)
+    fun effect(top: Float, bottom: Float, h: Float): androidx.compose.ui.graphics.RenderEffect {
+        val key = Triple(top, bottom, h)
+        cache[key]?.let { return it }
+        if (cache.size > 16) cache.clear()
+        fun shader(src: String) = android.graphics.RuntimeShader(src).apply {
+            setFloatUniform("top", top)
+            setFloatUniform("bottom", bottom)
+            setFloatUniform("h", h)
+        }
+        val blur = android.graphics.RenderEffect.createBlurEffect(14f, 14f, android.graphics.Shader.TileMode.CLAMP)
+        // The blurred copy, kept only near the edges, over the sharp layer.
+        val maskedBlur = android.graphics.RenderEffect.createChainEffect(
+            android.graphics.RenderEffect.createRuntimeShaderEffect(shader(MASK), "content"), blur
+        )
+        val sharpFaded = android.graphics.RenderEffect.createRuntimeShaderEffect(shader(FADE), "content")
+        val out = android.graphics.RenderEffect.createBlendModeEffect(sharpFaded, maskedBlur, android.graphics.BlendMode.SRC_OVER)
+            .asComposeRenderEffect()
+        cache[key] = out
+        return out
+    }
+}
+
+/**
+ * A blank strip beside a scrolling column with its scrollbar: a vertical drag
+ * here only scrolls (it can never move a slider), and the thumb shows where
+ * you are. Dragging works like touching the content (pull up to go down).
+ */
+@Composable
+fun ScrollGutter(state: androidx.compose.foundation.ScrollState, modifier: Modifier = Modifier) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var viewport by remember { mutableStateOf(0) }
+    Canvas(
+        modifier
+            .onSizeChanged { viewport = it.height }
+            .pointerInput(state) {
+                detectVerticalDragGestures { change, dy ->
+                    change.consume()
+                    scope.launch { state.scrollBy(-dy) }
+                }
+            }
+    ) {
+        if (state.maxValue <= 0 || viewport <= 0) return@Canvas
+        val content = viewport + state.maxValue
+        val trackTop = 6.dp.toPx()
+        val track = size.height - trackTop * 2f
+        val thumbH = (track * viewport / content).coerceAtLeast(28.dp.toPx())
+        val y = trackTop + (track - thumbH) * state.value / state.maxValue
+        val w = 4.dp.toPx()
+        val x = size.width / 2f - w / 2f
+        drawRoundRect(Color(0x14FFFFFF), Offset(x, trackTop), Size(w, track), CornerRadius(w / 2f, w / 2f))
+        drawRoundRect(
+            if (state.isScrollInProgress) Color(0xB3FFFFFF) else Color(0x66FFFFFF),
+            Offset(x, y), Size(w, thumbH), CornerRadius(w / 2f, w / 2f)
+        )
+    }
+}
+
+/**
+ * A column whose rows can be dragged into a new order, like the layers list:
+ * long-press a row (or drag its handle at once, through [row]'s handle
+ * modifier) and move it; the others make room as it passes them.
+ */
+@Composable
+fun <T> ReorderColumn(
+    items: List<T>,
+    key: (T) -> Any,
+    onMove: (from: Int, to: Int) -> Unit,
+    modifier: Modifier = Modifier,
+    row: @Composable (item: T, handle: Modifier) -> Unit
+) {
+    val current = androidx.compose.runtime.rememberUpdatedState(items)
+    val move = androidx.compose.runtime.rememberUpdatedState(onMove)
+    var dragging by remember { mutableStateOf<Any?>(null) }
+    var offset by remember { mutableStateOf(0f) }
+    var rowH by remember { mutableStateOf(1f) }
+    Column(modifier) {
+        items.forEach { item ->
+            val k = key(item)
+            androidx.compose.runtime.key(k) {
+                fun start() { dragging = k; offset = 0f }
+                fun by(dy: Float) {
+                    offset += dy
+                    val list = current.value
+                    var i = list.indexOfFirst { key(it) == k }
+                    while (offset > rowH / 2f && i in 0 until list.size - 1) {
+                        move.value(i, i + 1)
+                        offset -= rowH
+                        i++
+                    }
+                    while (offset < -rowH / 2f && i > 0) {
+                        move.value(i, i - 1)
+                        offset += rowH
+                        i--
+                    }
+                }
+                fun end() { dragging = null; offset = 0f }
+                val lifted = dragging == k
+                val handle = Modifier.pointerInput(k) {
+                    detectDragGestures(
+                        onDragStart = { start() },
+                        onDrag = { c, d -> c.consume(); by(d.y) },
+                        onDragEnd = { end() },
+                        onDragCancel = { end() }
+                    )
+                }
+                Box(
+                    Modifier
+                        .onSizeChanged { if (it.height > 0) rowH = it.height.toFloat() }
+                        .zIndex(if (lifted) 1f else 0f)
+                        .graphicsLayer {
+                            translationY = if (lifted) offset else 0f
+                            scaleX = if (lifted) 1.02f else 1f
+                            scaleY = if (lifted) 1.02f else 1f
+                            shadowElevation = if (lifted) 12f else 0f
+                        }
+                        .pointerInput(k) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { start() },
+                                onDrag = { c, d -> c.consume(); by(d.y) },
+                                onDragEnd = { end() },
+                                onDragCancel = { end() }
+                            )
+                        }
+                ) { row(item, handle) }
+            }
+        }
+    }
+}

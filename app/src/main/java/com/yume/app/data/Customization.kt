@@ -98,6 +98,17 @@ object Customization {
         }.getOrDefault(DEFAULT_TOOL_ORDER)
         hiddenTools = (p.getStringSet("hiddenTools", emptySet()) ?: emptySet())
             .mapNotNull { n -> Tool.entries.firstOrNull { it.name == n } }.toSet()
+        pillOrder = runCatching {
+            val a = JSONArray(p.getString("pillOrder", null) ?: error("none"))
+            val list = (0 until a.length()).mapNotNull { i -> Pill.entries.firstOrNull { it.name == a.getString(i) } }
+            list + Pill.entries.filter { it !in list }
+        }.getOrDefault(Pill.entries)
+        pillSlots = runCatching {
+            val o = JSONObject(p.getString("pillSlots", null) ?: error("none"))
+            Pill.entries.associateWith { pill ->
+                PillSlot.entries.firstOrNull { it.name == o.optString(pill.name) } ?: pill.defaultSlot
+            }
+        }.getOrDefault(Pill.entries.associateWith { it.defaultSlot })
         persistToolSettings = p.getBoolean("persistToolSettings", false)
         defaultTool = Tool.entries.firstOrNull { it.name == p.getString("defaultTool", null) } ?: Tool.Brush
         defaultBrush = p.getString("defaultBrush", "studio-pen") ?: "studio-pen"
@@ -288,6 +299,59 @@ object Customization {
         toolOrder = DEFAULT_TOOL_ORDER
         hiddenTools = emptySet()
         put { remove("toolOrder"); remove("hiddenTools") }
+    }
+
+    /**
+     * Moves a shown tool from [from] to [to] in the toolbar's own order
+     * (indices into [visibleTools]); the hidden tools keep their places
+     * relative to it, at the end.
+     */
+    fun moveVisibleTool(from: Int, to: Int) {
+        val shown = visibleTools.toMutableList()
+        if (from !in shown.indices || to !in shown.indices || from == to) return
+        shown.add(to, shown.removeAt(from))
+        val list = shown + toolOrder.filter { it in hiddenTools }
+        toolOrder = list
+        put { putString("toolOrder", JSONArray(list.map { it.name }).toString()) }
+    }
+
+    // ---------------------------------------------------------- top pills
+
+    /** The glass pills along the top of the editor. */
+    enum class Pill(val label: String, val detail: String, val defaultSlot: PillSlot) {
+        Document("Document", "Gallery button and the name", PillSlot.Left),
+        Edit("History & actions", "History, Actions, Guides", PillSlot.Left),
+        Tools("Tools", "Selection, brush, fill… (order set below)", PillSlot.Right),
+        Panels("Layers & colour", "Adjustments, Layers, colour", PillSlot.Right)
+    }
+
+    enum class PillSlot(val label: String) { Left("Left"), Center("Centre"), Right("Right"), Hidden("Hidden") }
+
+    var pillOrder by mutableStateOf(Pill.entries.toList())
+        private set
+    var pillSlots by mutableStateOf(Pill.entries.associateWith { it.defaultSlot })
+        private set
+
+    /** The pills placed in [slot], in their order. */
+    fun pillsIn(slot: PillSlot): List<Pill> = pillOrder.filter { pillSlots[it] == slot }
+
+    fun movePill(from: Int, to: Int) {
+        val list = pillOrder.toMutableList()
+        if (from !in list.indices || to !in list.indices || from == to) return
+        list.add(to, list.removeAt(from))
+        pillOrder = list
+        put { putString("pillOrder", JSONArray(list.map { it.name }).toString()) }
+    }
+
+    fun setPillSlot(p: Pill, slot: PillSlot) {
+        pillSlots = pillSlots + (p to slot)
+        put { putString("pillSlots", JSONObject(pillSlots.mapKeys { it.key.name }.mapValues { it.value.name }).toString()) }
+    }
+
+    fun resetPills() {
+        pillOrder = Pill.entries.toList()
+        pillSlots = Pill.entries.associateWith { it.defaultSlot }
+        put { remove("pillOrder"); remove("pillSlots") }
     }
 
     // ------------------------------------------------------------ defaults

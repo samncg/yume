@@ -241,9 +241,18 @@ down for fine control (1 / (1 + distance / 70 dp)). While dragging, a bubble
 beside the rail shows the value. Size runs 1–900 px on a curve, so small
 sizes get most of the track.
 
-**Brush Studio** — two panes: the tool, groups and brushes on the left, the
-selected brush's stroke preview and settings on the right; each side scrolls
-on its own.
+**Brush Studio** — two panes at a constant height: the tool, groups and
+brushes on the left, the selected brush's stroke preview and settings on the
+right; each side scrolls on its own, and rows passing out of view blur
+gradually at the edges (Android 13+, an AGSL-masked blur). Beside the
+settings a blank strip carries the scrollbar: dragging there only scrolls,
+so scrolling never nudges a slider.
+
+**Layout settings** — *Settings → Layout*: the top-bar pills (Document,
+History & actions, Tools, Layers & colour) can be dragged into a new order
+and each placed Left, Centre or Right, or hidden; the toolbar's tools can be
+dragged into order (handle, or long-press the row, like the layers list),
+removed with − and added back from *More tools*.
 
 **Brush cursor** — while the pen hovers, the cursor is the dab the next
 stroke lays down at the lowest pressure, computed with the stroke's own rules

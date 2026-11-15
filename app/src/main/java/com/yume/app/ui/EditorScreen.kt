@@ -782,6 +782,20 @@ private fun EditorTopBar(
                 }
             )
     }
+    // Where each pill sits, its order, and which are hidden: the user's
+    // (Settings, Layout, Top bar).
+    @Composable
+    fun pill(p: com.yume.app.data.Customization.Pill) {
+        when (p) {
+            com.yume.app.data.Customization.Pill.Document -> titleCapsule()
+            com.yume.app.data.Customization.Pill.Edit -> leftPill()
+            com.yume.app.data.Customization.Pill.Tools -> toolsPill(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()))
+            com.yume.app.data.Customization.Pill.Panels -> rightPill()
+        }
+    }
+    val left = com.yume.app.data.Customization.pillsIn(com.yume.app.data.Customization.PillSlot.Left)
+    val center = com.yume.app.data.Customization.pillsIn(com.yume.app.data.Customization.PillSlot.Center)
+    val right = com.yume.app.data.Customization.pillsIn(com.yume.app.data.Customization.PillSlot.Right)
     androidx.compose.foundation.layout.BoxWithConstraints(
         Modifier
             .fillMaxWidth()
@@ -794,27 +808,32 @@ private fun EditorTopBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                titleCapsule()
-                leftPill()
-                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                    toolsPill(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()))
+                left.forEach { pill(it) }
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        center.forEach { pill(it) }
+                    }
                 }
-                rightPill()
+                right.forEach { pill(it) }
             }
         } else {
+            // Narrow: the tools get a row of their own under the others.
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Box(Modifier.weight(1f, fill = false)) { titleCapsule() }
-                    leftPill()
+                    left.filter { it != com.yume.app.data.Customization.Pill.Tools }.forEach { pill(it) }
                     Spacer(Modifier.weight(1f))
-                    rightPill()
+                    center.filter { it != com.yume.app.data.Customization.Pill.Tools }.forEach { pill(it) }
+                    Spacer(Modifier.weight(1f))
+                    right.filter { it != com.yume.app.data.Customization.Pill.Tools }.forEach { pill(it) }
                 }
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    toolsPill(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()))
+                if ((com.yume.app.data.Customization.pillSlots[com.yume.app.data.Customization.Pill.Tools] ?: com.yume.app.data.Customization.PillSlot.Right) != com.yume.app.data.Customization.PillSlot.Hidden) {
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        pill(com.yume.app.data.Customization.Pill.Tools)
+                    }
                 }
             }
         }
