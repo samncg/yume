@@ -1098,3 +1098,15 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 # smudgeperf (4K painted, 30 frames of 40 px): wet bleed 40/120/300 px
 #   10.8/6.3/8.8 ms per frame (was 12.1/31.9/85.0), worst 18 ms (was 181);
 #   classic smudge presets 1.5-3.4 ms per frame, unchanged.
+
+# --- Stroke end tapers into the lift point (Nov 2026) ------------------------
+# Pressure is averaged over the same stroke-assist window and follows at the
+# streamline rate when that is slower than 0.45, so it lags exactly as much
+# as the position; the gap closed at pen-up narrows from the last stamp to the
+# pen's real lift pressure instead of being drawn at the lift pressure (a thin
+# stub or dot past the stroke). Harness brushes use smoothing 0 and assist 0,
+# where nothing changes: golden output byte-identical to the previous gate;
+# features 30/30 MATCH x4; bleedtest cae782bf dense = sparse; opacitytest PASS.
+# liftend (new, 2400x1200, assist 0.5, smoothing 0.8, pressure falling over the
+#   last 4 samples): widths toward the end now fall steadily (pen 62 -> 34 px,
+#   was a 50 px stub; acrylic 160 -> 93, was a flat 148).

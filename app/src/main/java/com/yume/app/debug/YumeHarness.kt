@@ -192,6 +192,8 @@ object YumeHarness {
                     out.append(ScenePainter.paintSunset(app, save = only == "sunset"))
                 } else if (only == "bleedtest") {
                     out.append(scoreBleedTest(app))
+                } else if (only == "liftend") {
+                    out.append(scoreLiftEnd(app))
                 } else if (only == "smudgeperf") {
                     out.append(scoreSmudgePerf())
                 } else if (only == "opacitytest") {
@@ -4013,6 +4015,75 @@ object YumeHarness {
      * one stroke of 30 input events 40 px apart (a brisk hand at 60 Hz). Per
      * event = per frame of drawing: the worst one is the stutter.
      */
+    /**
+     * Pen lift: fast strokes whose last samples lose pressure while the pen
+     * still moves (as when lifting off), with heavy smoothing so the drawn
+     * stroke lags. The end must taper, not end in a thin stub or a dot.
+     * Writes files/liftend.png and reports the width just before the lift
+     * point against the width at mid stroke.
+     */
+    private fun scoreLiftEnd(app: YumeApp): String {
+        val out = StringBuilder()
+        val w = 2400
+        val h = 1200
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        try {
+            val engine = DrawingEngine(w, h)
+            engine.backgroundColor = 0xFFFFFFFF.toInt()
+            val session = DrawingSession("le", "LE", engine, History())
+            identityView(session, w, h)
+            session.presets = com.yume.app.engine.BrushLibrary.defaults
+            session.assist = 0.5f
+            session.quickShapeEnabled = false
+            val l = engine.newLayer("Ink")
+            engine.selectLayer(l.id)
+            val cases = listOf("studio-pen" to 120f, "marker" to 200f, "acr-round" to 300f)
+            for ((k, c) in cases.withIndex()) {
+                val (id, size) = c
+                val p = session.presets.first { it.id == id }
+                pick(session, p, p.category)
+                session.runCommands()
+                session.setBrushSize(size)
+                session.updatePreset { it.copy(smoothing = 0.8f) }
+                session.runCommands()
+                session.color = 0xFF5540F0.toInt()
+                val y = 250f + k * 350f
+                val pts = ArrayList<P>()
+                for (i in 0 until 26) pts.add(P(200f + i * 60f, y, 1f))
+                // Lifting: still moving, pressure falling to nothing.
+                val fall = floatArrayOf(0.7f, 0.4f, 0.15f, 0.03f)
+                for ((j, pr) in fall.withIndex()) pts.add(P(200f + (26 + j) * 60f, y, pr))
+                session.stroke(pts)
+                session.runCommands()
+                // Width of the ink across the stroke at x: rows with paint.
+                fun widthAt(x: Int): Int {
+                    var n = 0
+                    for (yy in (y - 250f).toInt()..(y + 250f).toInt()) {
+                        if (yy < 0 || yy >= h) continue
+                        if ((l.tiles.getPixel(x, yy) ushr 24) > 128) n++
+                    }
+                    return n
+                }
+                var lastInk = 0
+                for (x in 0 until w) if (widthAt(x) > 0) lastInk = x
+                val mid = widthAt(900)
+                val profile = (1..8).map { widthAt(lastInk - it * 25) }.reversed()
+                out.append("liftend $id ${size.toInt()} px: mid width $mid, last ink x=$lastInk, width toward the end ${profile.joinToString(" ")} (every 25 px)\n")
+            }
+            engine.compositeAll()
+            val flat = engine.flatten()
+            java.io.FileOutputStream(File(app.filesDir, "liftend.png")).use { flat.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            flat.recycle()
+        } catch (t: Throwable) {
+            Log.e(TAG, "liftend failed", t)
+            out.append("liftend: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
     private fun scoreSmudgePerf(): String {
         val out = StringBuilder()
         val size = 4096

@@ -266,6 +266,10 @@ class StrokePainter(private val engine: DrawingEngine) {
     private var assist = 0f
     private val assistXs = FloatArray(24)
     private val assistYs = FloatArray(24)
+    private val assistPs = FloatArray(24)
+
+    /** The pen's own (mapped) pressure at the latest sample, unsmoothed. */
+    private var rawPressure = 1f
     private var assistCount = 0
     private var assistHead = 0
 
@@ -389,6 +393,7 @@ class StrokePainter(private val engine: DrawingEngine) {
         // A drawn shape starts at full size: no taper where its ends meet.
         travel = if (startTaper) 0f else 1e9f
         pressure = mapPressure(initialPressure.coerceIn(0.02f, 1f))
+        rawPressure = pressure
         tilt = initialTilt.coerceIn(0f, 1f)
         isActive = true
 
@@ -405,6 +410,9 @@ class StrokePainter(private val engine: DrawingEngine) {
         }
         lastRawX = x
         lastRawY = y
+        val mapped = mapPressure(pressureIn.coerceIn(0.02f, 1f))
+        rawPressure = mapped
+        var targetP = mapped
 
         // 1. Stroke assist: average the last few raw samples. A wide average
         //    removes hand tremor without adding much latency.
@@ -413,21 +421,28 @@ class StrokePainter(private val engine: DrawingEngine) {
         if (assist > 0.01f) {
             assistXs[assistHead] = x
             assistYs[assistHead] = y
+            assistPs[assistHead] = mapped
             assistHead = (assistHead + 1) % assistXs.size
             if (assistCount < assistXs.size) assistCount++
 
             val wanted = (1 + assist * (assistXs.size - 1)).toInt().coerceAtMost(assistCount)
             var sx = 0f
             var sy = 0f
+            var sp = 0f
             var idx = assistHead - 1
             for (i in 0 until wanted) {
                 if (idx < 0) idx += assistXs.size
                 sx += assistXs[idx]
                 sy += assistYs[idx]
+                sp += assistPs[idx]
                 idx--
             }
             targetX = sx / wanted
             targetY = sy / wanted
+            // Pressure averaged over the same samples: it must lag exactly as
+            // much as the position, or lifting the pen thins the stroke far
+            // behind the point where the pen left.
+            targetP = sp / wanted
         }
 
         // 2. Streamline: chase the (assisted) target.
@@ -435,7 +450,9 @@ class StrokePainter(private val engine: DrawingEngine) {
         smoothX += (targetX - smoothX) * max(k, 0.08f)
         smoothY += (targetY - smoothY) * max(k, 0.08f)
 
-        pressure += (mapPressure(pressureIn.coerceIn(0.02f, 1f)) - pressure) * 0.45f
+        // Pressure follows at the streamline rate when that is slower than its
+        // own (0.45), for the same reason.
+        pressure += (targetP - pressure) * min(0.45f, max(k, 0.08f))
         tilt += (tiltIn.coerceIn(0f, 1f) - tilt) * 0.3f
 
         val size = sizeFor(pressure, tilt)
@@ -485,7 +502,16 @@ class StrokePainter(private val engine: DrawingEngine) {
             val dx = lastRawX - lastX
             val dy = lastRawY - lastY
             if (hypot(dx, dy) > 0.75f) {
-                stampLine(lastX, lastY, lastRawX, lastRawY, sizeFor(pressure, tilt), alphaFor(pressure, tilt))
+                // The pen is lifting, so the last pressure is near zero: drawn at
+                // that size alone the gap became a thin stub or a dot sticking
+                // out of the full-width stroke. It narrows from the last stamp
+                // instead, so the stroke tapers into the lift point.
+                // Down to the pressure the pen really had when it left.
+                val endSize = sizeFor(rawPressure, tilt)
+                val endAlpha = alphaFor(rawPressure, tilt)
+                val fromSize = if (lastStampSize > 0f) lastStampSize else endSize
+                val fromAlpha = if (lastStampSize > 0f) lastStampAlpha else endAlpha
+                stampTaper(lastX, lastY, lastRawX, lastRawY, fromSize, endSize, fromAlpha, endAlpha)
             }
         }
         val c = canvas
@@ -564,6 +590,8 @@ class StrokePainter(private val engine: DrawingEngine) {
         private set
 
     private fun stampAt(x: Float, y: Float, size0: Float, alpha0: Float) {
+        lastStampSize = size0
+        lastStampAlpha = alpha0
         var size = size0
         var alpha = alpha0
         val brush0 = preset
@@ -617,6 +645,38 @@ class StrokePainter(private val engine: DrawingEngine) {
         }
         lastStampX = x
         lastStampY = y
+    }
+
+    /** Size / alpha of the last stamp of the stroke (0 = none yet). */
+    private var lastStampSize = 0f
+    private var lastStampAlpha = 0f
+
+    /**
+     * Stamps from (x0, y0) to (x1, y1) with size and alpha moving linearly
+     * from the first values to the second, spacing following the size.
+     */
+    private fun stampTaper(
+        x0: Float, y0: Float, x1: Float, y1: Float,
+        size0: Float, size1: Float, alpha0: Float, alpha1: Float
+    ) {
+        val brush = preset ?: return
+        val dx = x1 - x0
+        val dy = y1 - y0
+        val dist = hypot(dx, dy)
+        if (dist < 0.001f) return
+        val ux = dx / dist
+        val uy = dy / dist
+        val spacing = max(0.02f, brush.spacing)
+        var t = max(0.8f, size0 * spacing)
+        var guard = 0
+        while (t <= dist && guard < 4096) {
+            val f = t / dist
+            val size = size0 + (size1 - size0) * f
+            travel += max(0.8f, size * spacing)
+            stampAt(x0 + ux * t, y0 + uy * t, size, alpha0 + (alpha1 - alpha0) * f)
+            t += max(0.8f, size * spacing)
+            guard++
+        }
     }
 
     private fun stampLine(x0: Float, y0: Float, x1: Float, y1: Float, size: Float, alpha: Float) {
