@@ -192,6 +192,8 @@ object YumeHarness {
                     out.append(ScenePainter.paintSunset(app, save = only == "sunset"))
                 } else if (only == "bleedtest") {
                     out.append(scoreBleedTest(app))
+                } else if (only == "cursordab") {
+                    out.append(scoreCursorDab())
                 } else if (only == "importtest") {
                     out.append(scoreImportTest(app))
                 } else if (only == "liftend") {
@@ -4029,6 +4031,77 @@ object YumeHarness {
      * reports what came in; writes files/importtest.png, a sheet of every
      * imported tip (and texture, right of it) with a test stroke under it.
      */
+    /**
+     * The hover cursor against a real stroke at the lowest pressure: the
+     * live dab size mid-stroke, and the stroke's built-up opacity at its
+     * centre line (round tips), for a spread of library presets.
+     */
+    private fun scoreCursorDab(): String {
+        val out = StringBuilder()
+        val w = 1600
+        val h = 400
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        try {
+            val lib = com.yume.app.engine.BrushLibrary.defaults
+            val picks = lib.filter { it.category == BrushCategory.Brush && it.sizeJitter == 0f && !it.bleeds && it.wetMix < 0.01f }
+                .let { l -> l.filterIndexed { i, _ -> i % 4 == 0 } }.take(14)
+            var worstSize = 0f
+            var worstOpacity = 0f
+            for (p0 in picks) {
+                val p = p0.copy(size = 60f, taperIn = 0f)
+                val engine = DrawingEngine(w, h)
+                engine.backgroundColor = 0x00FFFFFF
+                val session = DrawingSession("cd", "CD", engine, History())
+                identityView(session, w, h)
+                session.presets = listOf(p)
+                session.activePresetId = p.id
+                session.category = BrushCategory.Brush
+                session.tool = Tool.Brush
+                session.assist = 0f
+                session.quickShapeEnabled = false
+                val l = engine.newLayer("S")
+                engine.selectLayer(l.id)
+                session.color = 0xFF000000.toInt()
+                val predicted = com.yume.app.engine.StrokePainter.cursorDab(p, 0f, 0f, 0f)
+                session.pushInput(InputEvent.Down(0, 100f, 200f, 0.02f, 0f, true, false))
+                session.runInput()
+                var live = 0f
+                for (i in 1..40) {
+                    session.pushInput(InputEvent.Move(0, floatArrayOf(100f + i * 30f), floatArrayOf(200f), floatArrayOf(0.02f), 0f))
+                    session.runInput()
+                    if (i == 25) live = session.liveCursor()?.get(2) ?: 0f
+                }
+                session.pushInput(InputEvent.Up(0))
+                session.runInput()
+                session.runCommands()
+                val centre = (l.tiles.getPixel(700, 200) ushr 24) / 255f
+                // Speed-dependent brushes: the cursor is the pen at rest (as a
+                // stroke starts); this test stroke moves fast.
+                val err = if (p.velocitySize != 0f) 0f else if (live > 0f) kotlin.math.abs(predicted.size - live) / live else 1f
+                worstSize = max(worstSize, err)
+                // What the cursor shows at its centre: alpha x the dab's centre coverage.
+                val dab = com.yume.app.engine.BrushDab.dab(p)
+                val c0 = (dab.getPixel(dab.width / 2, dab.height / 2) ushr 24) / 255f
+                val shown = predicted.alpha * c0
+                val oe = kotlin.math.abs(shown - centre)
+                if (p.shapeId.isEmpty() && p.grain <= 0.05f) worstOpacity = max(worstOpacity, oe)
+                out.append("cursordab ${p.id}: size cursor ${"%.2f".format(predicted.size)} stroke ${"%.2f".format(live)}" +
+                    (if (p.velocitySize != 0f) " (speed-dependent: cursor is the pen at rest)" else "") + " | " +
+                    "opacity cursor centre ${"%.2f".format(shown)} stroke centre ${"%.2f".format(centre)}" +
+                    (if (p.shapeId.isNotEmpty() || p.grain > 0.05f) " (shaped / grained: centre is texture)" else "") + "\n")
+            }
+            out.append("cursordab: worst size error ${"%.2f".format(worstSize * 100)}%, worst centre opacity error (plain round tips) " +
+                "${"%.3f".format(worstOpacity)} ${if (worstSize < 0.01f && worstOpacity < 0.04f) "PASS" else "FAIL"}\n")
+        } catch (t: Throwable) {
+            Log.e(TAG, "cursordab failed", t)
+            out.append("cursordab: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
     private fun scoreImportTest(app: YumeApp): String {
         val out = StringBuilder()
         val dir = File(app.filesDir, "importtest")

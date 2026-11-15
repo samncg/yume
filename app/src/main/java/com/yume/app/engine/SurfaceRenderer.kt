@@ -709,7 +709,6 @@ class SurfaceRenderer(
 
     private val cursorPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val cursorDst = android.graphics.RectF()
-    private val cursorHalo = android.graphics.PorterDuffColorFilter(0xFF000000.toInt(), android.graphics.PorterDuff.Mode.SRC_IN)
     private var cursorTint = 0
     private var cursorTintFilter: android.graphics.ColorFilter? = null
 
@@ -724,50 +723,48 @@ class SurfaceRenderer(
         val docY = live?.get(1) ?: session.hoverY
         val docSize = live?.get(2) ?: session.brushSize
         matrix.mapPoints(mapped, floatArrayOf(docX, docY))
-        val radius = max(2.5f, docSize * 0.5f * session.view.scale)
 
         // Hovering: a preview of the dab itself (shape, hardness, grain, wet
         // edges), at the brush's size and angle, in its colour and opacity.
+        // Hovering: the dab the stroke will lay down at the lowest pressure:
+        // its size, angle, opacity and blend from the stroke's own rules
+        // (StrokePainter.cursorDab), the tip from the painter's dab cache,
+        // drawn in document space so zoom, view rotation and flip match.
         val preset = if (live == null) session.cursorPreset else null
-        var ring = true
-        if (preset != null && radius >= 4f) {
+        val cd = if (preset != null) session.cursorDab() else null
+        var ringSize = docSize
+        if (preset != null && cd != null) {
+            ringSize = cd.size
             val dab = runCatching { BrushDab.dab(preset) }.getOrNull()
-            if (dab != null && !dab.isRecycled) {
+            if (dab != null && !dab.isRecycled && cd.size * session.view.scale >= 3f) {
                 val tint = when (preset.category) {
                     BrushCategory.Brush -> session.color
+                    // What the eraser and smudge do depends on the paint
+                    // under them: shown as a neutral light / grey dab.
                     BrushCategory.Eraser -> 0xFFFFFFFF.toInt()
                     BrushCategory.Smudge -> 0xFFB8B8C0.toInt()
                 }
-                // Visible but not mistaken for paint: at most 80 % of the
-                // stroke's own opacity, at least 30 %.
-                val a = when (preset.category) {
-                    BrushCategory.Brush -> (preset.opacity * 0.8f).coerceIn(0.3f, 0.8f)
-                    else -> 0.55f
-                }
-                val angle = session.view.rotationDeg + if (preset.rotationMode == 0 || preset.rotationMode == 1) preset.rotation else 0f
-                canvas.save()
-                canvas.translate(mapped[0], mapped[1])
-                if (angle != 0f) canvas.rotate(angle)
-                // A soft dark halo under it so a light colour shows on white
-                // and a dark one on black.
-                cursorDst.set(-radius * 1.06f, -radius * 1.06f, radius * 1.06f, radius * 1.06f)
-                cursorPaint.colorFilter = cursorHalo
-                cursorPaint.alpha = (a * 0.45f * 255f).toInt()
-                canvas.drawBitmap(dab, null, cursorDst, cursorPaint)
-                cursorDst.set(-radius, -radius, radius, radius)
                 if (tint != cursorTint) {
                     cursorTint = tint
                     cursorTintFilter = android.graphics.PorterDuffColorFilter(tint or 0xFF000000.toInt(), android.graphics.PorterDuff.Mode.SRC_IN)
                 }
                 cursorPaint.colorFilter = cursorTintFilter
-                cursorPaint.alpha = (a * 255f).toInt()
+                cursorPaint.alpha = (cd.alpha * ((tint ushr 24) / 255f) * 255f).toInt().coerceIn(1, 255)
+                cursorPaint.blendMode = if (preset.category == BrushCategory.Brush) BrushPreset.blendMode(preset.blend)
+                else android.graphics.BlendMode.SRC_OVER
+                val h = cd.size * 0.5f
+                canvas.save()
+                canvas.concat(matrix)
+                canvas.translate(docX, docY)
+                if (cd.angle != 0f) canvas.rotate(cd.angle)
+                cursorDst.set(-h, -h, h, h)
                 canvas.drawBitmap(dab, null, cursorDst, cursorPaint)
                 canvas.restore()
                 // A shaped tip is its own outline; a round one keeps the ring.
-                ring = preset.shapeId.isEmpty()
+                if (preset.shapeId.isNotEmpty()) return
             }
         }
-        if (!ring) return
+        val radius = max(2.5f, ringSize * 0.5f * session.view.scale)
 
         overlay.style = Paint.Style.STROKE
         overlay.pathEffect = null

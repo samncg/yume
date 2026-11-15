@@ -155,7 +155,13 @@ class CanvasView(
         when (event.actionMasked) {
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
                 if (stylus) stylusNear = true
-                session.pushInput(InputEvent.Hover(event.x, event.y, true))
+                session.pushInput(
+                    InputEvent.Hover(
+                        event.x, event.y, true,
+                        if (stylus) tiltAt(event, 0) else 0f,
+                        if (stylus) orientationAt(event, 0) else 0f
+                    )
+                )
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
                 if (stylus) stylusNear = false

@@ -45,7 +45,10 @@ sealed interface InputEvent {
     /** Multi-finger tap: 2 = undo, 3 = redo, 4 = toggle interface. */
     data class Tap(val fingers: Int) : InputEvent
 
-    data class Hover(val x: Float, val y: Float, val visible: Boolean) : InputEvent
+    data class Hover(
+        val x: Float, val y: Float, val visible: Boolean,
+        val tilt: Float = 0f, val orientation: Float = 0f
+    ) : InputEvent
 
     data class PickStart(val x: Float, val y: Float) : InputEvent
     data class PickMove(val x: Float, val y: Float) : InputEvent

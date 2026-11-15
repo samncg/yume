@@ -622,6 +622,21 @@ class DrawingSession(
     val cursorPreset: BrushPreset?
         get() = if (tool == Tool.Brush || tool == Tool.Eraser || tool == Tool.Smudge) activePreset else null
 
+    @Volatile var hoverTilt = 0f
+        private set
+    @Volatile var hoverOrientation = 0f
+        private set
+    @Volatile var hoverDirection = 0f
+        private set
+    private var hoverDirX = 0f
+    private var hoverDirY = 0f
+
+    /** The dab the next stroke lays down at the lowest pressure, where the pen hovers. */
+    fun cursorDab(): StrokePainter.CursorDab? {
+        val p = cursorPreset ?: return null
+        return StrokePainter.cursorDab(p, hoverTilt, hoverOrientation, hoverDirection)
+    }
+
     /** Brush diameter in document pixels, used for the hover cursor. */
     val brushSize: Float get() = activePreset.size
     val brushOpacity: Float get() = activePreset.opacity
@@ -896,8 +911,19 @@ class DrawingSession(
 
             is InputEvent.Hover -> {
                 view.toDocument(event.x, event.y, doc)
+                // Direction of travel while hovering (for brushes that turn
+                // with the stroke), once the pen has moved a few pixels.
+                val mdx = doc[0] - hoverDirX
+                val mdy = doc[1] - hoverDirY
+                if (mdx * mdx + mdy * mdy > (6f / view.scale).let { it * it }) {
+                    hoverDirection = Math.toDegrees(kotlin.math.atan2(mdy, mdx).toDouble()).toFloat()
+                    hoverDirX = doc[0]
+                    hoverDirY = doc[1]
+                }
                 hoverX = doc[0]
                 hoverY = doc[1]
+                hoverTilt = event.tilt
+                hoverOrientation = event.orientation
                 hoverVisible = event.visible && !painter.isActive
                 true
             }

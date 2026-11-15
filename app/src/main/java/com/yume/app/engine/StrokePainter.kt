@@ -1218,7 +1218,91 @@ class StrokePainter(private val engine: DrawingEngine) {
         tileCapture = null
     }
 
+    /** What one dab of a stroke with [preset] looks like (see [cursorDab]). */
+    class CursorDab(val size: Float, val alpha: Float, val angle: Float)
+
     companion object {
+        /**
+         * The dab a stroke with [brush] lays down at the lowest pressure, for
+         * the hover cursor: the same size, alpha and angle rules as a stroke
+         * ([sizeFor], [alphaFor], [stampAngle], stroke opacity), with the pen
+         * at rest (no speed), past the start taper, and the random parts
+         * (jitter, random angle) at their neutral value. [alpha] is the
+         * opacity the stroke builds up where its dabs overlap: dab alpha
+         * accumulated over ~1/spacing dabs, capped by the stroke opacity.
+         * The harness ("cursordab") checks it against a real stroke.
+         */
+        fun cursorDab(brush: BrushPreset, tilt: Float, orientation: Float, directionDeg: Float): CursorDab {
+            val curve = PressureCurve.of(brush.pressureCurve)
+            val pressure = (curve?.map(0.02f) ?: 0.02f).coerceIn(0.02f, 1f)
+            val t = tilt.coerceIn(0f, 1f)
+            // sizeFor at rest.
+            val ps = 1f - brush.pressureSize.coerceIn(0f, 1f) * (1f - pressure)
+            val ts = 1f + brush.tiltSize.coerceIn(0f, 1f) * t * 2.2f
+            val size = max(1.2f, brush.size * ps * ts)
+            // alphaFor at rest, with begin()'s base alpha and stroke opacity.
+            val smudge = brush.category == BrushCategory.Smudge
+            val strokeOpacity = if (!smudge && !brush.bleeds && brush.opacity < 0.995f &&
+                (brush.category == BrushCategory.Brush || brush.category == BrushCategory.Eraser)
+            ) brush.opacity.coerceIn(0.01f, 1f) else 1f
+            val baseAlpha = if (strokeOpacity < 1f) brush.flow.coerceIn(0.02f, 1f)
+            else (brush.opacity * brush.flow).coerceIn(0.02f, 1f)
+            val pa = 1f - brush.pressureOpacity.coerceIn(0f, 1f) * (1f - pressure)
+            val to = brush.tiltOpacity.coerceIn(0f, 1f)
+            val ta = if (to > 0f) 1f - to * t * 0.75f else 1f
+            val dabAlpha = (baseAlpha * pa * ta).coerceIn(0.004f, 1f)
+            // How the stroke builds up on its centre line: every dab whose
+            // footprint covers a point adds its own tip coverage there (read
+            // from the real dab), composited the way the stroke composites
+            // (1 - product of (1 - alpha * coverage)), then capped by the
+            // stroke opacity. The cursor draws the dab so that its centre
+            // shows exactly that.
+            val profile = dabProfile(brush)
+            val n = profile.size
+            val step = max(0.8f, size * max(0.02f, brush.spacing))
+            var keep = 1.0
+            if (n > 0) {
+                var k = -(size / 2f / step).toInt() - 1
+                while (k * step <= size / 2f) {
+                    val d = k * step
+                    if (kotlin.math.abs(d) < size / 2f) {
+                        val idx = (n / 2f + d / size * n).toInt().coerceIn(0, n - 1)
+                        keep *= (1.0 - dabAlpha * profile[idx])
+                    }
+                    k++
+                }
+            }
+            val centre = ((1.0 - keep).toFloat() * strokeOpacity).coerceIn(0f, 1f)
+            val c0 = if (n > 0) profile[n / 2] else 1f
+            val alpha = (if (n > 0) centre / max(0.05f, c0) else dabAlpha * strokeOpacity).coerceIn(0.004f, 1f)
+            val base = when (brush.rotationMode) {
+                1 -> directionDeg
+                2 -> Math.toDegrees(orientation.toDouble()).toFloat()
+                else -> 0f
+            }
+            return CursorDab(size, alpha, base + brush.rotation)
+        }
+
+        private val profiles = HashMap<String, FloatArray>()
+
+        /** Coverage (0..1) across the middle of [brush]'s dab, a 5-row band averaged. */
+        private fun dabProfile(brush: BrushPreset): FloatArray = synchronized(profiles) {
+            profiles.getOrPut(brush.dabKey) {
+                val dab = runCatching { BrushDab.dab(brush) }.getOrNull() ?: return@getOrPut FloatArray(0)
+                val w = dab.width
+                val h = dab.height
+                val rows = 5
+                val y0 = (h / 2 - rows / 2).coerceIn(0, max(0, h - rows))
+                val px = IntArray(w * rows)
+                dab.getPixels(px, 0, w, 0, y0, w, minOf(rows, h - y0))
+                FloatArray(w) { x ->
+                    var sum = 0
+                    for (r in 0 until rows) sum += px[r * w + x] ushr 24
+                    sum / (rows * 255f)
+                }
+            }
+        }
+
         /** Resolution of the smudge sample buffer (1:1 with the dab rect). */
         private const val SMUDGE_RES = 128
 
