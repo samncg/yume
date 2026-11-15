@@ -88,6 +88,14 @@ object TileOps {
     }
 
     /** Captures every tile of [store] that intersects [rect], before an edit. */
+    /** Captures the tiles under [rect] that are not captured yet (before writing it). */
+    fun captureRect(capture: TileCapture, rect: Rect) {
+        val store = capture.store
+        for (ty in tileRangeY(store, rect)) {
+            for (tx in tileRangeX(store, rect)) capture.capture(tx, ty)
+        }
+    }
+
     fun capture(store: TileStore, rect: Rect): TileCapture {
         val c = TileCapture(store)
         for (ty in tileRangeY(store, rect)) {
@@ -254,13 +262,14 @@ object TileOps {
     }
 
     /** True when the captured snapshot over [rect] is all empty or all one opaque shared solid. */
-    private fun uniformSnapshot(capture: TileCapture, rect: Rect): Boolean {
+    internal fun uniformSnapshot(capture: TileCapture, rect: Rect, lazy: Boolean = false): Boolean {
         val store = capture.store
         var first: Bitmap? = null
         var seen = false
         for (ty in tileRangeY(store, rect)) {
             for (tx in tileRangeX(store, rect)) {
-                val t = if (capture.has(tx, ty)) capture.beforeAt(tx, ty) else null
+                val t = if (capture.has(tx, ty)) capture.beforeAt(tx, ty)
+                else if (lazy) store.getTile(tx, ty) else null
                 if (t != null) {
                     val c = SolidTiles.colourOf(t) ?: return false
                     if ((c ushr 24) != 255) return false
@@ -340,15 +349,19 @@ object TileOps {
     private const val UNCHANGED = 0x00000001
     private const val TRANSLUCENT = 0x00000002
 
-    /** Fills [patch] (covering [rect]) from the captured pre-edit snapshot. */
-    fun readSnapshot(capture: TileCapture, rect: Rect, patch: Bitmap) {
+    /**
+     * Fills [patch] (covering [rect]) from the captured pre-edit snapshot.
+     * With [lazy], a tile not captured yet has not been written either, so
+     * its pre-edit pixels are read from the store itself.
+     */
+    fun readSnapshot(capture: TileCapture, rect: Rect, patch: Bitmap, lazy: Boolean = false) {
         val store = capture.store
         val c = Canvas(patch)
         c.drawColor(store.defaultPixel, BlendMode.SRC)
         for (ty in tileRangeY(store, rect)) {
             for (tx in tileRangeX(store, rect)) {
-                if (!capture.has(tx, ty)) continue
-                val tile = capture.beforeAt(tx, ty) ?: continue
+                val tile = (if (capture.has(tx, ty)) capture.beforeAt(tx, ty)
+                else if (lazy) store.getTile(tx, ty) else null) ?: continue
                 val x0 = tx * store.tileSize
                 val y0 = ty * store.tileSize
                 val l = max(rect.left, x0)

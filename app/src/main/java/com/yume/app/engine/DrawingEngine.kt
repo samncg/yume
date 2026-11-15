@@ -1002,6 +1002,9 @@ class DrawingEngine(val width: Int, val height: Int) {
     /** True when the whole document is covered by the current mip. */
     fun mipReady(): Boolean = mipTiles != null && mipDirty.isEmpty && mipRowRest == null
 
+    /** Frames the mip has waited for the current tile's composite to be prefetched. */
+    private var mipWaits = 0
+
     /** Set once the mip has been complete: from then on it is always drawable. */
     private var mipBuilt = false
 
@@ -1078,6 +1081,20 @@ class DrawingEngine(val width: Int, val height: Int) {
                     st.putSolidTile(mtx, mty, flat.toInt())
                     continue
                 }
+                // Composite tiles on disk (after a big edit most of a huge
+                // canvas is): reading them here, one by one, inside a frame
+                // was a frame of many seconds. Ask the prefetcher for them and
+                // come back to this tile in a later frame (at most ~60 frames,
+                // then read it anyway so the view always finishes).
+                val cst = compositeTiles
+                if (budgetNs != Long.MAX_VALUE && cst != null && cst.hasEvictedIn(src, prefetch = true) &&
+                    mipWaits++ < 60
+                ) {
+                    mipRowRest = Rect(max(x0, doc.left), max(y0, doc.top), doc.right, min(y1, doc.bottom))
+                    if (y1 < doc.bottom) mipDirtyUnion(Rect(doc.left, y1, doc.right, doc.bottom))
+                    return false
+                }
+                mipWaits = 0
                 readCompositeInto(patch, src)
                 st.editTile(mtx, mty) { c ->
                     c.drawBitmap(
@@ -1711,7 +1728,8 @@ class DrawingEngine(val width: Int, val height: Int) {
         label: String,
         kind: EditKind,
         detail: String = "",
-        swatch: Int = 0
+        swatch: Int = 0,
+        capturedOnly: Boolean = false
     ): HistoryAction? {
         val store = capture.store
         val r = Rect(rect)
@@ -1725,6 +1743,32 @@ class DrawingEngine(val width: Int, val height: Int) {
         var heldBytes = 0L
         var spill: HistorySpill? = null
         val box = Rect()
+        // Crops waiting to go to disk: (change, true = before crop).
+        val pendingChanges = ArrayList<TileChange>()
+        val pendingBefore = ArrayList<Boolean>()
+        val pendingBmps = ArrayList<Bitmap>()
+        fun flushPending() {
+            val s = spill ?: return
+            if (pendingBmps.isEmpty()) return
+            try {
+                s.writeAll(pendingBmps) { i, key ->
+                    val ch = pendingChanges[i]
+                    if (pendingBefore[i]) {
+                        ch.beforeKey = key
+                        ch.before = null
+                    } else {
+                        ch.afterKey = key
+                        ch.after = null
+                    }
+                    pendingBmps[i].recycle()
+                }
+            } catch (_: java.io.IOException) {
+                // A write failed: what was not written simply stays in memory.
+            }
+            pendingChanges.clear()
+            pendingBefore.clear()
+            pendingBmps.clear()
+        }
         val ty1 = (r.bottom - 1) / tileSize
         val tx1 = (r.right - 1) / tileSize
         for (ty in r.top / tileSize..ty1) {
@@ -1739,6 +1783,8 @@ class DrawingEngine(val width: Int, val height: Int) {
                 )
                 if (box.isEmpty) continue
                 val k = (tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL)
+                // A lazily captured edit wrote exactly the captured tiles.
+                if (capturedOnly && !capture.has(tx, ty)) continue
                 // Tiles the stroke never wrote are still part of the action's
                 // rectangle: the dense path restores them too (so replaying a
                 // later step brings back anything a deleted step painted there).
@@ -1756,27 +1802,23 @@ class DrawingEngine(val width: Int, val height: Int) {
                 if (spill == null && heldBytes > History.STREAM_BYTES) spill = patchSpill()
                 val s = spill
                 if (s != null) {
-                    // Past the stream size: straight to disk (on a write
-                    // failure the crop simply stays in memory).
-                    try {
-                        beforeCrop?.takeIf { !SolidTiles.isShared(it) }?.let {
-                            change.beforeKey = s.write(it)
-                            it.recycle()
-                            change.before = null
-                        }
-                        afterCrop?.takeIf { !SolidTiles.isShared(it) }?.let {
-                            change.afterKey = s.write(it)
-                            it.recycle()
-                            change.after = null
-                        }
-                    } catch (_: java.io.IOException) {
+                    // Past the stream size: to disk, compressed a batch at a
+                    // time on several threads (on a write failure the crop
+                    // simply stays in memory).
+                    beforeCrop?.takeIf { !SolidTiles.isShared(it) }?.let {
+                        pendingChanges.add(change); pendingBefore.add(true); pendingBmps.add(it)
                     }
+                    afterCrop?.takeIf { !SolidTiles.isShared(it) }?.let {
+                        pendingChanges.add(change); pendingBefore.add(false); pendingBmps.add(it)
+                    }
+                    if (pendingBmps.size >= 24) flushPending()
                 } else {
                     beforeCrop?.let { if (!SolidTiles.isShared(it)) heldBytes += it.byteCount }
                     afterCrop?.let { if (!SolidTiles.isShared(it)) heldBytes += it.byteCount }
                 }
             }
         }
+        flushPending()
         // The crops are copies, so the copy-on-touch snapshot is no longer needed.
         capture.release()
         // Stroke / one-shot op end: tiles that ended up one flat colour become

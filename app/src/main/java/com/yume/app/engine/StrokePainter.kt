@@ -110,6 +110,131 @@ class StrokePainter(private val engine: DrawingEngine) {
     private var smudge = false
     private var baseAlpha = 1f
 
+    /**
+     * Stroke opacity below 1: the stroke is painted at its flow into shadow
+     * tiles (a private copy of the pre-stroke layer), and the layer shows
+     * pre-stroke + opacity * (shadow - pre-stroke). However often the stroke
+     * crosses itself it never gets more opaque than the opacity, the way a
+     * stroke layer at that opacity would look. 1 = off (dabs straight in).
+     */
+    private var strokeOpacity = 1f
+
+    private class Shadow(val bmp: Bitmap, val canvas: Canvas, val base: IntArray)
+
+    private val shadows = HashMap<Long, Shadow>()
+    private var shadowPx = IntArray(0)
+    private var shadowOut: Bitmap? = null
+    private val shadowSrcPaint = Paint().apply { blendMode = BlendMode.SRC }
+    private val shadowRect = Rect()
+    private val shadowSrc = Rect()
+
+    private fun releaseShadows() {
+        for (sh in shadows.values) sh.bmp.recycle()
+        shadows.clear()
+    }
+
+    /** The shadow tile ([tx], [ty]) of the stroke, made from the pre-stroke pixels. */
+    private fun shadowAt(tx: Int, ty: Int, t: Int): Shadow {
+        val k = (tx.toLong() shl 32) or (ty.toLong() and 0xFFFFFFFFL)
+        shadows[k]?.let { return it }
+        val bmp = AllocTracker.bitmap("stroke.shadow", t, t)
+        val c = Canvas(bmp)
+        val st = store
+        if (st != null) {
+            tileCapture?.capture(tx, ty)
+            val before = tileCapture?.beforeAt(tx, ty)
+            if (before == null) c.drawColor(st.defaultPixel, BlendMode.SRC)
+            else c.drawBitmap(before, null, Rect(0, 0, t, t), shadowSrcPaint)
+        } else {
+            val src = Rect(tx * t, ty * t, min(engine.width, tx * t + t), min(engine.height, ty * t + t))
+            c.drawBitmap(engine.strokeBase, src, Rect(0, 0, src.width(), src.height()), shadowSrcPaint)
+        }
+        val base = IntArray(t * t)
+        bmp.getPixels(base, 0, t, 0, 0, t, t)
+        return Shadow(bmp, c, base).also { shadows[k] = it }
+    }
+
+    /**
+     * Stamps the prepared dab (scratch + [dabBlendPaint] over [px]) into the
+     * shadow tiles and shows pre-stroke + opacity * change on the layer.
+     */
+    private fun stampBuffered(scratch: Bitmap, px: Rect) {
+        val st = store
+        val t = st?.tileSize ?: 256
+        val sel = selectionClip
+        val o256 = (strokeOpacity * 256f).toInt().coerceIn(0, 256)
+        val ty1 = (px.bottom - 1) / t
+        val tx1 = (px.right - 1) / t
+        for (ty in px.top / t..ty1) {
+            for (tx in px.left / t..tx1) {
+                val sh = shadowAt(tx, ty, t)
+                val ox = tx * t
+                val oy = ty * t
+                val sc = sh.canvas
+                val s0 = sc.save()
+                sc.translate(-ox.toFloat(), -oy.toFloat())
+                if (sel != null) sc.clipPath(sel)
+                sc.drawBitmap(scratch, dabSrcRect, dabDstRect, dabBlendPaint)
+                sc.restoreToCount(s0)
+                val r = shadowRect
+                r.set(max(px.left, ox), max(px.top, oy), min(px.right, ox + t), min(px.bottom, oy + t))
+                if (!r.intersect(0, 0, engine.width, engine.height)) continue
+                val w = r.width()
+                val h = r.height()
+                if (shadowPx.size < w * h) shadowPx = IntArray(w * h)
+                val a = shadowPx
+                sh.bmp.getPixels(a, 0, w, r.left - ox, r.top - oy, w, h)
+                val base = sh.base
+                var i = 0
+                for (yy in 0 until h) {
+                    var bi = (r.top - oy + yy) * t + (r.left - ox)
+                    for (xx in 0 until w) {
+                        val sv = a[i]
+                        val bv = base[bi++]
+                        a[i] = if (sv != bv) lerpPremul(bv, sv, o256) else bv
+                        i++
+                    }
+                }
+                var out = shadowOut
+                if (out == null || out.isRecycled || out.width < w || out.height < h) {
+                    val nw = max(w, out?.width ?: 0)
+                    val nh = max(h, out?.height ?: 0)
+                    out?.recycle()
+                    out = Bitmap.createBitmap(nw, nh, Bitmap.Config.ARGB_8888)
+                    shadowOut = out
+                }
+                val ob = out!!
+                ob.setPixels(a, 0, w, 0, 0, w, h)
+                shadowSrc.set(0, 0, w, h)
+                if (st == null) {
+                    canvas?.drawBitmap(ob, shadowSrc, r, shadowSrcPaint)
+                } else {
+                    tileCapture?.capture(tx, ty)
+                    st.editTile(tx, ty) { tc -> tc.drawBitmap(ob, shadowSrc, r, shadowSrcPaint) }
+                }
+            }
+        }
+    }
+
+    /** b + o * (s - b) on premultiplied colour; [b], [s] and the result unpremultiplied ARGB. */
+    private fun lerpPremul(b: Int, s: Int, o256: Int): Int {
+        val ba = b ushr 24
+        val sa = s ushr 24
+        val a = ba + (((sa - ba) * o256) shr 8)
+        if (a <= 0) return 0
+        val bR = ((b shr 16) and 0xFF) * ba
+        val bG = ((b shr 8) and 0xFF) * ba
+        val bB = (b and 0xFF) * ba
+        val r = bR + (((((s shr 16) and 0xFF) * sa) - bR) * o256 shr 8)
+        val g = bG + (((((s shr 8) and 0xFF) * sa) - bG) * o256 shr 8)
+        val bl = bB + ((((s and 0xFF) * sa) - bB) * o256 shr 8)
+        val half = a / 2
+        return (a shl 24) or
+            (((r + half) / a).coerceIn(0, 255) shl 16) or
+            (((g + half) / a).coerceIn(0, 255) shl 8) or
+            ((bl + half) / a).coerceIn(0, 255)
+    }
+
     /** Distance travelled in this stroke, drives the taper-in. */
     private var travel = 0f
 
@@ -200,7 +325,15 @@ class StrokePainter(private val engine: DrawingEngine) {
             else -> null
         }
 
-        baseAlpha = (brush.opacity * brush.flow).coerceIn(0.02f, 1f)
+        // Opacity caps the whole stroke (see [strokeOpacity]); the flow is
+        // what each dab lays down. Smudge and wet-bleed brushes keep the old
+        // per-dab meaning: they move paint that is already there.
+        releaseShadows()
+        strokeOpacity = if (!smudge && !brush.bleeds && brush.opacity < 0.995f &&
+            (brush.category == BrushCategory.Brush || brush.category == BrushCategory.Eraser)
+        ) brush.opacity.coerceIn(0.01f, 1f) else 1f
+        baseAlpha = if (strokeOpacity < 1f) brush.flow.coerceIn(0.02f, 1f)
+        else (brush.opacity * brush.flow).coerceIn(0.02f, 1f)
         brushColor = strokeColor
         mixColor = strokeColor
         mixFilter = null
@@ -368,6 +501,8 @@ class StrokePainter(private val engine: DrawingEngine) {
         store = null
         selectionClip = null
         selectionBounds = null
+        releaseShadows()
+        strokeOpacity = 1f
         // tileCapture deliberately survives: the session turns it into a patch.
     }
 
@@ -849,6 +984,10 @@ class StrokePainter(private val engine: DrawingEngine) {
         dabSrcRect.set(0, 0, w, h)
         dabDstRect.set(px)
 
+        if (strokeOpacity < 1f && blit === paint) {
+            stampBuffered(scratch, px)
+            return
+        }
         val st = store
         if (st == null) {
             val c = canvas ?: return
@@ -983,6 +1122,8 @@ class StrokePainter(private val engine: DrawingEngine) {
             }
         }
         dirty.setEmpty()
+        releaseShadows()
+        strokeOpacity = 1f
         canvas = null
         layer = null
         preset = null

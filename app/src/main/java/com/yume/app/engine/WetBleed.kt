@@ -62,9 +62,11 @@ internal object WetBleed {
             val c = px[i]
             val a = c ushr 24
             pa[i] = a
-            pr[i] = ((c shr 16) and 0xFF) * a / 255
-            pg[i] = ((c shr 8) and 0xFF) * a / 255
-            pb[i] = (c and 0xFF) * a / 255
+            // Rounded, not truncated: a truncation per dab is a small loss
+            // that hundreds of dabs over the same spot add up to black.
+            pr[i] = (((c shr 16) and 0xFF) * a + 127) / 255
+            pg[i] = (((c shr 8) and 0xFF) * a + 127) / 255
+            pb[i] = ((c and 0xFF) * a + 127) / 255
         }
         // Diffusion radius grows with the brush and the strength.
         val rb = max(1, (radius * (0.18f + 0.3f * strength)).toInt())
@@ -111,13 +113,19 @@ internal object WetBleed {
                 var or = pr[i] + (sr - pr[i]) * wgt
                 var og = pg[i] + (sg - pg[i]) * wgt
                 var ob = pb[i] + (sb - pb[i]) * wgt
+                // Nothing to move here (an even wash): leave the pixel exactly
+                // as it is, so going over it again never shifts its colour.
+                if (kotlin.math.abs(oa - oa0) < 0.5f && kotlin.math.abs(or - pr[i]) < 0.5f &&
+                    kotlin.math.abs(og - pg[i]) < 0.5f && kotlin.math.abs(ob - pb[i]) < 0.5f
+                ) continue
                 // Pooling: where wet pigment creeps into lighter or empty paper,
-                // its edge dries darker.
+                // its edge dries a little darker. Only pigment that arrives
+                // darkens (the alpha it gains), so the total is bounded: going
+                // over the same wash again and again does not keep darkening it.
                 val gain = ((oa - oa0) / 255f).coerceIn(0f, 1f)
-                val edge = (1f - kotlin.math.abs(oa / 255f - 0.5f) * 2f).coerceIn(0f, 1f)
-                val pool = (gain * 0.6f + edge * 0.12f) * strength
+                val pool = gain * 0.5f * strength
                 if (pool > 0f) {
-                    val f = 1f - pool * 0.35f
+                    val f = 1f - pool * 0.3f
                     or *= f; og *= f; ob *= f
                 }
                 if (keepAlpha) {
@@ -125,13 +133,13 @@ internal object WetBleed {
                     val s = if (oa > 0.5f) oa0 / oa else 0f
                     or *= s; og *= s; ob *= s; oa = oa0
                 }
-                val a = oa.toInt().coerceIn(0, 255)
+                val a = (oa + 0.5f).toInt().coerceIn(0, 255)
                 if (a == 0) {
                     px[i] = 0
                 } else {
-                    val r = (or * 255f / a).toInt().coerceIn(0, 255)
-                    val g = (og * 255f / a).toInt().coerceIn(0, 255)
-                    val b = (ob * 255f / a).toInt().coerceIn(0, 255)
+                    val r = (or * 255f / a + 0.5f).toInt().coerceIn(0, 255)
+                    val g = (og * 255f / a + 0.5f).toInt().coerceIn(0, 255)
+                    val b = (ob * 255f / a + 0.5f).toInt().coerceIn(0, 255)
                     px[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
                 }
             }
@@ -154,7 +162,7 @@ internal object WetBleed {
             var sum = 0
             for (k in -r..r) sum += src[row + k.coerceIn(0, w - 1)]
             for (x in 0 until w) {
-                dst[row + x] = sum / div
+                dst[row + x] = (sum + div / 2) / div
                 sum += src[row + min(w - 1, x + r + 1)] - src[row + max(0, x - r)]
             }
         }
@@ -166,7 +174,7 @@ internal object WetBleed {
             var sum = 0
             for (k in -r..r) sum += src[k.coerceIn(0, h - 1) * w + x]
             for (y in 0 until h) {
-                dst[y * w + x] = sum / div
+                dst[y * w + x] = (sum + div / 2) / div
                 sum += src[min(h - 1, y + r + 1) * w + x] - src[max(0, y - r) * w + x]
             }
         }

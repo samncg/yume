@@ -207,13 +207,24 @@ sponge) are drawn by the app.
 Brushes saved before these existed keep painting exactly as they did: every
 new setting is neutral by default.
 
+**Stroke opacity** caps the whole stroke, like painting on a layer at that
+opacity: below 100 % the stroke is laid down at its flow into a private copy
+of the tiles it touches, and the layer shows the pre-stroke pixels plus
+opacity × the change. A 20 % stroke scribbled over itself stays 20 % (it used
+to build up to solid colour, since opacity scaled each stamp like flow).
+Flow still sets how much each stamp lays down within that cap. Smudge and
+wet-bleed brushes keep opacity as their per-stamp strength.
+
 *How wet bleed works* (`engine/WetBleed.kt`): for each dab the pixels around
 the brush are read from the layer, softly diffused (two box-blur passes on
 premultiplied colour), and fetched back through a slowly varying noise
 displacement fixed to the canvas, which makes the bleed front ragged instead
 of a clean circle; where pigment spreads into lighter or empty paper its edge
 is darkened a little. The result is written back 1:1, so dense and sparse
-layers give identical pixels (`bleedtest` harness).
+layers give identical pixels (`bleedtest` harness). Every step rounds rather
+than truncates, an even wash is left exactly as it is, and only pigment that
+arrives darkens, so scrubbing the same spot again and again mixes the colours
+without sinking them toward black (`opacitytest` harness).
 
 **Importing brushes from other apps** — *Import brushes…* (More settings)
 reads Yume's own `.yumebrush` files and:
@@ -233,7 +244,7 @@ Imported brushes land in the **Imported** group.
 | --- | --- |
 | Stroke assist | Global stabiliser that averages recent input to remove tremor |
 | Size | Nominal stamp diameter in document pixels (1–300 px) |
-| Opacity | Maximum coverage of the finished stroke |
+| Opacity | Maximum coverage of the finished stroke: a stroke never gets darker than its opacity, however often it crosses itself |
 | Flow | How much paint each individual stamp lays down |
 | Hardness | Edge falloff of the stamp, from airbrush-soft to crisp |
 | Spacing | Distance between stamps as a fraction of the brush size |
@@ -408,6 +419,15 @@ Adjustments apply to the active layer and preview **in real time** as you drag.
 - **Blur**, **Sharpen** and **Motion blur** preview on the GPU (see
   [GPU engine](#gpu-engine)); without a usable GPU, blur falls back to a
   quarter-resolution CPU box-blur proxy and the other two bake on Apply.
+  Applying motion blur and sharpen runs on every core; flat or empty areas
+  are skipped, and near-horizontal or near-vertical motion blur adds whole
+  runs of pixels from prefix sums (a 4096² layer: 0.17 s instead of 13 s; at
+  45°, 1.8 s). The result is byte-identical to sampling one pixel at a time
+  (`motiontest` harness, 144 cases). Only the tiles the bake changes are
+  copied for undo, and the undo data is compressed on several threads, with
+  incompressible tiles (noise, photos) stored raw.
+- The working card shows real progress for these ("42 % · about 12 s left"),
+  measured as the work goes, and Cancel stops them part way.
 - **Noise** and **film grain**, previewed live on the GPU.
 - **Curves**, **Levels**, **Colour balance**, **Gradient map**, **Posterize**
   (2–32 levels per channel) and **Threshold** (black / white by luminance).

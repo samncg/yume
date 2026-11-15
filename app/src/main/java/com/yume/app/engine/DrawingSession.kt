@@ -3279,6 +3279,21 @@ class DrawingSession(
         return small
     }
 
+    private var bakeWrites = 0
+
+    /**
+     * Keeps the tile cache near its budget while a big bake writes: written
+     * tiles go to disk here, under the working card, instead of all at once
+     * on the first frame after Apply (at 16K that was one frame of ~17 s).
+     */
+    private fun bakeSafePoint() {
+        if (++bakeWrites % 32 == 0) TileCache.active?.safePoint()
+    }
+
+    /** Adjustments whose bake captures each tile just before writing it. */
+    private fun lazyCapture(kind: AdjustmentKind): Boolean =
+        kind == AdjustmentKind.Sharpen || kind == AdjustmentKind.MotionBlur
+
     private fun previewTarget(layer: Layer): Long =
         if (adjustAllLayers) LayerPreview.ALL_LAYERS else layer.id
 
@@ -3313,9 +3328,11 @@ class DrawingSession(
         adjustPixels = pixels
         workEtaMs = (adjustEstimateSeconds(kind) * 1000f).toLong()
         adjustPixels = 0L
-        // The undo copy of the layer, taken now that it is really needed.
+        // The undo copy of the layer, taken now that it is really needed. The
+        // chunked kernels fill it as they write, so tiles they leave alone
+        // (empty, flat) are never copied.
         val capture = eager ?: if (dense == null && layer.paintStore.isSparse) {
-            TileOps.capture(layer.paintStore, bounds)
+            if (lazyCapture(kind)) TileCapture(layer.paintStore) else TileOps.capture(layer.paintStore, bounds)
         } else null
         val actions = ArrayList<HistoryAction>()
         var inFlight: TileCapture? = capture
@@ -3347,7 +3364,8 @@ class DrawingSession(
                 if (base.isEmpty) continue
                 val b = if (halo > 0) growBounds(base, halo * 2) else base
                 val w = if (halo > 0) growBounds(base, halo) else base
-                val cap = if (store.isSparse) TileOps.capture(store, b) else null
+                val cap = if (!store.isSparse) null
+                else if (lazyCapture(kind)) TileCapture(store) else TileOps.capture(store, b)
                 val snap = if (store.isSparse) null else store.readRect(full)
                 inFlight = cap
                 bakeAdjustment(other, cap, snap, b, w, kind, amount)?.let { actions.add(it) }
@@ -3357,6 +3375,9 @@ class DrawingSession(
         }
         }
         workEtaMs = 0L
+        // Back within the cache budget before the screen catches up.
+        OpCancel.progress = 1f
+        TileCache.active?.safePoint()
         if (!baked) return
         // Remember how fast this device did it, for the next estimate.
         val mp = pixels / 1_000_000f
@@ -3409,13 +3430,21 @@ class DrawingSession(
                 AdjustmentKind.Noise -> TileOps.noise(store, work, amount.coerceIn(0f, 1f))
                 AdjustmentKind.Sharpen -> Kernels.sharpen(
                     engine.width, engine.height, work, amount.coerceIn(0f, 1f) * 2f,
-                    Kernels.captureSource(capture)
-                ) { r, bmp -> store.writeRect(r, bmp, Rect(0, 0, r.width(), r.height())) }
+                    Kernels.captureSource(capture, lazy = true)
+                ) { r, bmp ->
+                    TileOps.captureRect(capture, r)
+                    store.writeRect(r, bmp, Rect(0, 0, r.width(), r.height()))
+                    bakeSafePoint()
+                }
                 AdjustmentKind.MotionBlur -> Kernels.motionBlur(
                     engine.width, engine.height, work,
                     (amount.coerceIn(0f, 1f) * MOTION_MAX_RADIUS).toInt(), motionAngle,
-                    Kernels.captureSource(capture)
-                ) { r, bmp -> store.writeRect(r, bmp, Rect(0, 0, r.width(), r.height())) }
+                    Kernels.captureSource(capture, lazy = true)
+                ) { r, bmp ->
+                    TileOps.captureRect(capture, r)
+                    store.writeRect(r, bmp, Rect(0, 0, r.width(), r.height()))
+                    bakeSafePoint()
+                }
                 AdjustmentKind.Curves, AdjustmentKind.Levels, AdjustmentKind.ColorBalance,
                 AdjustmentKind.GradientMap, AdjustmentKind.Posterize, AdjustmentKind.Threshold ->
                     toneLut?.let { TileOps.tone(store, work, it) }
@@ -3423,7 +3452,8 @@ class DrawingSession(
             // The action covers the whole snapshot region: a blurred tile past
             // the work rect is unchanged, and copying it costs nothing extra.
             return engine.makeTilePatch(
-                layer, capture, bounds, "Adjust ${kind.label}", EditKind.Adjust
+                layer, capture, bounds, "Adjust ${kind.label}", EditKind.Adjust,
+                capturedOnly = lazyCapture(kind)
             )
         } else {
             val snapshot = snapshot0

@@ -128,6 +128,14 @@ class TileChange(
  * the CRC-checked [SpillFile] log, keyed by a running counter.
  */
 class HistorySpill(file: java.io.File) {
+    companion object {
+        private val packPool by lazy {
+            java.util.concurrent.Executors.newFixedThreadPool(
+                Runtime.getRuntime().availableProcessors().coerceIn(1, 6)
+            ) { r -> Thread(r, "yume-pack").apply { isDaemon = true } }
+        }
+    }
+
     private val spill = SpillFile(file)
     private val scratch = SpillFile.ReadScratch()
     private var nextKey = 1L
@@ -142,6 +150,28 @@ class HistorySpill(file: java.io.File) {
         spill.write(k, bmp)
         writes++
         return k
+    }
+
+    /**
+     * Writes [bmps] in order, compressing them on several threads; [onKey]
+     * gets each one's key as it lands. Throws IOException at the first
+     * failure (the ones before it are written).
+     */
+    fun writeAll(bmps: List<Bitmap>, onKey: (Int, Long) -> Unit) {
+        if (bmps.isEmpty()) return
+        val jobs = bmps.map { b -> packPool.submit<SpillFile.Packed> { SpillFile.pack(b) } }
+        for ((i, j) in jobs.withIndex()) {
+            val pk = try {
+                j.get()
+            } catch (e: java.util.concurrent.ExecutionException) {
+                for (r in jobs) r.cancel(false)
+                throw java.io.IOException("pack failed", e.cause)
+            }
+            val k = nextKey++
+            spill.writePacked(k, pk)
+            writes++
+            onKey(i, k)
+        }
     }
 
     /** Reads the crop stored under [key]. Throws IOException when it is gone or corrupt. */

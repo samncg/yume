@@ -1044,3 +1044,27 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 #   the previous gate; features 30/30 MATCH x4; journal, png, cache-fail PASS.
 # bleedtest a0323904 dense = sparse MATCH.
 # stress16k: blur bake + undo MATCH, reopen MATCH, native peak 998 MB.
+
+# --- Fast 16K motion blur, stroke opacity cap, wet bleed rounding (Nov 2026) -
+# Motion blur / sharpen bakes run on every core, skip flat chunks, and add
+# row / column runs from prefix sums near horizontal / vertical angles; undo
+# tiles are captured as written; history spill compresses in parallel and
+# stores incompressible tiles raw; the mip prefetches spilled composite tiles
+# instead of reading them in the frame; big bakes evict as they go.
+# Stroke opacity < 1 caps the stroke (shadow tiles, lerp from the pre-stroke
+# pixels); every harness brush has opacity 1, so golden strokes are unchanged.
+# Wet bleed rounds instead of truncating and no longer darkens even washes,
+# so its own test hash changes (dense = sparse still).
+# golden: output byte-identical to the previous gate (dense PASS both sizes,
+#   sparse residue the same 16 lines). features 30/30 MATCH x4; journal,
+#   history-spill, png, sparse-persist, export-parity, lazy-open, save-safety,
+#   cache-fail PASS.
+# motiontest: 144 cases (18 angles, radii 1/3/17/48, edges, flat, translucent)
+#   all byte-identical to the one-sample reference. 4096^2 r48: 0 deg 173 ms
+#   (was 12948), 45 deg 1834 ms (was 12981).
+# opacitytest: 20% black x30 passes -> darkest 205/255 (dense, sparse);
+#   wet bleed x40 does not darken (148.8 -> 168.7); dense = sparse 9bae5b1e.
+# bleedtest: 91852214 dense = sparse MATCH (new hash: rounding fix).
+# motion16k (16K layer of noise, worst case): first frame after apply
+#   13-21 s -> 1.3-1.6 s; undo MATCH at 0 and 45 deg; reopen MATCH.
+# stress16k: blur undo MATCH (344 MB streamed), reopen MATCH, native peak 896 MB.

@@ -500,17 +500,35 @@ fun EditorScreen(
         var showBusy by remember { mutableStateOf(false) }
         var canCancel by remember { mutableStateOf(false) }
         var cancelling by remember { mutableStateOf(false) }
-        // Seconds the running operation still needs (-1 = no estimate).
-        var etaLeft by remember { mutableStateOf(-1f) }
+        // What the card says under "Working…" (progress / time left).
+        var etaText by remember { mutableStateOf("") }
         LaunchedEffect(session) {
             while (true) {
                 val b = session.workingMillis() >= 250L
                 if (b != showBusy) showBusy = b
                 val c = com.yume.app.engine.OpCancel.armed
                 if (c != canCancel) canCancel = c
-                val eta = session.workEtaMs
-                val left = if (b && eta >= 1500L) ((eta - session.workingMillis()) / 1000f) else -1f
-                if (left != etaLeft) etaLeft = left
+                val text = if (!b) "" else {
+                    val elapsed = session.workingMillis()
+                    val p = com.yume.app.engine.OpCancel.progress
+                    val eta = session.workEtaMs
+                    when {
+                        // Measured progress beats the estimate.
+                        p >= 0.999f -> "Finishing…"
+                        p >= 0.03f && elapsed >= 1000L -> {
+                            val left = elapsed * (1f - p) / p / 1000f
+                            "${(p * 100).toInt()}% · " +
+                                if (left < 1.5f) "almost done" else "about ${formatDuration(left)} left"
+                        }
+                        p >= 0f -> "${(p * 100).toInt()}%"
+                        eta >= 1500L -> {
+                            val left = (eta - elapsed) / 1000f
+                            if (left < 1.5f) "Almost done" else "About ${formatDuration(left)} left"
+                        }
+                        else -> ""
+                    }
+                }
+                if (text != etaText) etaText = text
                 if (!b) cancelling = false
                 delay(if (b) 50L else 90L)
             }
@@ -537,10 +555,10 @@ fun EditorScreen(
                         style = MaterialTheme.typography.titleSmall,
                         color = YumeColors.text
                     )
-                    if (etaLeft >= 0f && !cancelling) {
+                    if (etaText.isNotEmpty() && !cancelling) {
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            if (etaLeft < 1.5f) "Almost done" else "About ${formatDuration(etaLeft)} left",
+                            etaText,
                             style = MaterialTheme.typography.bodySmall,
                             color = YumeColors.textDim
                         )

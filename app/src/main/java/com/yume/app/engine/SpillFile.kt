@@ -71,9 +71,6 @@ class SpillFile(private val file: File) {
     /** Debug failure injection: every write throws while this is set. */
     @Volatile var failWrites: Boolean = false
 
-    private val deflater = Deflater(1)
-    private var rawBuf: ByteBuffer = ByteBuffer.allocate(0)
-    private var packBuf = ByteArray(0)
     private val header = ByteBuffer.allocate(HEADER).order(ByteOrder.LITTLE_ENDIAN)
     private val crc = CRC32()
 
@@ -117,58 +114,55 @@ class SpillFile(private val file: File) {
      * Throws [IOException] on any failure; the index is then unchanged, so the
      * caller keeps the tile resident and nothing is lost.
      */
-    @Synchronized
+    /** A tile's payload, compressed (or not) and checksummed, ready to append. */
+    class Packed(val w: Int, val h: Int, val kind: Int, val data: ByteArray, val len: Int, val crc: Int)
+
+    private class PackScratch {
+        val deflater = Deflater(1)
+        var raw: ByteBuffer = ByteBuffer.allocate(0)
+        var pack = ByteArray(0)
+        val crc = CRC32()
+    }
+
+    /**
+     * Appends [tile]'s pixels under [key] and makes it the newest record.
+     * Throws [IOException] on any failure; the index is then unchanged, so the
+     * caller keeps the tile resident and nothing is lost.
+     */
     fun write(key: Long, tile: Bitmap): Record {
         if (failWrites) throw IOException("injected spill write failure")
-        val w = tile.width
-        val h = tile.height
-        val n = tile.byteCount
-        if (rawBuf.capacity() < n) rawBuf = ByteBuffer.allocate(n)
-        rawBuf.clear()
-        rawBuf.limit(n)
-        tile.copyPixelsToBuffer(rawBuf)
-        val raw = rawBuf.array()
-        // Deflate; keep it only when it is actually smaller.
-        if (packBuf.size < n + 64) packBuf = ByteArray(n + 64)
-        deflater.reset()
-        deflater.setInput(raw, 0, n)
-        deflater.finish()
-        var packed = 0
-        while (!deflater.finished() && packed < packBuf.size) {
-            packed += deflater.deflate(packBuf, packed, packBuf.size - packed)
-        }
-        val useDeflate = deflater.finished() && packed < n
-        val payload = if (useDeflate) packBuf else raw
-        val len = if (useDeflate) packed else n
-        crc.reset()
-        crc.update(payload, 0, len)
-        val payloadCrc = crc.value.toInt()
+        return writePacked(key, pack(tile, copy = false))
+    }
 
+    /**
+     * Appends an already [pack]ed payload under [key]. Packing can run on any
+     * thread (so many tiles compress at once); appending is serialised here.
+     */
+    @Synchronized
+    fun writePacked(key: Long, pk: Packed): Record {
+        if (failWrites) throw IOException("injected spill write failure")
         val ch = open()
         val offset = fileBytes
         header.clear()
         header.putInt(MAGIC)
         header.putLong(key)
-        header.putShort(w.toShort())
-        header.putShort(h.toShort())
-        header.put((if (useDeflate) KIND_DEFLATE else KIND_RAW).toByte())
+        header.putShort(pk.w.toShort())
+        header.putShort(pk.h.toShort())
+        header.put(pk.kind.toByte())
         header.put(0); header.put(0); header.put(0)
-        header.putInt(len)
-        header.putInt(payloadCrc)
+        header.putInt(pk.len)
+        header.putInt(pk.crc)
         crc.reset()
         crc.update(header.array(), 0, HEADER - 4)
         header.putInt(crc.value.toInt())
         header.flip()
         var pos = offset
         while (header.hasRemaining()) pos += ch.write(header, pos)
-        val body = ByteBuffer.wrap(payload, 0, len)
+        val body = ByteBuffer.wrap(pk.data, 0, pk.len)
         while (body.hasRemaining()) pos += ch.write(body, pos)
         fileBytes = pos
 
-        val rec = Record(
-            key, offset, len, if (useDeflate) KIND_DEFLATE else KIND_RAW, w, h,
-            payloadCrc, generation
-        )
+        val rec = Record(key, offset, pk.len, pk.kind, pk.w, pk.h, pk.crc, generation)
         index.put(key, rec)?.let { liveBytes -= it.totalLen }
         liveBytes += rec.totalLen
         recordsWritten++
@@ -344,11 +338,65 @@ class SpillFile(private val file: File) {
         index.clear()
         liveBytes = 0L
         fileBytes = 0L
-        deflater.end()
         if (delete) file.delete()
     }
 
     companion object {
+        private val packScratch = ThreadLocal.withInitial { PackScratch() }
+
+        /** Bytes of the trial compression that decides whether a tile is worth deflating. */
+        private const val PROBE = 16 * 1024
+
+        /**
+         * Compresses [tile] for [writePacked]. Thread-safe. A tile whose first
+         * rows barely compress (noise, photos, dense texture) is stored raw:
+         * deflating it would cost several ms and save almost nothing. With
+         * [copy] false the payload lives in a per-thread buffer, valid until
+         * this thread packs again.
+         */
+        fun pack(tile: Bitmap, copy: Boolean = true): Packed {
+            val sc = packScratch.get()!!
+            val w = tile.width
+            val h = tile.height
+            val n = tile.byteCount
+            if (sc.raw.capacity() < n) sc.raw = ByteBuffer.allocate(n)
+            val rawBuf = sc.raw
+            rawBuf.clear()
+            rawBuf.limit(n)
+            tile.copyPixelsToBuffer(rawBuf)
+            val raw = rawBuf.array()
+            if (sc.pack.size < n + 64) sc.pack = ByteArray(n + 64)
+            val packBuf = sc.pack
+            val deflater = sc.deflater
+            var useDeflate = true
+            if (n > PROBE * 4) {
+                deflater.reset()
+                deflater.setInput(raw, 0, PROBE)
+                deflater.finish()
+                var got = 0
+                while (!deflater.finished() && got < packBuf.size) {
+                    got += deflater.deflate(packBuf, got, packBuf.size - got)
+                }
+                if (got > PROBE * 9 / 10) useDeflate = false
+            }
+            var packed = 0
+            if (useDeflate) {
+                deflater.reset()
+                deflater.setInput(raw, 0, n)
+                deflater.finish()
+                while (!deflater.finished() && packed < packBuf.size) {
+                    packed += deflater.deflate(packBuf, packed, packBuf.size - packed)
+                }
+                useDeflate = deflater.finished() && packed < n
+            }
+            val payload = if (useDeflate) packBuf else raw
+            val len = if (useDeflate) packed else n
+            sc.crc.reset()
+            sc.crc.update(payload, 0, len)
+            val data = if (copy) payload.copyOf(len) else payload
+            return Packed(w, h, if (useDeflate) KIND_DEFLATE else KIND_RAW, data, len, sc.crc.value.toInt())
+        }
+
         const val HEADER = 32
         const val MAGIC = 0x31535459 // "YTS1" little endian
         const val KIND_RAW = 0

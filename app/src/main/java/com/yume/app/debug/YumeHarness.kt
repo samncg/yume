@@ -36,6 +36,7 @@ import com.yume.app.engine.SelectionOp
 import com.yume.app.engine.SelectionUtil
 import com.yume.app.engine.SolidTiles
 import com.yume.app.engine.TileCache
+import com.yume.app.engine.Kernels
 import com.yume.app.engine.LayerBlend as LB
 import com.yume.app.engine.SelectionShape
 import com.yume.app.engine.SparseTileStore
@@ -191,6 +192,8 @@ object YumeHarness {
                     out.append(ScenePainter.paintSunset(app, save = only == "sunset"))
                 } else if (only == "bleedtest") {
                     out.append(scoreBleedTest(app))
+                } else if (only == "opacitytest") {
+                    out.append(scoreOpacityTest())
                 } else if (only == "motionuser") {
                     out.append(scoreMotionUser(app))
                 } else if (only == "make8k") {
@@ -201,6 +204,10 @@ object YumeHarness {
                     out.append(scoreGpu())
                 } else if (only == "stress16k" || only == "stress16kq") {
                     out.append(scoreStress16k(app, quick = only == "stress16kq"))
+                } else if (only == "motion16k") {
+                    out.append(scoreStress16k(app, quick = true, motion = true))
+                } else if (only == "motiontest") {
+                    out.append(scoreMotionTest())
                 } else if (only == "pickfresh") {
                     out.append(line(scorePickFresh()))
                 } else if (only == "wand") {
@@ -3985,6 +3992,102 @@ object YumeHarness {
         return out.toString()
     }
 
+    /**
+     * Stroke opacity and the wet-bleed blender over time.
+     * 1. A 20% black stroke scribbled back and forth 30 times over white must
+     *    stay near 20% grey (it used to pile up to black), dense = sparse.
+     * 2. The wet-bleed blender scrubbed 40 times over red / yellow / blue
+     *    stripes mixes them but must not darken the area (it went to black).
+     */
+    private fun scoreOpacityTest(): String {
+        val out = StringBuilder()
+        val w = 900
+        val h = 700
+        val oldS = TileStoreConfig.useSparseLayers
+        val hashes = ArrayList<Int>()
+        fun lum(c: Int) = (((c shr 16) and 0xFF) * 299 + ((c shr 8) and 0xFF) * 587 + (c and 0xFF) * 114) / 1000
+        try {
+            for (sparse in listOf(false, true)) {
+                TileStoreConfig.useSparseLayers = sparse
+                val engine = DrawingEngine(w, h)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val session = DrawingSession("op", "OP", engine, History())
+                identityView(session, w, h)
+                session.presets = com.yume.app.engine.BrushLibrary.defaults
+                session.assist = 0f
+                session.quickShapeEnabled = false
+                val l = engine.newLayer("Paint")
+                engine.selectLayer(l.id)
+                var seed = 3
+                fun use(id: String, size: Float) {
+                    val p = session.presets.first { it.id == id }
+                    pick(session, p, p.category)
+                    session.setBrushSize(size)
+                    session.runCommands()
+                }
+                // 1. Opacity cap.
+                use("acr-round", 40f)
+                session.setBrushOpacity(0.2f)
+                session.runCommands()
+                session.color = 0xFF000000.toInt()
+                val zig = ArrayList<P>()
+                for (k in 0 until 30) {
+                    zig.add(P(60f + (k % 2) * 300f, 60f + k * 2f))
+                }
+                session.stroke(zig)
+                session.runCommands()
+                engine.compositeAll()
+                var flat = engine.flatten()
+                var px = IntArray(w * h)
+                flat.getPixels(px, 0, w, 0, 0, w, h)
+                var darkest = 255
+                for (y in 40 until 160) for (x in 40 until 380) darkest = min(darkest, lum(px[y * w + x]))
+                hashes.add(px.contentHashCode())
+                flat.recycle()
+                out.append("opacitytest ${if (sparse) "sparse" else "dense"}: 20% black, 30 passes -> darkest ${darkest}/255 " +
+                    "(${"%.0f".format((255 - darkest) / 2.55)}% dark) ${if (darkest >= 196) "PASS" else "FAIL"}\n")
+                // 2. Wet bleed does not darken.
+                session.setBrushOpacity(1f)
+                use("acr-thick", 40f)
+                val cols = intArrayOf(0xFFD8452E.toInt(), 0xFFF2C230.toInt(), 0xFF2F6FB5.toInt())
+                for (r in 0 until 9) {
+                    session.color = cols[r % 3]
+                    session.stroke(handLine(420f, 260f + r * 40f, 860f, 260f + r * 40f, seed++, 2f))
+                }
+                session.runCommands()
+                fun meanLum(): Double {
+                    engine.compositeAll()
+                    val f = engine.flatten()
+                    val q = IntArray(w * h)
+                    f.getPixels(q, 0, w, 0, 0, w, h)
+                    f.recycle()
+                    var sum = 0L
+                    var n = 0
+                    for (y in 300 until 560) for (x in 480 until 800) { sum += lum(q[y * w + x]); n++ }
+                    return sum.toDouble() / n
+                }
+                val before = meanLum()
+                use("wc-wet-bleed", 90f)
+                for (k in 0 until 40) {
+                    val y = 290f + (k % 8) * 35f
+                    session.stroke(handLine(440f, y, 840f, y + 20f, seed++, 6f))
+                }
+                session.runCommands()
+                val after = meanLum()
+                out.append("opacitytest ${if (sparse) "sparse" else "dense"}: wet bleed x40 mean luminance ${"%.1f".format(before)} -> ${"%.1f".format(after)} " +
+                    "${if (after >= before - 6.0) "PASS" else "FAIL (darkens)"}\n")
+            }
+            out.append("opacitytest: dense=${"%08x".format(hashes[0])} sparse=${"%08x".format(hashes[1])} " +
+                (if (hashes[0] == hashes[1]) "MATCH" else "MISMATCH") + "\n")
+        } catch (t: Throwable) {
+            Log.e(TAG, "opacitytest failed", t)
+            out.append("opacitytest: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
     /** Saves an 8K canvas with strokes, kept in the gallery for UI checks. */
     private fun makeTest8k(app: YumeApp): String {
         val size = 8192
@@ -4196,7 +4299,84 @@ object YumeHarness {
      * peaks are sampled throughout, and every step reports its renderer-style
      * frames until the screen settles (worst frame = the hitch).
      */
-    private fun scoreStress16k(app: YumeApp, quick: Boolean = false): String {
+    /**
+     * The fast motion blur (parallel chunks, row / column runs, flat chunks
+     * skipped) against the one-sample-at-a-time reference: identical bytes at
+     * many angles and radii, with flat, empty and translucent areas and
+     * canvas edges. Then the time of both on a 4096 px noise image.
+     */
+    private fun scoreMotionTest(): String {
+        val sb = StringBuilder()
+        val w = 700
+        val h = 520
+        val px = IntArray(w * h)
+        val rnd = java.util.Random(7)
+        for (y in 0 until h) for (x in 0 until w) {
+            px[y * w + x] = when {
+                x < 260 && y < 300 -> 0xFF2040A0.toInt()
+                x > 450 && y > 300 -> 0
+                else -> {
+                    val a = if (rnd.nextInt(4) == 0) rnd.nextInt(256) else 255
+                    (a shl 24) or rnd.nextInt(0x1000000)
+                }
+            }
+        }
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        bmp.setPixels(px, 0, w, 0, 0, w, h)
+        val base = IntArray(w * h)
+        bmp.getPixels(base, 0, w, 0, 0, w, h)
+        var cases = 0
+        var bad = 0
+        for (radius in intArrayOf(1, 3, 17, 48)) {
+            for (angle in floatArrayOf(0f, 3f, 12f, 22.5f, 30f, 37f, 45f, 53f, 60f, 75f, 90f, 101f, 135f, 180f, 200f, 270f, 315f, 333f)) {
+                for (bounds in listOf(Rect(0, 0, w, h), Rect(37, 11, 611, 499))) {
+                    val a = base.copyOf()
+                    val b = base.copyOf()
+                    Kernels.motionBlur(w, h, bounds, radius, angle, Kernels.bitmapSource(bmp)) { r, o ->
+                        o.getPixels(a, r.top * w + r.left, w, 0, 0, r.width(), r.height())
+                    }
+                    Kernels.motionBlurReference(w, h, bounds, radius, angle, Kernels.bitmapSource(bmp)) { r, o ->
+                        o.getPixels(b, r.top * w + r.left, w, 0, 0, r.width(), r.height())
+                    }
+                    cases++
+                    if (!a.contentEquals(b)) {
+                        bad++
+                        var first = -1
+                        for (i in a.indices) if (a[i] != b[i]) { first = i; break }
+                        sb.append("motiontest MISMATCH r=$radius angle=$angle bounds=$bounds at ${first % w},${first / w}: ${"%08x".format(a[first])} vs ${"%08x".format(b[first])}\n")
+                    }
+                }
+            }
+        }
+        sb.append("motiontest: $cases cases, ${if (bad == 0) "all MATCH" else "$bad MISMATCH"}\n")
+        bmp.recycle()
+        val big = 4096
+        val nb = Bitmap.createBitmap(big, big, Bitmap.Config.ARGB_8888)
+        val row = IntArray(big)
+        for (y in 0 until big) {
+            for (x in 0 until big) row[x] = (0xFF shl 24) or rnd.nextInt(0x1000000)
+            nb.setPixels(row, 0, big, 0, y, big, 1)
+        }
+        for (angle in floatArrayOf(0f, 20f, 45f, 90f)) {
+            var t0 = System.nanoTime()
+            Kernels.motionBlur(big, big, Rect(0, 0, big, big), 48, angle, Kernels.bitmapSource(nb)) { _, _ -> }
+            val fast = (System.nanoTime() - t0) / 1e6
+            var ref = -1.0
+            if (angle == 0f || angle == 45f) {
+                t0 = System.nanoTime()
+                Kernels.motionBlurReference(big, big, Rect(0, 0, big, big), 48, angle, Kernels.bitmapSource(nb)) { _, _ -> }
+                ref = (System.nanoTime() - t0) / 1e6
+            }
+            sb.append("motiontest 4096^2 r=48 angle=$angle: fast ${"%.0f".format(fast)} ms" +
+                (if (ref >= 0) " reference ${"%.0f".format(ref)} ms" else "") + "\n")
+        }
+        nb.recycle()
+        return sb.toString()
+    }
+
+    @Volatile private var profPhase = ""
+
+    private fun scoreStress16k(app: YumeApp, quick: Boolean = false, motion: Boolean = false): String {
         val sb = StringBuilder()
         val size = 16384
         val oldS = TileStoreConfig.useSparseLayers
@@ -4261,12 +4441,16 @@ object YumeHarness {
                     val s0 = System.nanoTime()
                     c0.adoptPrefetched()
                     c0.blockingLoads = false
+                    profPhase = "flush"
                     try { engine.flush() } finally { c0.blockingLoads = true }
                     val s1 = System.nanoTime()
                     engine.enableMip()
+                    profPhase = "mip"
                     if (engine.hasMipDirty) engine.updateMip(6_000_000L)
                     val s2 = System.nanoTime()
+                    profPhase = "evict"
                     c0.evictIfNeeded()
+                    profPhase = ""
                     val s3 = System.nanoTime()
                     frames++
                     worst = max(worst, s3 - s0)
@@ -4278,13 +4462,35 @@ object YumeHarness {
                     "(flush ${"%.0f".format(wFlush / 1e6)} mip ${"%.0f".format(wMip / 1e6)} evict ${"%.0f".format(wEvict / 1e6)})"
             }
             fun step(name: String, block: () -> Unit) {
+                // Motion runs: sample where this thread spends its time.
+                val me = Thread.currentThread()
+                val samples = HashMap<String, Int>()
+                val sampling2 = java.util.concurrent.atomic.AtomicBoolean(motion)
+                var phase = "work"
+                val prof = if (!motion) null else Thread {
+                    while (sampling2.get()) {
+                        val st = me.stackTrace
+                        val key = phase + "/" + profPhase + ": " + st.filter { it.className.startsWith("com.yume") }
+                            .take(6).joinToString(" < ") { "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" }
+                        synchronized(samples) { samples[key] = (samples[key] ?: 0) + 1 }
+                        Thread.sleep(100)
+                    }
+                }.apply { isDaemon = true; start() }
                 val t0 = System.nanoTime()
                 block()
                 session.runCommands()
                 val work = ms(t0)
                 val atWork = "${mem()} cache=${c0.residentBytes() shr 20}MB capture=${com.yume.app.engine.TileCapture.liveBytes shr 20}MB pool=${com.yume.app.engine.TilePool.heldBytes shr 20}MB"
+                phase = "settle"
                 val st = settle()
+                sampling2.set(false)
+                prof?.join()
                 out.append("stress16k $name: ${work}ms [after work: $atWork] + $st | ${mem()} cache=${c0.residentBytes() shr 20}MB\n")
+                if (prof != null) {
+                    for ((k, v) in samples.entries.sortedByDescending { it.value }.take(14)) {
+                        out.append("    ${v / 10.0}s  $k\n")
+                    }
+                }
             }
             fun journal(name: String) {
                 val t0 = System.nanoTime()
@@ -4323,6 +4529,33 @@ object YumeHarness {
                 engine.markDirty(Rect(0, 0, 8192, 8192))
             }
             journal("texture")
+            if (motion) {
+                // Texture over the rest of the canvas too: a whole 16K layer.
+                step("texture rest (3072 tiles)") {
+                    for (ty in 0 until 64) for (tx in 0 until 64) {
+                        if (tx < 32 && ty < 32) continue
+                        tex.tiles.writeRect(Rect(tx * 256, ty * 256, tx * 256 + 256, ty * 256 + 256), noise[(tx * 3 + ty) % 4], Rect(0, 0, 256, 256))
+                        if ((tx + ty * 64) % 64 == 0) c0.safePoint()
+                    }
+                    tex.touch()
+                    engine.markDirtyAll()
+                }
+                for (angle in floatArrayOf(0f, 45f)) {
+                    session.chooseMotionAngle(angle)
+                    session.runCommands()
+                    engine.compositeAll()
+                    val h0 = bandHash(engine.compositeTiles!!)
+                    step("motion blur r48 ${angle}deg") {
+                        session.previewAdjustment(com.yume.app.engine.AdjustmentKind.MotionBlur, 1f)
+                        session.consumePendingPreview()
+                        session.commitAdjustment()
+                    }
+                    step("undo motion") { session.undo() }
+                    engine.compositeAll()
+                    val h1 = bandHash(engine.compositeTiles!!)
+                    out.append("stress16k undo motion restores: ${if (h0 == h1) "MATCH" else "MISMATCH"}\n")
+                }
+            }
             if (!quick) {
             engine.compositeAll()
             val hashPreBlur = bandHash(engine.compositeTiles!!)

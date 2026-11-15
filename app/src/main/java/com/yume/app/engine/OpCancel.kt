@@ -14,6 +14,12 @@ object OpCancel {
     /** The user asked to stop the running operation. */
     @Volatile var requested: Boolean = false
 
+    /**
+     * How far the running operation has got, 0..1 (-1 = unknown). Long
+     * kernels report it so the working card can show a real countdown.
+     */
+    @Volatile var progress: Float = -1f
+
     fun check() {
         if (requested && armed) throw OperationCancelled()
     }
@@ -22,7 +28,10 @@ object OpCancel {
 
     /** Nested operations (a fill that first commits an adjustment) share one arm. */
     internal fun arm() {
-        if (depth++ == 0) requested = false
+        if (depth++ == 0) {
+            requested = false
+            progress = -1f
+        }
         armed = true
     }
 
@@ -31,6 +40,7 @@ object OpCancel {
             depth = 0
             armed = false
             requested = false
+            progress = -1f
         }
     }
 }
