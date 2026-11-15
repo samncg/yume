@@ -213,6 +213,8 @@ fun GlassToolCapsule(
  */
 @Composable
 fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f) {
+    // Shorter sliders on a phone, so the rail covers less of the canvas.
+    val railSliderH = if (isCompact()) 104.dp else 150.dp
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("yume_ui", 0) }
     var locked by remember { mutableStateOf(prefs.getBoolean("rail_locked", false)) }
@@ -342,7 +344,7 @@ fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f
                     label = "Size",
                     valueText = "${state.brushSize.roundToInt()} px",
                     bubbleOnRight = onRight,
-                    modifier = Modifier.height(150.dp)
+                    modifier = Modifier.height(railSliderH)
                 )
                 Spacer(Modifier.height(8.dp))
                 RailSlider(
@@ -351,7 +353,7 @@ fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f
                     label = "Opacity",
                     valueText = formatPercent(state.brushOpacity),
                     bubbleOnRight = onRight,
-                    modifier = Modifier.height(150.dp)
+                    modifier = Modifier.height(railSliderH)
                 )
                 Spacer(Modifier.height(8.dp))
                 RepeatButton(Glyph.Undo, "Undo", state.canUndo, { session.undo() }, { session.redo() }) { session.undo() }

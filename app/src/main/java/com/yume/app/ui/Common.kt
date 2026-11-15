@@ -944,3 +944,17 @@ fun <T> ReorderColumn(
         }
     }
 }
+
+/**
+ * True on a phone-sized window: narrower than 600 dp in the interface's own
+ * scale. Layouts stack, panels go full width and dialogs fit the screen.
+ */
+@Composable
+fun isCompact(): Boolean = compactWidthDp() < 600f
+
+/** The window width in the interface's own dp (Interface size included). */
+@Composable
+fun compactWidthDp(): Float {
+    val w = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
+    return w / (com.yume.app.data.AppSettings.uiScale * UI_SCALE_BASE)
+}

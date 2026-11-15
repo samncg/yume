@@ -14,8 +14,8 @@ android {
         applicationId = "com.yume.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
         // Shown in Settings > About: which commit and when this build was made.
         val gitSha = runCatching {
             providers.exec { commandLine("git", "rev-parse", "--short", "HEAD") }

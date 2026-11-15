@@ -3,13 +3,13 @@
 </p>
 
 <p align="center">
-  <b>A painting studio for Android tablets.</b><br>
+  <b>A painting studio for Android tablets and phones.</b><br>
   Pressure-sensitive brushes, layers, blend modes and canvases up to 16K, made for the pen.
 </p>
 
 <p align="center">
   <a href="../../releases/latest"><img alt="Download" src="https://img.shields.io/badge/download-APK-9E908A?style=for-the-badge&logo=android&logoColor=white"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.1.0-CFC6B8?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.2.0-CFC6B8?style=for-the-badge">
   <img alt="Android 10+" src="https://img.shields.io/badge/Android-10%2B-5B5352?style=for-the-badge&logo=android&logoColor=white">
   <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-Jetpack%20Compose-7B6F6F?style=for-the-badge&logo=kotlin&logoColor=white">
 </p>
@@ -31,6 +31,8 @@ glass, and every gesture, button and default can be changed in Settings.
 - **Goes big.** Sparse, tiled layers keep memory to the painted area, so a 6K
   canvas opens and paints like a small one (12K and 16K are there too, as
   experimental sizes).
+- **Tablet or phone.** On a phone the gallery, toolbar, Brush Studio and every
+  panel rearrange for a narrow screen.
 - **Never loses work.** Everything saves as you go, recovers after a crash, and
   the full undo history comes back when you reopen an artwork.
 
@@ -97,7 +99,8 @@ glass, and every gesture, button and default can be changed in Settings.
 
 Download the APK from the [latest release](../../releases/latest) and open it on
 your tablet (allow installs from your browser or file manager when asked).
-Yume needs Android 10 or newer; a tablet with a stylus is where it shines.
+Yume needs Android 10 or newer. It runs on phones too (the interface rearranges
+itself for a narrow screen), but a tablet with a stylus is where it shines.
 
 > The release APK is signed with a development key, so Android may warn about
 > it, and it installs as a separate app from any Play Store build.

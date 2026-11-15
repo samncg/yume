@@ -172,6 +172,9 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     var headerPx by remember { mutableIntStateOf(0) }
     val headerDp = with(density) { headerPx.toDp() }
+    // Phones: two columns, narrower margins, and the header on two rows.
+    val compact = isCompact()
+    val edge = if (compact) 16.dp else 32.dp
     Box(Modifier.fillMaxSize().background(YumeColors.bg)) {
         if (projects.isEmpty()) {
             Box(
@@ -186,7 +189,7 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        text = "Tap New canvas to pick a size.",
+                        text = if (compact) "Tap New to pick a size." else "Tap New canvas to pick a size.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = YumeColors.textDim
                     )
@@ -195,10 +198,10 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
         } else {
             // Staggered, so every thumbnail keeps its document's shape.
             androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid(
-                columns = androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells.Adaptive(230.dp),
-                contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = headerDp + 20.dp, bottom = 40.dp),
-                horizontalArrangement = Arrangement.spacedBy(28.dp),
-                verticalItemSpacing = 30.dp,
+                columns = androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells.Adaptive(if (compact) 140.dp else 230.dp),
+                contentPadding = PaddingValues(start = edge, end = edge, top = headerDp + 20.dp, bottom = 40.dp),
+                horizontalArrangement = Arrangement.spacedBy(if (compact) 14.dp else 28.dp),
+                verticalItemSpacing = if (compact) 20.dp else 30.dp,
                 modifier = Modifier
                     .fillMaxSize()
                     .navigationBarsPadding()
@@ -241,9 +244,49 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                 .fillMaxWidth()
                 .onSizeChanged { headerPx = it.height }
                 .statusBarsPadding()
-                .padding(horizontal = 32.dp)
+                .padding(horizontal = edge)
         ) {
-            Spacer(Modifier.height(28.dp))
+            Spacer(Modifier.height(if (compact) 16.dp else 28.dp))
+            if (compact) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        androidx.compose.foundation.Image(
+                            bitmap = androidx.compose.ui.graphics.ImageBitmap.imageResource(com.yume.app.R.drawable.yume_banner),
+                            contentDescription = "Yume",
+                            filterQuality = androidx.compose.ui.graphics.FilterQuality.None,
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                            modifier = Modifier.height(30.dp)
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = galleryNote ?: when (projects.size) {
+                                0 -> "No artworks yet"
+                                1 -> "1 artwork"
+                                else -> "${projects.size} artworks"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = YumeColors.textDim
+                        )
+                    }
+                    PressableRow(onClick = { showNewDialog = true }) {
+                        GlyphIcon(Glyph.Plus, YumeColors.text, size = 16.dp)
+                        Spacer(Modifier.width(6.dp))
+                        Text("New", style = MaterialTheme.typography.labelLarge, color = YumeColors.text)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PressableRow(onClick = { GuideHost.open = true }) {
+                        Text("Guide", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
+                    }
+                    PressableRow(onClick = { SettingsHost.open = true }) {
+                        Text("Settings", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
+                    }
+                    PressableRow(onClick = { restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream")) }) {
+                        Text("Restore…", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
+                    }
+                }
+            } else
             Row(verticalAlignment = Alignment.Bottom) {
                 Column {
                     androidx.compose.foundation.Image(

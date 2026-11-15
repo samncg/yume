@@ -850,12 +850,21 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
     // A constant height: switching brushes or opening "More settings" never
     // makes the panel jump.
     val config = androidx.compose.ui.platform.LocalConfiguration.current
-    val screenW = config.screenWidthDp
-    val panelH = (config.screenHeightDp - 130).coerceIn(360, 720)
+    val scale = com.yume.app.data.AppSettings.uiScale * UI_SCALE_BASE
+    val screenW = (config.screenWidthDp / scale).toInt()
+    val screenH = (config.screenHeightDp / scale).toInt()
+    // Phones: one pane at a time, switched at the top.
+    val compact = isCompact()
+    var pane by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val panelH = (screenH - if (compact) 170 else 130).coerceIn(360, if (compact) 900 else 720)
     PanelCard(Modifier.width(minOf(780, screenW - 24).dp).height(panelH.dp)) {
         PanelHeader("Brush Studio", onClose)
+        if (compact) {
+            SegmentedRow(listOf("Brushes", "Settings"), pane, { pane = it })
+            Spacer(Modifier.height(10.dp))
+        }
         Row(Modifier.weight(1f)) {
-        Column(Modifier.width(336.dp)) {
+        if (!compact || pane == 0) Column(if (compact) Modifier.weight(1f) else Modifier.width(336.dp)) {
         SegmentedRow(
             options = listOf("Brush", "Eraser", "Smudge"),
             selectedIndex = when (state.category) {
@@ -949,8 +958,8 @@ fun BrushPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
         ScrollGutter(gridScroll, Modifier.width(26.dp).fillMaxHeight())
         }
         }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
+        if (!compact) Spacer(Modifier.width(10.dp))
+        if (!compact || pane == 1) Column(Modifier.weight(1f)) {
         if (preset != null) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
