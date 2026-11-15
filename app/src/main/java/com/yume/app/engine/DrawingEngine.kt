@@ -84,12 +84,16 @@ class DrawingEngine(val width: Int, val height: Int) {
     /** Strokes painted in this document over its lifetime (shown in the gallery). */
     @Volatile var strokeCount: Long = 0L
 
+    /** Time spent working on the document (between inputs, pauses over 2 min left out). */
+    @Volatile var activeMs: Long = 0L
+
     /** Document settings beyond the core manifest, as one JSON object. */
     fun extrasJson(): String = org.json.JSONObject().apply {
         put("guides", guides.toJson())
         put("radial", symmetryRadial)
         put("mirror", symmetryMirror)
         put("strokes", strokeCount)
+        put("timeMs", activeMs)
     }.toString()
 
     fun loadExtras(json: String?) {
@@ -99,6 +103,7 @@ class DrawingEngine(val width: Int, val height: Int) {
         symmetryRadial = o.optInt("radial", 0).let { if (it < 2) 0 else it.coerceAtMost(32) }
         symmetryMirror = o.optBoolean("mirror", false)
         strokeCount = o.optLong("strokes", 0L).coerceAtLeast(0L)
+        activeMs = o.optLong("timeMs", 0L).coerceAtLeast(0L)
     }
 
     /** When set, only this layer is composited ("isolate layer"). */
@@ -1240,6 +1245,37 @@ class DrawingEngine(val width: Int, val height: Int) {
         c.restore()
     }
 
+    /**
+     * Over a drawn mip: the parts whose mip tiles are still out of date (a
+     * stroke being painted), straight from the full-resolution composite, so
+     * new paint shows at once instead of when the mip catches up. Only
+     * regions whose composite tiles are in memory, and at most [maxTiles]
+     * composite tiles per frame; the rest keep the mip until it is redone.
+     */
+    fun drawMipPending(c: Canvas, viewport: Rect, maxTiles: Int = 192) {
+        val st = mipTiles ?: return
+        val cst = compositeTiles ?: return
+        if (mipDirtyKeys.isEmpty()) return
+        val span = st.tileSize * mipScale
+        val cts = cst.tileSize
+        var budget = maxTiles
+        val r = Rect()
+        for (k in mipDirtyKeys) {
+            val mtx = (k shr 32).toInt()
+            val mty = k.toInt()
+            r.set(mtx * span, mty * span, min(width, mtx * span + span), min(height, mty * span + span))
+            if (!r.intersect(viewport)) continue
+            val tiles = ((r.width() + cts - 1) / cts + 1) * ((r.height() + cts - 1) / cts + 1)
+            if (tiles > budget) break
+            if (cst.hasEvictedIn(r)) continue
+            budget -= tiles
+            c.save()
+            c.clipRect(r)
+            drawComposite(c, r)
+            c.restore()
+        }
+    }
+
     private fun mipPatchBitmap(span: Int): Bitmap {
         mipPatch?.let { if (it.width == span && it.height == span) return it }
         mipPatch?.recycle()
@@ -1663,7 +1699,21 @@ class DrawingEngine(val width: Int, val height: Int) {
         bufferOrigin(bc, rect)
         bc.clipRect(rect)
         bc.drawColor(0, BlendMode.CLEAR)
-        if (clipped) {
+        if (clipped && layer.blend != LayerBlend.Normal) {
+            // A blend mode applies to the layer's own pixels only: keep the
+            // layer where the base has alpha (DST_IN), without the base's
+            // pixels in the buffer (blending those would blend the base with
+            // itself, e.g. a clipped Overlay darkening the whole base).
+            drawStoreInto(bc, layer.tiles, rect, null)
+            maskPaint.reset()
+            maskPaint.isFilterBitmap = true
+            maskPaint.blendMode = BlendMode.DST_IN
+            // Through a save-layer: a sparse base skips its empty tiles, which
+            // must count as transparent here.
+            val sl = bc.saveLayer(null, maskPaint)
+            clipBase!!.drawInto(bc, null)
+            bc.restoreToCount(sl)
+        } else if (clipped) {
             // Confine the layer's colour to the alpha of the layer below: lay
             // down the base, then paint the layer with SRC_ATOP so only pixels
             // the base covers survive.

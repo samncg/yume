@@ -173,7 +173,7 @@ fun GlassToolCapsule(
                     size = BUTTON,
                     selected = item.active,
                     selectedTint = YumeColors.text,
-                    selectedBg = Color(0x26FFFFFF),
+                    selectedBg = YumeColors.ink.copy(alpha = 0x26 / 255f),
                     label = item.label
                 )
             }
@@ -199,17 +199,8 @@ fun GlassToolCapsule(
                         scaleX = s
                         scaleY = s * (1f - 0.16f * stretch.coerceAtMost(1f))
                     }
-                    .drawBackdrop(
-                        backdrop = layer,
-                        shape = { androidx.compose.foundation.shape.RoundedCornerShape(50) },
-                        effects = {
-                            lens(
-                                16.dp.toPx(), 32.dp.toPx(),
-                                depthEffect = true, chromaticAberration = true
-                            )
-                        },
-                        onDrawSurface = { }
-                    )
+                    // A soft pill behind the selected tool.
+                    .background(YumeColors.ink.copy(alpha = 0.16f), androidx.compose.foundation.shape.RoundedCornerShape(50))
             )
         }
     }
@@ -321,7 +312,7 @@ fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f
                         .width(22.dp)
                         .height(4.dp)
                         .clip(RoundedCornerShape(2.dp))
-                        .background(if (locked) Color(0x33FFFFFF) else Color(0x80FFFFFF))
+                        .background(if (locked) YumeColors.ink.copy(alpha = 0x33 / 255f) else YumeColors.ink.copy(alpha = 0x80 / 255f))
                 )
             }
             if (minimized) {

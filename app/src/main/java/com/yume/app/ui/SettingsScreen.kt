@@ -118,7 +118,7 @@ fun SettingsScreen(onClose: () -> Unit) {
                     }
                 }
                 Spacer(Modifier.height(12.dp))
-                Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                GutteredColumn(Modifier.weight(1f)) {
                     when (tab) {
                         0 -> AppearanceTab()
                         1 -> DrawingTab()
@@ -245,7 +245,7 @@ private fun AppearanceTab() {
                         .size(56.dp, 34.dp)
                         .clip(RoundedCornerShape(7.dp))
                         .background(t.bg)
-                        .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(7.dp))
+                        .border(1.dp, YumeColors.ink.copy(alpha = 0x33 / 255f), RoundedCornerShape(7.dp))
                         .padding(5.dp),
                     horizontalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
@@ -283,8 +283,8 @@ private fun AppearanceTab() {
         onChange = { AppSettings.setUiScaleValue((it * 20).roundToInt() / 20f) },
         label = "Interface size",
         valueLabel = "${(AppSettings.uiScale * 100).roundToInt()}%",
-        min = 0.85f,
-        max = 1.15f
+        min = 0.6f,
+        max = 1.6f
     )
 }
 
@@ -358,7 +358,7 @@ private fun GesturesTab() {
 @Composable
 private fun RingSettings() {
     SectionLabel("Shortcut ring")
-    Hint("Clockwise from the top. Drag the handle (or long-press a row) to reorder. With the ring open under two fingers, orbit one finger around the other to point at an item, then lift to choose it.")
+    Hint("Clockwise from the top. Drag the handle (or long-press a row) to reorder. Touch an item to choose it: a new finger chooses on contact, or slide one of the fingers that opened the ring onto an item and lift it.")
     val ring = Customization.ringItems
     ReorderColumn(
         items = ring,
@@ -561,12 +561,54 @@ private fun LayoutTab() {
         onChange = { AppSettings.setUiScaleValue((it * 20).roundToInt() / 20f) },
         label = "Interface size",
         valueLabel = "${(AppSettings.uiScale * 100).roundToInt()}%",
-        min = 0.85f,
-        max = 1.15f
+        min = 0.6f,
+        max = 1.6f
     )
 }
 
 // ------------------------------------------------------------------ Defaults
+
+/** Any colour as the default: saturation / brightness, hue, and hex. */
+@Composable
+private fun DefaultColourPicker() {
+    val c = Customization.defaultColor
+    val hsv = remember(c) { FloatArray(3).also { android.graphics.Color.colorToHSV(c, it) } }
+    // Hue is kept while saturation or brightness is at zero (grey has none).
+    var hue by remember { mutableStateOf(hsv[0]) }
+    fun set(h: Float, s: Float, v: Float) {
+        hue = h
+        Customization.setDefaultColorValue(android.graphics.Color.HSVToColor(floatArrayOf(h, s.coerceIn(0f, 1f), v.coerceIn(0f, 1f))))
+    }
+    Spacer(Modifier.height(10.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier
+                .size(34.dp)
+                .clip(CircleShape)
+                .background(Color(c))
+                .border(1.dp, YumeColors.hairline, CircleShape)
+        )
+        Spacer(Modifier.width(10.dp))
+        var hex by remember(c) { mutableStateOf("%06X".format(c and 0xFFFFFF)) }
+        androidx.compose.material3.OutlinedTextField(
+            value = hex,
+            onValueChange = { t ->
+                val clean = t.uppercase().filter { it in "0123456789ABCDEF" }.take(6)
+                hex = clean
+                if (clean.length == 6) Customization.setDefaultColorValue(0xFF000000.toInt() or clean.toInt(16))
+            },
+            prefix = { Text("#", color = YumeColors.textDim) },
+            singleLine = true,
+            label = { Text("Hex") },
+            modifier = Modifier.width(150.dp)
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+    SvSquare(hue, hsv[1], hsv[2], 140.dp) { s, v -> set(hue, s, v) }
+    Spacer(Modifier.height(8.dp))
+    HueBar(hue) { h -> set(h, if (hsv[1] < 0.01f) 1f else hsv[1], if (hsv[2] < 0.01f) 1f else hsv[2]) }
+    Spacer(Modifier.height(8.dp))
+}
 
 private val DEFAULT_COLORS = listOf(
     0xFF000000, 0xFF2B2B33, 0xFF6B6B70, 0xFFFFFFFF, 0xFFC0392B, 0xFFE67E22,
@@ -618,12 +660,13 @@ private fun DefaultsTab() {
                     .size(32.dp)
                     .clip(CircleShape)
                     .background(Color(c))
-                    .border(if (selected) 3.dp else 1.dp, if (selected) YumeColors.accent else Color(0x44FFFFFF), CircleShape)
+                    .border(if (selected) 3.dp else 1.dp, if (selected) YumeColors.accent else YumeColors.ink.copy(alpha = 0x44 / 255f), CircleShape)
                     .clickable { Customization.setDefaultColorValue(c) }
             )
         }
     }
     Spacer(Modifier.height(8.dp))
+    DefaultColourPicker()
     YumeSlider(
         value = Customization.defaultAssist,
         onChange = { Customization.setDefaultAssistValue(it) },

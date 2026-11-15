@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -128,7 +129,7 @@ fun Tooltip(text: String, offsetY: Dp) {
             color = YumeColors.text,
             modifier = Modifier
                 .clip(RoundedCornerShape(10.dp))
-                .background(Color(0xF0202026))
+                .background(YumeColors.panelAlt)
                 .padding(horizontal = 10.dp, vertical = 6.dp)
         )
     }
@@ -145,14 +146,35 @@ fun PanelCard(
     val base = modifier
         .glass(corner = 24f, weight = GlassWeight.Heavy)
         .clip(RoundedCornerShape(24.dp))
-    Column(
-        modifier = if (scrollable) {
-            base.padding(14.dp).verticalScroll(rememberScrollState())
-        } else {
-            base.padding(14.dp)
-        },
-        content = content
-    )
+    if (scrollable) {
+        GutteredColumn(base.padding(start = 14.dp, top = 14.dp, bottom = 14.dp, end = 4.dp), content = content)
+    } else {
+        Column(modifier = base.padding(14.dp), content = content)
+    }
+}
+
+/**
+ * A scrolling column with a scrollbar strip on its right (see
+ * [ScrollGutter]): a drag there scrolls and never touches a control.
+ */
+@Composable
+fun GutteredColumn(
+    modifier: Modifier = Modifier,
+    state: androidx.compose.foundation.ScrollState = rememberScrollState(),
+    verticalArrangement: Arrangement.Vertical = Arrangement.Top,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Box(modifier) {
+        Column(
+            Modifier.padding(end = 26.dp).verticalScroll(state),
+            verticalArrangement = verticalArrangement,
+            content = content
+        )
+        ScrollGutter(
+            state,
+            Modifier.matchParentSize().wrapContentWidth(Alignment.End).width(22.dp)
+        )
+    }
 }
 
 @Composable
@@ -375,7 +397,7 @@ fun RailSlider(
                 cornerRadius = CornerRadius(r, r)
             )
             drawRoundRect(
-                color = Color(0x1FFFFFFF),
+                color = YumeColors.ink.copy(alpha = 0x1F / 255f),
                 size = size,
                 cornerRadius = CornerRadius(r, r),
                 style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx())
@@ -547,7 +569,7 @@ fun ColorSwatch(
             .background(Color(color))
             .border(
                 width = if (selected) 2.dp else 1.dp,
-                color = if (selected) YumeColors.accent else Color(0x33FFFFFF),
+                color = if (selected) YumeColors.accent else YumeColors.ink.copy(alpha = 0x33 / 255f),
                 shape = CircleShape
             )
             .clickable(onClick = onClick)
@@ -843,9 +865,9 @@ fun ScrollGutter(state: androidx.compose.foundation.ScrollState, modifier: Modif
         val y = inset + (track - thumbH) * state.value / state.maxValue
         val w = (if (dragging) 8.dp else 5.dp).toPx()
         val x = size.width / 2f - w / 2f
-        drawRoundRect(Color(0x1AFFFFFF), Offset(x, inset), Size(w, track), CornerRadius(w / 2f, w / 2f))
+        drawRoundRect(YumeColors.ink.copy(alpha = 0x1A / 255f), Offset(x, inset), Size(w, track), CornerRadius(w / 2f, w / 2f))
         drawRoundRect(
-            if (dragging || state.isScrollInProgress) Color(0xCCFFFFFF) else Color(0x73FFFFFF),
+            if (dragging || state.isScrollInProgress) YumeColors.ink.copy(alpha = 0xCC / 255f) else YumeColors.ink.copy(alpha = 0x73 / 255f),
             Offset(x, y), Size(w, thumbH), CornerRadius(w / 2f, w / 2f)
         )
     }

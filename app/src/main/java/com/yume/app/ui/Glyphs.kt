@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -41,6 +42,19 @@ fun GlyphIcon(
     size: Dp = 22.dp,
     strokeScale: Float = 1f
 ) {
+    // Material Symbols where they exist; the app's own drawing otherwise.
+    val vector = glyph.material()
+    if (vector != null) {
+        androidx.compose.foundation.Image(
+            painter = androidx.compose.ui.graphics.vector.rememberVectorPainter(vector),
+            contentDescription = null,
+            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(tint),
+            modifier = modifier
+                .size(size)
+                .then(if (glyph == Glyph.FlipV) Modifier.rotate(90f) else Modifier)
+        )
+        return
+    }
     Canvas(modifier.size(size)) {
         val s = this.size.minDimension / 24f
         scale(s, s, pivot = Offset.Zero) {

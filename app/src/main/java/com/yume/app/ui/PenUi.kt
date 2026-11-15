@@ -21,6 +21,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -70,18 +74,11 @@ internal fun ringFace(a: com.yume.app.data.Customization.Action): Pair<Glyph?, S
     else -> null to a.label.take(5)
 }
 
-/** The ring item [deg] (screen degrees, 0 = right, clockwise) points at, of [n] starting at the top. */
-private fun ringIndex(deg: Float, n: Int): Int {
-    val step = 360f / n
-    val t = ((deg + 90f) % 360f + 360f) % 360f
-    return (t / step).roundToInt() % n
-}
-
 /**
  * The shortcut ring around the pen tip (or between two held fingers), like
- * Mi Canvas. Its items are the user's (Settings, Gestures). Tap one; or,
- * with the two fingers still down, orbit one around the other to point at an
- * item and lift to choose it. Tap anywhere else to close.
+ * Mi Canvas. Its items are the user's (Settings, Gestures). Touch one to
+ * choose it: a new finger chooses on contact; a finger that opened the ring
+ * slides onto an item and chooses it when lifted. Tap anywhere else to close.
  */
 @Composable
 fun PenShortcutMenu(
@@ -103,17 +100,26 @@ fun PenShortcutMenu(
         onDismiss()
     }
     val n = actions.size
-    val aim = PenGestures.ringAim
-    val aimed: Int? = if (aim != null && n > 0) ringIndex(aim, n) else null
+    // Item centres in the ring's coordinates, filled in during layout below.
+    val centres = remember { HashMap<Int, Offset>() }
+    var hitRadius by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    val fingers = PenGestures.ringFingers
+    val origin = PenGestures.ringOrigin
+    val aimed: Int? = fingers.firstNotNullOfOrNull { f ->
+        val p = f + origin
+        centres.entries.filter { it.key < n }.minByOrNull { (it.value - p).getDistance() }
+            ?.takeIf { (it.value - p).getDistance() <= hitRadius }?.key
+    }
     val currentActions = androidx.compose.runtime.rememberUpdatedState(actions)
+    val currentAimed = androidx.compose.runtime.rememberUpdatedState(aimed)
     val currentDismiss = androidx.compose.runtime.rememberUpdatedState(onDismiss)
     val currentColor = androidx.compose.runtime.rememberUpdatedState(onColor)
     androidx.compose.runtime.DisposableEffect(Unit) {
         PenGestures.onRingRelease = {
-            val a = PenGestures.ringAim
+            val i = currentAimed.value
             val list = currentActions.value
-            if (a != null && list.isNotEmpty()) {
-                val action = list[ringIndex(a, list.size)]
+            if (i != null && i in list.indices) {
+                val action = list[i]
                 if (action == com.yume.app.data.Customization.Action.Colours) currentColor.value()
                 else com.yume.app.data.Customization.dispatch(action)
                 currentDismiss.value()
@@ -121,7 +127,7 @@ fun PenShortcutMenu(
         }
         onDispose {
             PenGestures.onRingRelease = null
-            PenGestures.ringAim = null
+            PenGestures.ringFingers = emptyList()
         }
     }
     BoxWithConstraints(
@@ -136,6 +142,8 @@ fun PenShortcutMenu(
         val radius = with(density) { radiusDp.dp.toPx() }
         val button = with(density) { 50.dp.toPx() }
         val reach = radius + button / 2f + with(density) { 8.dp.toPx() }
+        // A finger anywhere on a button (and a little around it) is on it.
+        hitRadius = button * 0.75f
         // Keep the whole ring on screen.
         val cx = at.x.coerceIn(reach, (constraints.maxWidth - reach).coerceAtLeast(reach))
         val cy = at.y.coerceIn(reach, (constraints.maxHeight - reach).coerceAtLeast(reach))
@@ -161,6 +169,7 @@ fun PenShortcutMenu(
             val hot = aimed == i
             val px = cx + (radius * t * cos(angle)).toFloat() - button / 2f
             val py = cy + (radius * t * sin(angle)).toFloat() - button / 2f
+            centres[i] = Offset(cx + (radius * cos(angle)).toFloat(), cy + (radius * sin(angle)).toFloat())
             val selected = when (action.name) {
                 "Brush" -> state.tool == Tool.Brush
                 "Eraser" -> state.tool == Tool.Eraser
@@ -182,7 +191,18 @@ fun PenShortcutMenu(
                         alpha = t.coerceIn(0f, 1f)
                     }
                     .glass(corner = 25f, weight = GlassWeight.Heavy)
-                    .then(if (hot) Modifier.border(2.dp, YumeColors.accent, CircleShape) else Modifier),
+                    .then(if (hot) Modifier.border(2.dp, YumeColors.accent, CircleShape) else Modifier)
+                    // A finger landing on the item chooses it at once.
+                    .pointerInput(action) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(
+                                requireUnconsumed = false,
+                                pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial
+                            )
+                            down.consume()
+                            run(action)
+                        }
+                    },
                 contentAlignment = Alignment.Center
             ) {
                 when {

@@ -18,7 +18,9 @@ data class YumeTheme(
     val bar: Color,
     val panel: Color,
     val panelAlt: Color,
-    val track: Color
+    val track: Color,
+    /** Light background: dark text and a pale glass veil. */
+    val light: Boolean = false
 )
 
 /** An accent colour (Settings → Appearance). */
@@ -31,7 +33,10 @@ object YumeThemes {
         YumeTheme("oled", "OLED black", Color(0xFF000000), Color(0xFF080808), Color(0xF50E0E10), Color(0xFF19191C), Color(0xFF26262A)),
         YumeTheme("espresso", "Espresso", Color(0xFF100D0B), Color(0xFF191411), Color(0xF51E1815), Color(0xFF2A221D), Color(0xFF382E27)),
         YumeTheme("forest", "Forest", Color(0xFF0A0F0C), Color(0xFF111813), Color(0xF5151E18), Color(0xFF1E2A22), Color(0xFF29382E)),
-        YumeTheme("slate", "Slate", Color(0xFF1A1C21), Color(0xFF22252B), Color(0xF5282B32), Color(0xFF32363E), Color(0xFF41464F))
+        YumeTheme("slate", "Slate", Color(0xFF1A1C21), Color(0xFF22252B), Color(0xF5282B32), Color(0xFF32363E), Color(0xFF41464F)),
+        YumeTheme("paper", "Paper", Color(0xFFF5F4F1), Color(0xFFECEAE6), Color(0xF5FFFFFF), Color(0xFFEAE8E4), Color(0xFFD6D3CD), light = true),
+        YumeTheme("cloud", "Cloud", Color(0xFFF1F3F7), Color(0xFFE6EAF0), Color(0xF5FCFDFF), Color(0xFFE3E8EF), Color(0xFFCBD3DE), light = true),
+        YumeTheme("sand", "Sand", Color(0xFFF5EEE3), Color(0xFFEDE4D6), Color(0xF5FFFBF5), Color(0xFFEBE1D2), Color(0xFFD7C9B4), light = true)
     )
 
     val accents = listOf(
@@ -60,9 +65,12 @@ object YumeColors {
     val panel: Color get() = YumeThemes.current.panel
     val panelAlt: Color get() = YumeThemes.current.panelAlt
     val track: Color get() = YumeThemes.current.track
-    val hairline = Color(0x1FFFFFFF)
-    val text = Color(0xFFEDEDF1)
-    val textDim = Color(0xFF8C8C96)
+    val light: Boolean get() = YumeThemes.current.light
+    val hairline: Color get() = if (light) Color(0x22000000) else Color(0x1FFFFFFF)
+    val text: Color get() = if (light) Color(0xFF1B1B21) else Color(0xFFEDEDF1)
+    val textDim: Color get() = if (light) Color(0xFF6A6A74) else Color(0xFF8C8C96)
+    /** The colour of strokes, tracks and veils drawn over the UI: white on dark themes, black on light. */
+    val ink: Color get() = if (light) Color(0xFF000000) else Color(0xFFFFFFFF)
     val accent: Color get() = YumeThemes.accent
     val accentSoft: Color get() = YumeThemes.accent.copy(alpha = 0.2f)
     val danger = Color(0xFFC64F4F)
@@ -109,7 +117,19 @@ private val YumeType = Typography(
 
 @Composable
 fun YumeTheme(content: @Composable () -> Unit) {
-    val scheme = darkColorScheme(
+    val scheme = if (YumeColors.light) androidx.compose.material3.lightColorScheme(
+        primary = YumeColors.accent,
+        onPrimary = Color(0xFF1A1206),
+        secondary = YumeColors.accent,
+        background = YumeColors.bg,
+        onBackground = YumeColors.text,
+        surface = YumeColors.panel,
+        onSurface = YumeColors.text,
+        surfaceVariant = YumeColors.panelAlt,
+        onSurfaceVariant = YumeColors.textDim,
+        outline = YumeColors.hairline,
+        error = YumeColors.danger
+    ) else darkColorScheme(
         primary = YumeColors.accent,
         onPrimary = Color(0xFF1A1206),
         secondary = YumeColors.accent,

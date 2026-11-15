@@ -13,11 +13,6 @@ enum class EditKind {
     LayerClear, LayerOrder, LayerFill, LayerMask, Opacity, Transform, Adjust, Import
 }
 
-/** Structural kinds that neither remove a layer nor rewrite its pixels. */
-private val EditKind.isAdditiveStructure: Boolean
-    get() = this == EditKind.LayerAdd ||
-        this == EditKind.LayerDuplicate ||
-        this == EditKind.LayerOrder
 
 /**
  * Undo/redo entries.
@@ -99,8 +94,8 @@ class PixelAction(
 }
 
 class LayersAction(
-    private val before: DocumentState,
-    private val after: DocumentState,
+    internal val before: DocumentState,
+    internal val after: DocumentState,
     override val label: String,
     override val kind: EditKind
 ) : HistoryAction() {
@@ -313,31 +308,30 @@ class History(
      * Destructive structure (delete, merge, clear) still ends the span, because
      * the patches before it may no longer apply meaningfully.
      */
-    fun persistableRun(): Pair<List<HistoryAction>, Int> {
-        val all = ArrayList<HistoryAction>(undoStack.size + redoStack.size)
-        all.addAll(undoStack)
-        for (i in redoStack.indices.reversed()) all.add(redoStack[i])
-        var start = all.size
-        while (start > 0) {
-            val action = all[start - 1]
-            if (action is PixelAction || action is TilePixelAction) {
-                start--
-            } else if (action is LayersAction && action.kind.isAdditiveStructure) {
-                start--
-            } else {
-                break
-            }
+    fun persistableRun(): Pair<List<HistoryAction>, Int> = persistableRun { action ->
+        action is PixelAction || action is TilePixelAction
+    }
+
+    /**
+     * The longest stretch of history around the current state that
+     * [canPersist] accepts: back through the undo stack to the first step it
+     * refuses, and forward through the redo stack likewise (later redo steps
+     * are dropped, the undo side is kept). Returns the run (oldest first) and
+     * how many of its steps are applied.
+     */
+    fun persistableRun(canPersist: (HistoryAction) -> Boolean): Pair<List<HistoryAction>, Int> {
+        val undo = undoStack.toList()
+        var start = undo.size
+        while (start > 0 && canPersist(undo[start - 1])) start--
+        val run = ArrayList<HistoryAction>(undo.size - start + redoStack.size)
+        for (i in start until undo.size) run.add(undo[i])
+        val applied = run.size
+        val redo = redoStack.toList()
+        for (i in redo.indices.reversed()) {
+            if (!canPersist(redo[i])) break
+            run.add(redo[i])
         }
-        val run = ArrayList<HistoryAction>()
-        var appliedWithinRun = 0
-        for (i in start until all.size) {
-            val action = all[i]
-            if (action is PixelAction || action is TilePixelAction) {
-                run.add(action)
-                if (i < undoStack.size) appliedWithinRun++
-            }
-        }
-        return run to appliedWithinRun
+        return run to applied
     }
 
     /** Rebuilds the stacks from persisted edits (oldest first). */

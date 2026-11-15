@@ -159,18 +159,18 @@ class EditorController(
                 }
             }
 
-            // Re-attach the previous session's reversible edits. After a journal
-            // recovery the persisted history describes the last FULL save, not
-            // the recovered pixels, so it is not restored.
             if (!recovered) {
                 _session.value?.engine?.let { e ->
                     store.markLoaded(projectId, e.layers.map { it.id to it.revision })
                 }
-                runCatching { store.loadHistory(projectId) }
-                    .getOrNull()
-                    ?.takeIf { it.entries.isNotEmpty() }
-                    ?.let { _session.value?.restoreHistory(it) }
             }
+            // Re-attach the previous session's undo history. It is written with
+            // every save and every autosave journal, stamped with the pixel
+            // state it belongs to, so it comes back after a crash too.
+            runCatching { store.loadHistory(projectId, store.historyStamp(projectId)) }
+                .getOrNull()
+                ?.takeIf { it.entries.isNotEmpty() }
+                ?.let { _session.value?.restoreHistory(it, groupIdMap) }
             // Allocate the dab scratch before the first gesture so the first
             // stroke does not pay for the allocation inside its first frame.
             _session.value?.warmup()
@@ -242,12 +242,16 @@ class EditorController(
             saveMutex.withLock {
                 var batch: com.yume.app.engine.JournalBatch? = null
                 var bigger = false
+                var hist: com.yume.app.engine.PersistedHistory? = null
+                val saved = store.savedHistoryIds(projectId)
                 val ran = session.runOnOwner {
                     batch = session.collectJournal(
                         isNew = { layerId, mask -> store.baseOf(projectId, layerId, mask) == null },
                         maxBytes = JOURNAL_MAX_BYTES
                     )
                     if (batch == null) bigger = true
+                    // The undo history of exactly these pixels.
+                    else hist = runCatching { session.historyForDiskNow(saved) }.getOrNull()
                 }
                 val b = batch
                 if (!ran || b == null) {
@@ -259,7 +263,10 @@ class EditorController(
                     // save can persist them now.
                     journalBroken = true
                     _message.value = "Autosave journal failed (${it.message}); saving in full"
+                }.onSuccess {
+                    hist?.let { h -> runCatching { store.saveHistory(projectId, h, store.historyStamp(projectId)) } }
                 }
+                hist?.entries?.forEach { e -> e.tiles?.forEach { t -> t.before?.recycle(); t.after?.recycle() } }
             }
             if (journalBroken) saveNow(session)
         }
@@ -309,7 +316,8 @@ class EditorController(
         // Undo history is read from the render thread: take it before the
         // (possibly long, at 8K) layer writes, while the editor is certainly
         // alive; written after the document.
-        val historyToSave = runCatching { session.historyForDiskBlocking() }.getOrNull()
+        var historyToSave: com.yume.app.engine.PersistedHistory? = null
+        val savedIds = store.savedHistoryIds(projectId)
         // Take the pending journal changes in the same owner turn as the
         // snapshot: a change made after it stays pending for the next autosave.
         var snapshot: com.yume.app.engine.DocumentSnapshot? = null
@@ -317,6 +325,8 @@ class EditorController(
         if (!session.runOnOwner {
                 taken = session.journalTakeAll()
                 snapshot = session.snapshotNow()
+                // The undo history of exactly this snapshot.
+                historyToSave = runCatching { session.historyForDiskNow(savedIds) }.getOrNull()
             }
         ) return
         val snap = snapshot ?: return
@@ -336,7 +346,7 @@ class EditorController(
             _message.value = it
         }
         historyToSave?.let { history ->
-            runCatching { store.saveHistory(projectId, history) }
+            runCatching { if (saved) store.saveHistory(projectId, history, store.historyStamp(projectId)) }
             // The crops were copies for this write.
             history.entries.forEach { e -> e.tiles?.forEach { t -> t.before?.recycle(); t.after?.recycle() } }
         }

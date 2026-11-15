@@ -1,5 +1,18 @@
 package com.yume.app.ui
 
+import androidx.compose.material.icons.rounded.ColorLens
+import androidx.compose.material.icons.rounded.InvertColors
+import androidx.compose.material.icons.rounded.LightMode
+import androidx.compose.material.icons.rounded.BlurOn
+import androidx.compose.material.icons.rounded.Grain
+import androidx.compose.material.icons.rounded.CenterFocusStrong
+import androidx.compose.material.icons.rounded.BlurLinear
+import androidx.compose.material.icons.rounded.ShowChart
+import androidx.compose.material.icons.rounded.BarChart
+import androidx.compose.material.icons.rounded.Balance
+import androidx.compose.material.icons.rounded.Gradient
+import androidx.compose.material.icons.rounded.Filter
+import androidx.compose.material.icons.rounded.Contrast
 import androidx.compose.ui.draw.drawBehind
 
 import androidx.compose.foundation.layout.offset
@@ -275,10 +288,8 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
 
         // A plain scrolling column: a lazy list re-anchors its scroll on the
         // first visible key, which made the list jump when that row moved.
-        Column(
-            Modifier
-                .heightIn(max = 300.dp)
-                .verticalScroll(androidx.compose.foundation.rememberScrollState()),
+        GutteredColumn(
+            Modifier.heightIn(max = 300.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
             rows.forEachIndexed { index, row ->
@@ -691,7 +702,7 @@ private fun GroupRow(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(11.dp))
-            .background(if (active) YumeColors.accentSoft else Color(0x14FFFFFF))
+            .background(if (active) YumeColors.accentSoft else YumeColors.ink.copy(alpha = 0x14 / 255f))
             .clickable(onClick = onSelect)
             .padding(horizontal = 3.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1242,7 +1253,7 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
         floatArrayOf(hue.coerceIn(0f, 360f), sat.coerceIn(0f, 1f), value.coerceIn(0f, 1f))
     )
 
-    PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
+    PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
         PanelHeader("Color", onClose)
         SegmentedRow(
             options = ColorMode.entries.map { it.label },
@@ -1536,7 +1547,7 @@ private fun PaletteSection(current: Int, onPick: (Int) -> Unit) {
                 color = if (on) YumeColors.bg else YumeColors.text,
                 modifier = Modifier
                     .clip(RoundedCornerShape(50))
-                    .background(if (on) YumeColors.text else Color(0x1FFFFFFF))
+                    .background(if (on) YumeColors.text else YumeColors.ink.copy(alpha = 0x1F / 255f))
                     .clickable { store.select(p.id) }
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             )
@@ -1547,7 +1558,7 @@ private fun PaletteSection(current: Int, onPick: (Int) -> Unit) {
             color = YumeColors.textDim,
             modifier = Modifier
                 .clip(RoundedCornerShape(50))
-                .background(Color(0x14FFFFFF))
+                .background(YumeColors.ink.copy(alpha = 0x14 / 255f))
                 .clickable { store.create(current) }
                 .padding(horizontal = 12.dp, vertical = 6.dp)
         )
@@ -1572,7 +1583,7 @@ private fun PaletteSection(current: Int, onPick: (Int) -> Unit) {
             Modifier
                 .size(27.dp)
                 .clip(CircleShape)
-                .border(1.5.dp, Color(0x55FFFFFF), CircleShape)
+                .border(1.5.dp, YumeColors.ink.copy(alpha = 0x55 / 255f), CircleShape)
                 .clickable { store.addColor(active.id, current) },
             contentAlignment = Alignment.Center
         ) {
@@ -1602,7 +1613,7 @@ private fun PaletteSection(current: Int, onPick: (Int) -> Unit) {
 }
 
 @Composable
-private fun SvSquare(
+internal fun SvSquare(
     hue: Float,
     sat: Float,
     value: Float,
@@ -1645,7 +1656,7 @@ private fun SvSquare(
 }
 
 @Composable
-private fun HueBar(hue: Float, onChange: (Float) -> Unit) {
+internal fun HueBar(hue: Float, onChange: (Float) -> Unit) {
     val spectrum = listOf(
         Color(0xFFFF0000), Color(0xFFFFFF00), Color(0xFF00FF00),
         Color(0xFF00FFFF), Color(0xFF0000FF), Color(0xFFFF00FF), Color(0xFFFF0000)
@@ -1722,11 +1733,22 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                                 .padding(vertical = 9.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = item.label,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (selected) YumeColors.accent else YumeColors.text
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                androidx.compose.foundation.Image(
+                                    painter = androidx.compose.ui.graphics.vector.rememberVectorPainter(adjustIcon(item)),
+                                    contentDescription = null,
+                                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(
+                                        if (selected) YumeColors.accent else YumeColors.textDim
+                                    ),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = item.label,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (selected) YumeColors.accent else YumeColors.text
+                                )
+                            }
                         }
                     }
                     if (rowItems.size == 1) Spacer(Modifier.weight(1f))
@@ -1972,7 +1994,7 @@ private fun HistoryRow(entry: HistoryEntry, onJump: () -> Unit, onDelete: () -> 
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .background(if (entry.applied) Color.Transparent else Color(0x11FFFFFF))
+            .background(if (entry.applied) Color.Transparent else YumeColors.ink.copy(alpha = 0x11 / 255f))
             .clickable(onClick = onJump)
             .padding(start = 8.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1983,7 +2005,7 @@ private fun HistoryRow(entry: HistoryEntry, onJump: () -> Unit, onDelete: () -> 
                     .size(11.dp)
                     .clip(CircleShape)
                     .background(Color(entry.swatch))
-                    .border(1.dp, Color(0x55FFFFFF), CircleShape)
+                    .border(1.dp, YumeColors.ink.copy(alpha = 0x55 / 255f), CircleShape)
             )
             Spacer(Modifier.width(7.dp))
         }
@@ -2485,7 +2507,8 @@ fun ActionsPanel(
     PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
         PanelHeader("Actions", onClose)
         Text(
-            text = "${state.width} × ${state.height} px   ·   ${(state.zoom * 100).roundToInt()}%   ·   ${state.strokeCount} strokes",
+            text = "${state.width} × ${state.height} px   ·   ${(state.zoom * 100).roundToInt()}%   ·   ${state.strokeCount} strokes   ·   " +
+                "${com.yume.app.engine.formatTimeSpent(session.engine.activeMs)} spent",
             style = MaterialTheme.typography.bodySmall,
             color = YumeColors.textDim
         )
@@ -2578,4 +2601,24 @@ fun ActionsPanel(
 internal fun formatDuration(seconds: Float): String {
     val s = seconds.roundToInt().coerceAtLeast(1)
     return if (s < 60) "$s s" else "${s / 60} min ${(s % 60) / 10 * 10} s"
+}
+
+/** The icon beside each adjustment's name. */
+private fun adjustIcon(k: AdjustmentKind): androidx.compose.ui.graphics.vector.ImageVector {
+    val i = androidx.compose.material.icons.Icons.Rounded
+    return when (k) {
+        AdjustmentKind.Hue -> i.ColorLens
+        AdjustmentKind.Saturation -> i.InvertColors
+        AdjustmentKind.Brightness -> i.LightMode
+        AdjustmentKind.Blur -> i.BlurOn
+        AdjustmentKind.Noise -> i.Grain
+        AdjustmentKind.Sharpen -> i.CenterFocusStrong
+        AdjustmentKind.MotionBlur -> i.BlurLinear
+        AdjustmentKind.Curves -> i.ShowChart
+        AdjustmentKind.Levels -> i.BarChart
+        AdjustmentKind.ColorBalance -> i.Balance
+        AdjustmentKind.GradientMap -> i.Gradient
+        AdjustmentKind.Posterize -> i.Filter
+        AdjustmentKind.Threshold -> i.Contrast
+    }
 }

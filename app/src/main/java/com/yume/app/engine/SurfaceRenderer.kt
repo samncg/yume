@@ -49,6 +49,8 @@ class SurfaceRenderer(
     private companion object {
         /** Mip refresh time per frame; the rest carries over to the next frames. */
         const val MIP_FRAME_BUDGET_NS = 6_000_000L
+        /** Mip work per frame while a stroke is being painted. */
+        const val MIP_STROKE_BUDGET_NS = 1_000_000L
         /** Flip to true to log frame timing and canvas geometry to logcat. */
         const val DEBUG_STATS = false
 
@@ -354,7 +356,10 @@ class SurfaceRenderer(
                     // touch every visible tile: use the downscaled composite.
                     engine.enableMip()
                     if (engine.hasMipDirty) {
-                        engine.updateMip(MIP_FRAME_BUDGET_NS)
+                        // While painting, the frame's time goes to the stroke:
+                        // the fresh paint is drawn from the full-resolution
+                        // composite below, and the mip catches up afterwards.
+                        engine.updateMip(if (session.strokeInProgress) MIP_STROKE_BUDGET_NS else MIP_FRAME_BUDGET_NS)
                         mipCarry = engine.hasMipDirty
                     }
                     if (com.yume.app.BuildConfig.DEBUG) {
@@ -364,8 +369,10 @@ class SurfaceRenderer(
                             android.util.Log.i("YumeMip", "zoomed out scale=${view.scale} carry=$mipCarry ${engine.mipDebug()}")
                         }
                     }
-                    if (engine.mipDrawable()) engine.drawMip(canvas)
-                    else engine.drawComposite(canvas, rect)
+                    if (engine.mipDrawable()) {
+                        engine.drawMip(canvas)
+                        engine.drawMipPending(canvas, rect)
+                    } else engine.drawComposite(canvas, rect)
                 } else {
                     engine.drawComposite(canvas, rect)
                     // Warm the visible tiles (plus a tile of margin) of the layer
@@ -714,10 +721,10 @@ class SurfaceRenderer(
 
     private fun drawHover(canvas: Canvas, matrix: Matrix) {
         if (session.transformActive) return
-        // While the pen paints, the ring sits on the newest dab and has its
-        // size, so it follows pressure, tilt and the start taper live.
-        val live = session.liveCursor()
-        if (live == null && !session.hoverVisible) return
+        // While painting there is no cursor at all: only the stroke itself.
+        if (session.liveCursor() != null) return
+        val live: FloatArray? = null
+        if (!session.hoverVisible) return
         val mapped = FloatArray(2)
         val docX = live?.get(0) ?: session.hoverX
         val docY = live?.get(1) ?: session.hoverY
@@ -760,8 +767,8 @@ class SurfaceRenderer(
                 cursorDst.set(-h, -h, h, h)
                 canvas.drawBitmap(dab, null, cursorDst, cursorPaint)
                 canvas.restore()
-                // A shaped tip is its own outline; a round one keeps the ring.
-                if (preset.shapeId.isNotEmpty()) return
+                // The preview is the cursor: no outline ring around it.
+                return
             }
         }
         val radius = max(2.5f, ringSize * 0.5f * session.view.scale)
@@ -779,4 +786,4 @@ class SurfaceRenderer(
 }
 
 /** Input painted per render-loop turn before a frame is drawn (the rest waits a turn). */
-private const val INPUT_BUDGET_NS = 10_000_000L
+private const val INPUT_BUDGET_NS = 12_000_000L

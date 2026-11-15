@@ -106,7 +106,7 @@ private fun CurvesEditor(onLut: (ToneLut) -> Unit) {
             .aspectRatio(1f)
             .clip(RoundedCornerShape(10.dp))
             .background(Color(0xFF17171B))
-            .border(1.dp, Color(0x22FFFFFF), RoundedCornerShape(10.dp))
+            .border(1.dp, YumeColors.ink.copy(alpha = 0x22 / 255f), RoundedCornerShape(10.dp))
             .pointerInput(channel) {
                 // Reacts to the first touch (no drag needed to start) and keeps
                 // the gesture, so the panel does not scroll away under it. A
@@ -183,10 +183,10 @@ private fun CurvesEditor(onLut: (ToneLut) -> Unit) {
             val w = size.width
             val h = size.height
             for (k in 1..3) {
-                drawLine(Color(0x1FFFFFFF), Offset(w * k / 4f, 0f), Offset(w * k / 4f, h), 1f)
-                drawLine(Color(0x1FFFFFFF), Offset(0f, h * k / 4f), Offset(w, h * k / 4f), 1f)
+                drawLine(YumeColors.ink.copy(alpha = 0x1F / 255f), Offset(w * k / 4f, 0f), Offset(w * k / 4f, h), 1f)
+                drawLine(YumeColors.ink.copy(alpha = 0x1F / 255f), Offset(0f, h * k / 4f), Offset(w, h * k / 4f), 1f)
             }
-            drawLine(Color(0x26FFFFFF), Offset(0f, h), Offset(w, 0f), 1f)
+            drawLine(YumeColors.ink.copy(alpha = 0x26 / 255f), Offset(0f, h), Offset(w, 0f), 1f)
             // Other channels faintly, the edited one on top.
             for (c in (0..3).sortedBy { if (it == channel) 1 else 0 }) {
                 val table = ToneLut.curveTable(curves[c].toList())

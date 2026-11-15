@@ -200,6 +200,8 @@ object YumeHarness {
                     out.append(scoreLiftEnd(app))
                 } else if (only == "smudgeperf") {
                     out.append(scoreSmudgePerf())
+                } else if (only == "overlaytest") {
+                    out.append(scoreOverlayTest())
                 } else if (only == "bigstroke") {
                     out.append(scoreBigStroke())
                 } else if (only == "opacitytest") {
@@ -4357,6 +4359,128 @@ object YumeHarness {
         } catch (t: Throwable) {
             Log.e(TAG, "smudgeperf failed", t)
             out.append("smudgeperf: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /**
+     * Overlay layers: a coloured base and an Overlay layer of black / grey /
+     * white bands over it; the flattened document and the on-screen composite
+     * are compared with the overlay formula, dense and sparse, then a stroke
+     * painted on the overlay layer.
+     */
+    private fun scoreOverlayTest(): String {
+        val out = StringBuilder()
+        val w = 768
+        val h = 512
+        val oldS = TileStoreConfig.useSparseLayers
+        fun ov(sv: Int, dv: Int): Int {
+            val a = sv / 255f
+            val b = dv / 255f
+            val r = if (b <= 0.5f) 2f * a * b else 1f - 2f * (1f - a) * (1f - b)
+            return (r * 255f + 0.5f).toInt()
+        }
+        try {
+            for (sparse in listOf(false, true)) {
+                TileStoreConfig.useSparseLayers = sparse
+                val engine = DrawingEngine(w, h)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val session = DrawingSession("ov", "OV", engine, History())
+                identityView(session, w, h)
+                session.presets = com.yume.app.engine.BrushLibrary.defaults
+                session.assist = 0f
+                session.quickShapeEnabled = false
+                val base = engine.newLayer("Base")
+                val baseColor = 0xFF3C82C8.toInt()
+                val bb = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { eraseColor(baseColor) }
+                base.tiles.writeRect(Rect(0, 0, w, h), bb, Rect(0, 0, w, h))
+                base.touch()
+                val top = engine.newLayer("Overlay")
+                val tb = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                val tc = android.graphics.Canvas(tb)
+                val band = Paint()
+                band.color = 0xFF000000.toInt(); tc.drawRect(0f, 0f, 256f, h.toFloat(), band)
+                band.color = 0xFF808080.toInt(); tc.drawRect(256f, 0f, 512f, h.toFloat(), band)
+                band.color = 0xFFFFFFFF.toInt(); tc.drawRect(512f, 0f, w.toFloat(), h.toFloat(), band)
+                top.tiles.writeRect(Rect(0, 0, w, h), tb, Rect(0, 0, w, h))
+                top.touch()
+                session.setLayerBlend(top.id, com.yume.app.engine.LayerBlend.Overlay)
+                session.runCommands()
+                engine.selectLayer(top.id)
+                engine.compositeAll()
+                engine.flush()
+                fun expect(src: Int): Int {
+                    val r = ov((src shr 16) and 0xFF, (baseColor shr 16) and 0xFF)
+                    val g = ov((src shr 8) and 0xFF, (baseColor shr 8) and 0xFF)
+                    val b = ov(src and 0xFF, baseColor and 0xFF)
+                    return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                }
+                fun hex(c: Int) = "%08X".format(c)
+                val flat = engine.flatten()
+                val screen = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                val sc = android.graphics.Canvas(screen)
+                if (engine.compositeIsSparse) engine.drawComposite(sc, Rect(0, 0, w, h))
+                else sc.drawBitmap(engine.composite, 0f, 0f, null)
+                for ((x, src) in listOf(128 to 0xFF000000.toInt(), 384 to 0xFF808080.toInt(), 640 to 0xFFFFFFFF.toInt())) {
+                    val f = flat.getPixel(x, 200)
+                    val v = screen.getPixel(x, 200)
+                    val e = expect(src)
+                    fun near(a: Int, b: Int) = (0..2).all { k -> kotlin.math.abs(((a shr (k * 8)) and 0xFF) - ((b shr (k * 8)) and 0xFF)) <= 3 }
+                    out.append("overlaytest ${if (sparse) "sparse" else "dense"} band ${hex(src)}: flat ${hex(f)} screen ${hex(v)} expected ${hex(e)} ${if (near(f, e) && near(v, e)) "PASS" else "FAIL"}\n")
+                }
+                // A stroke painted on the overlay layer, white over the black band.
+                val p = session.presets.first { it.id == "technical-pen" }
+                pick(session, p, p.category)
+                session.setBrushSize(30f)
+                session.runCommands()
+                session.color = 0xFFFFFFFF.toInt()
+                session.stroke(listOf(P(40f, 300f), P(220f, 300f)))
+                session.runCommands()
+                engine.compositeAll()
+                engine.flush()
+                sc.drawColor(0, android.graphics.BlendMode.CLEAR)
+                if (engine.compositeIsSparse) engine.drawComposite(sc, Rect(0, 0, w, h))
+                else sc.drawBitmap(engine.composite, 0f, 0f, null)
+                val flat2 = engine.flatten()
+                val e2 = expect(0xFFFFFFFF.toInt())
+                out.append("overlaytest ${if (sparse) "sparse" else "dense"} stroke: flat ${hex(flat2.getPixel(130, 300))} screen ${hex(screen.getPixel(130, 300))} expected ${hex(e2)}\n")
+                // Clipped to a base that covers only the left half: Overlay
+                // must change only the overlay's own pixels, and nothing where
+                // the base is empty.
+                val half = engine.newLayer("Half")
+                val hb = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                android.graphics.Canvas(hb).drawRect(0f, 0f, 384f, h.toFloat(), Paint().apply { color = baseColor })
+                half.tiles.writeRect(Rect(0, 0, w, h), hb, Rect(0, 0, w, h))
+                half.touch()
+                base.visible = false
+                top.visible = false
+                val clip = engine.newLayer("Clipped overlay")
+                val cb = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                android.graphics.Canvas(cb).drawRect(0f, 0f, 200f, h.toFloat(), Paint().apply { color = 0xFFFFFFFF.toInt() })
+                android.graphics.Canvas(cb).drawRect(500f, 0f, 700f, h.toFloat(), Paint().apply { color = 0xFFFFFFFF.toInt() })
+                clip.tiles.writeRect(Rect(0, 0, w, h), cb, Rect(0, 0, w, h))
+                clip.touch()
+                clip.clipping = true
+                session.setLayerBlend(clip.id, com.yume.app.engine.LayerBlend.Overlay)
+                session.runCommands()
+                engine.markDirtyAll()
+                engine.compositeAll()
+                engine.flush()
+                val flat3 = engine.flatten()
+                val inOv = flat3.getPixel(100, 100)
+                val baseOnly = flat3.getPixel(300, 100)
+                val outside = flat3.getPixel(600, 100)
+                val ok = (0..2).all { k -> kotlin.math.abs(((inOv shr (k * 8)) and 0xFF) - ((e2 shr (k * 8)) and 0xFF)) <= 3 }
+                out.append("overlaytest ${if (sparse) "sparse" else "dense"} clipped: overlay ${hex(inOv)} (expected ${hex(e2)}) base ${hex(baseOnly)} (expected ${hex(baseColor)}) outside ${hex(outside)} (expected FFFFFFFF) " +
+                    (if (ok && baseOnly == baseColor && outside == -1) "PASS" else "FAIL") + "\n")
+                flat3.recycle()
+                flat.recycle(); flat2.recycle(); screen.recycle()
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "overlaytest failed", t)
+            out.append("overlaytest: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
         } finally {
             TileStoreConfig.useSparseLayers = oldS
         }

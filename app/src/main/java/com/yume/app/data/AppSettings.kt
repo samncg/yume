@@ -52,7 +52,7 @@ object AppSettings {
     /** Size of the editor's toolbars and panels (0.85 .. 1.15). */
     var uiScale by mutableFloatStateOf(1f)
         private set
-    fun setUiScaleValue(v: Float) { uiScale = v.coerceIn(0.85f, 1.15f); put { putFloat("uiScale", uiScale) } }
+    fun setUiScaleValue(v: Float) { uiScale = v.coerceIn(0.6f, 1.6f); put { putFloat("uiScale", uiScale) } }
 
     /** The size / opacity rail sits on the right edge (left-handed use). */
     var railOnRight by mutableStateOf(false)

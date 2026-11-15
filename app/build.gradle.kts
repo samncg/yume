@@ -88,6 +88,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
+    // Material Symbols (Rounded) for the interface icons; R8 keeps only those used.
+    implementation("androidx.compose.material:material-icons-extended")
     // Liquid glass surfaces (Kyant0/AndroidLiquidGlass, Apache-2.0).
     implementation("io.github.kyant0:backdrop:1.0.6")
 

@@ -180,7 +180,7 @@ fun ReferenceWindow(
                         }
                         .background(Color(0x66000000), RoundedCornerShape(topStart = 12.dp))
                 ) {
-                    GlyphIcon(Glyph.Grip, Color(0xCCFFFFFF), size = 18.dp, modifier = Modifier.align(Alignment.Center))
+                    GlyphIcon(Glyph.Grip, YumeColors.ink.copy(alpha = 0xCC / 255f), size = 18.dp, modifier = Modifier.align(Alignment.Center))
                 }
             }
         }

@@ -223,7 +223,10 @@ fun EditorScreen(
                         showPanel(
                             when {
                                 sameTool && panelId != null -> if (panel == panelId) null else panelId
-                                panel in TOOL_PANELS -> null
+                                // A tool's settings are open: the new tool's
+                                // settings take their place (none for a tool
+                                // without settings).
+                                panel in TOOL_PANELS -> panelId
                                 else -> panel
                             }
                         )
@@ -362,6 +365,7 @@ fun EditorScreen(
                 }
             }
             com.yume.app.input.PenGestures.onMenuAt = { x, y ->
+                com.yume.app.input.PenGestures.ringOrigin = canvasOrigin
                 penMenuAt = Offset(x + canvasOrigin.x, y + canvasOrigin.y)
             }
             // Gestures, keyboard shortcuts and the pen button all run here.
@@ -964,7 +968,7 @@ private fun ColorChip(
                 .background(Color(color))
                 .border(
                     width = if (selected) 2.dp else 1.5.dp,
-                    color = if (selected) YumeColors.accent else Color(0x66FFFFFF),
+                    color = if (selected) YumeColors.accent else YumeColors.ink.copy(alpha = 0x66 / 255f),
                     shape = CircleShape
                 )
         )

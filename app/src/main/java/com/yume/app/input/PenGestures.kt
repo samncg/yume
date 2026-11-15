@@ -85,13 +85,16 @@ object PenGestures {
     var onMenuAt: ((Float, Float) -> Unit)? = null
 
     /**
-     * While the ring is open under two fingers: the direction (degrees,
-     * screen space, 0 = right, clockwise) from the resting finger to the one
-     * orbiting it, or null until a finger has moved far enough.
+     * While the ring is open under the fingers that opened it: where those
+     * that have moved now are, in canvas-view px (the ring adds
+     * [ringOrigin]).
      */
-    var ringAim by mutableStateOf<Float?>(null)
+    var ringFingers by mutableStateOf<List<androidx.compose.ui.geometry.Offset>>(emptyList())
 
-    /** Runs the ring item under [ringAim] (set by the open ring). */
+    /** Canvas-view origin in the ring's coordinates. */
+    var ringOrigin = androidx.compose.ui.geometry.Offset.Zero
+
+    /** Runs the ring item under one of [ringFingers] (set by the open ring). */
     var onRingRelease: (() -> Unit)? = null
 
     fun init(context: Context) {

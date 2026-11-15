@@ -137,7 +137,16 @@ data class PersistedHistoryEntry(
      * tiles' crops, as the in-memory step holds them. Null for rectangle form.
      */
     val tiles: List<PersistedTile>? = null,
-    val tileSize: Int = 0
+    val tileSize: Int = 0,
+    /**
+     * A layer-structure step (add, order, properties, groups): its before
+     * and after states as JSON (layers and groups by id). Null for pixels.
+     */
+    val structure: String? = null,
+    /** The layer's id (pixel steps), so a restored step finds its layer even if the order changed. */
+    val layerId: Long = -1L,
+    /** The step's files are already on disk from an earlier save: only its record is rewritten. */
+    val reused: Boolean = false
 )
 
 /** One changed tile of a persisted step; a null crop means the tile was empty. */
@@ -602,7 +611,14 @@ class DrawingSession(
         return error == null
     }
 
+    private var lastInputAt = 0L
+
     fun pushInput(event: InputEvent) {
+        // Time spent: the gaps between inputs, except long pauses.
+        val now = android.os.SystemClock.uptimeMillis()
+        val gap = now - lastInputAt
+        if (lastInputAt > 0L && gap in 0L until ACTIVE_GAP_MS) engine.activeMs += gap
+        lastInputAt = now
         inputs.add(event)
         wakeListener?.invoke()
     }
@@ -3804,17 +3820,124 @@ class DrawingSession(
     }
 
     /** Serialisable view of the newest replayable run of edits. */
-    fun historyForDiskBlocking(): PersistedHistory? {
+    fun historyForDiskBlocking(saved: Set<Long> = emptySet()): PersistedHistory? {
         val latch = CountDownLatch(1)
         var out: PersistedHistory? = null
         post {
-            val (run, applied) = history.persistableRun()
+            out = historyForDiskNow(saved)
+            latch.countDown()
+        }
+        if (!latch.await(6, TimeUnit.SECONDS)) return null
+        return out
+    }
+
+    /** Saved group id -> this session's group id (groups get new ids when a project opens). */
+    private var restoreGroupIds: Map<Long, Long> = emptyMap()
+
+    /** True when every layer and group [s] names is in the document now. */
+    private fun stateResolvable(s: DocumentState): Boolean =
+        s.layers.all { engine.layerById(it.layer.id) === it.layer } &&
+            s.groups.all { engine.groupById(it.group.id) === it.group }
+
+    private fun stateJson(s: DocumentState): org.json.JSONObject = org.json.JSONObject().apply {
+        put("layers", org.json.JSONArray().apply {
+            for (ls in s.layers) put(org.json.JSONObject().apply {
+                val p = ls.props
+                put("id", ls.layer.id); put("name", p.name); put("opacity", p.opacity.toDouble())
+                put("blend", p.blend.name); put("visible", p.visible); put("alphaLock", p.alphaLock)
+                put("locked", p.locked); put("clipping", p.clipping); put("maskEnabled", p.maskEnabled)
+                put("groupId", p.groupId); put("editMask", p.editMask)
+            })
+        })
+        put("groups", org.json.JSONArray().apply {
+            for (g in s.groups) put(org.json.JSONObject().apply {
+                put("id", g.group.id); put("name", g.name); put("opacity", g.opacity.toDouble())
+                put("blend", g.blend.name); put("visible", g.visible); put("locked", g.locked)
+                put("expanded", g.expanded)
+            })
+        })
+        put("active", s.activeIndex)
+        put("activeGroup", s.activeGroupId)
+    }
+
+    /** The state [o] describes, with today's layer and group objects; null if one is missing. */
+    private fun stateFromJson(o: org.json.JSONObject): DocumentState? {
+        val la = o.optJSONArray("layers") ?: return null
+        val layers = ArrayList<LayerState>(la.length())
+        for (i in 0 until la.length()) {
+            val j = la.getJSONObject(i)
+            val layer = engine.layerById(j.optLong("id")) ?: return null
+            layers.add(LayerState(layer, LayerProps(
+                name = j.optString("name", layer.name),
+                opacity = j.optDouble("opacity", 1.0).toFloat(),
+                blend = LayerBlend.fromName(j.optString("blend", "Normal")),
+                visible = j.optBoolean("visible", true),
+                alphaLock = j.optBoolean("alphaLock", false),
+                locked = j.optBoolean("locked", false),
+                clipping = j.optBoolean("clipping", false),
+                maskEnabled = j.optBoolean("maskEnabled", true),
+                groupId = j.optLong("groupId", 0L).let { g -> if (g == 0L) 0L else restoreGroupIds[g] ?: g },
+                editMask = j.optBoolean("editMask", false)
+            )))
+        }
+        val ga = o.optJSONArray("groups") ?: org.json.JSONArray()
+        val groups = ArrayList<GroupState>(ga.length())
+        for (i in 0 until ga.length()) {
+            val j = ga.getJSONObject(i)
+            val gid = j.optLong("id")
+            val g = engine.groupById(restoreGroupIds[gid] ?: gid) ?: return null
+            groups.add(GroupState(
+                g, j.optString("name", g.name), j.optDouble("opacity", 1.0).toFloat(),
+                LayerBlend.fromName(j.optString("blend", "Normal")), j.optBoolean("visible", true),
+                j.optBoolean("locked", false), j.optBoolean("expanded", true)
+            ))
+        }
+        return DocumentState(layers, groups, o.optInt("active", 0), o.optLong("activeGroup", 0L))
+    }
+
+    /**
+     * [historyForDiskBlocking] on the owner thread. Steps whose files an
+     * earlier save already wrote ([saved]) are described without copying
+     * their pixels again.
+     */
+    fun historyForDiskNow(saved: Set<Long> = emptySet()): PersistedHistory {
+        run {
+            val (run, applied) = history.persistableRun { action ->
+                when (action) {
+                    is PixelAction, is TilePixelAction -> engine.indexOf(action.layerId) >= 0
+                    // Layer structure persists while every layer and group it
+                    // names is still in the document (a deleted layer's pixels
+                    // live only in memory).
+                    is LayersAction -> stateResolvable(action.before) && stateResolvable(action.after)
+                    else -> false
+                }
+            }
             val entries = ArrayList<PersistedHistoryEntry>(run.size)
             // Walk newest to oldest, stopping at an edit whose layer is gone or
             // whose legacy rectangle would exceed the persist budget.
             for (action in run.asReversed()) {
+                if (action is LayersAction) {
+                    entries.add(PersistedHistoryEntry(
+                        actionId = action.id, label = action.label, kind = action.kind,
+                        detail = "", swatch = 0, layerIndex = -1, rect = Rect(),
+                        before = null, after = null,
+                        structure = org.json.JSONObject().apply {
+                            put("before", stateJson(action.before))
+                            put("after", stateJson(action.after))
+                        }.toString()
+                    ))
+                    continue
+                }
                 val index = engine.indexOf(action.layerId)
                 if (index < 0) break
+                if (action.id in saved && (action is TilePixelAction || action is PixelAction)) {
+                    entries.add(PersistedHistoryEntry(
+                        actionId = action.id, label = action.label, kind = action.kind,
+                        detail = "", swatch = 0, layerIndex = index, rect = Rect(),
+                        before = null, after = null, layerId = action.layerId, reused = true
+                    ))
+                    continue
+                }
                 val entry = when (action) {
                     is PixelAction -> PersistedHistoryEntry(
                         actionId = action.id,
@@ -3826,7 +3949,8 @@ class DrawingSession(
                         rect = Rect(action.rect),
                         before = action.before,
                         after = action.after,
-                        mask = action.mask
+                        mask = action.mask,
+                        layerId = action.layerId
                     )
                     is TilePixelAction -> {
                         // A streamed step (too big to hold in memory) is not
@@ -3861,7 +3985,8 @@ class DrawingSession(
                                     afterSolid = aRaw?.let { it.toLong() and 0xFFFFFFFFL } ?: -1L
                                 )
                             },
-                            tileSize = store.tileSize
+                            tileSize = store.tileSize,
+                            layerId = action.layerId
                         )
                     }
                     else -> break
@@ -3870,19 +3995,29 @@ class DrawingSession(
             }
             entries.reverse()
             val dropped = run.size - entries.size
-            out = PersistedHistory((applied - dropped).coerceAtLeast(0), entries)
-            latch.countDown()
+            return PersistedHistory((applied - dropped).coerceAtLeast(0), entries)
         }
-        if (!latch.await(6, TimeUnit.SECONDS)) return null
-        return out
     }
 
     /** Re-attaches edits restored from disk to the freshly loaded layers. */
-    fun restoreHistory(persisted: PersistedHistory) {
+    fun restoreHistory(persisted: PersistedHistory, groupIds: Map<Long, Long> = emptyMap()) {
+        restoreGroupIds = groupIds
         post {
             val actions = ArrayList<HistoryAction>(persisted.entries.size)
             for (entry in persisted.entries) {
-                val layer = engine.layers.getOrNull(entry.layerIndex) ?: continue
+                val structure = entry.structure
+                if (structure != null) {
+                    val o = runCatching { org.json.JSONObject(structure) }.getOrNull() ?: break
+                    val b = o.optJSONObject("before")?.let { stateFromJson(it) } ?: break
+                    val a = o.optJSONObject("after")?.let { stateFromJson(it) } ?: break
+                    val action = LayersAction(b, a, entry.label, entry.kind)
+                    action.id = entry.actionId
+                    HistoryAction.bumpCounterTo(entry.actionId)
+                    actions.add(action)
+                    continue
+                }
+                val layer = (if (entry.layerId >= 0L) engine.layerById(entry.layerId) else null)
+                    ?: engine.layers.getOrNull(entry.layerIndex) ?: continue
                 val tiles = entry.tiles
                 if (tiles != null) {
                     val store = if (entry.mask) layer.maskTiles else layer.tiles
@@ -4133,3 +4268,16 @@ fun tolerancePercent(tolerance: Int): Int = (tolerance * 100 + TOLERANCE_MAX / 2
 
 /** Seconds per megapixel each adjustment took on this device (this run). */
 private val adjustRates = HashMap<AdjustmentKind, Float>()
+
+/** Pauses longer than this between inputs do not count as time spent. */
+private const val ACTIVE_GAP_MS = 120_000L
+
+/** "2h 13m", "13m", "under a minute" for a duration in milliseconds. */
+fun formatTimeSpent(ms: Long): String {
+    val m = ms / 60_000L
+    return when {
+        m < 1L -> "under a minute"
+        m < 60L -> "${m}m"
+        else -> "${m / 60}h ${m % 60}m"
+    }
+}

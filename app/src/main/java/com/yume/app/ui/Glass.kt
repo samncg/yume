@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.backdrops.emptyBackdrop
 import com.kyant.backdrop.drawBackdrop
+import com.kyant.backdrop.drawPlainBackdrop
 import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.effects.vibrancy
@@ -67,11 +68,14 @@ class CanvasProxyBackdrop(
 }
 
 /** How much a glass surface frosts what is behind it. */
-enum class GlassWeight(val blurDp: Float, val tint: Color) {
+enum class GlassWeight(val blurDp: Float, private val darkTint: Color, private val lightTint: Color) {
     /** Toolbar capsules and small buttons: the canvas stays readable through them. */
-    Light(6f, Color(0x4A111116)),
+    Light(14f, Color(0xB0141418), Color(0xB8F6F6F8)),
     /** Panels with text and controls: more blur and a darker veil for contrast. */
-    Heavy(28f, Color(0xD0121216))
+    Heavy(28f, Color(0xD0121216), Color(0xDCF7F7FA));
+
+    /** The veil for the theme in use (pale on light themes). */
+    val tint: Color get() = if (YumeColors.light) lightTint else darkTint
 }
 
 /**
@@ -86,6 +90,17 @@ fun Modifier.glass(
 ): Modifier {
     val backdrop = LocalGlassBackdrop.current
     val shape = RoundedCornerShape(corner.dp)
+    if (weight == GlassWeight.Light) {
+        // Bars and capsules: plain frosted glass, a little see-through. No
+        // lens at the rim and no drop shadow (its soft square read as a
+        // smudge around the toolbar).
+        return this.drawPlainBackdrop(
+            backdrop = backdrop,
+            shape = { shape },
+            effects = { blur(14.dp.toPx()) },
+            onDrawSurface = { drawRect(weight.tint) }
+        )
+    }
     return this.drawBackdrop(
         backdrop = backdrop,
         shape = { shape },

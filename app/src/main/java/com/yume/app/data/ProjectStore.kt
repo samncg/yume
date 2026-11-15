@@ -38,7 +38,9 @@ data class ProjectMeta(
     val updatedAt: Long,
     val layerCount: Int,
     val thumbFile: File?,
-    val strokeCount: Long = 0L
+    val strokeCount: Long = 0L,
+    /** Time spent on the project (ms). */
+    val timeMs: Long = 0L
 )
 
 data class LoadedGroup(
@@ -170,6 +172,20 @@ class ProjectStore(private val context: Context) {
     private fun readSaveSeq(dir: File): Int = runCatching {
         JSONObject(File(dir, "manifest.json").readText()).optInt("saveSeq", 0)
     }.getOrDefault(0)
+
+    /**
+     * Names the pixel state on disk: the last full save ("s<seq>"), plus the
+     * journal on top of it when there is one ("s<seq>/j<length>"). The undo
+     * history is stamped with it when written and restored only when opening
+     * finds the same state, so it always matches the pixels it undoes.
+     */
+    fun historyStamp(id: String): String {
+        val dir = projectDir(id)
+        val seq = readSaveSeq(dir)
+        val st = runCatching { JSONObject(File(journalDir(id), "state.json").readText()) }.getOrNull()
+        val len = st?.takeIf { it.optInt("saveSeq", -1) == seq }?.optLong("logLength", -1L) ?: -1L
+        return if (len >= 0L) "s$seq/j$len" else "s$seq"
+    }
 
     /** Deletes the journal (after a full save made it obsolete). */
     fun resetJournal(id: String) {
@@ -451,6 +467,7 @@ class ProjectStore(private val context: Context) {
             updatedAt = json.optLong("updatedAt", manifest.lastModified()),
             layerCount = json.optJSONArray("layers")?.length() ?: 1,
             strokeCount = json.optJSONObject("extras")?.optLong("strokes", 0L) ?: 0L,
+            timeMs = json.optJSONObject("extras")?.optLong("timeMs", 0L) ?: 0L,
             thumbFile = if (thumb.exists()) thumb else null
         )
     }
@@ -1155,7 +1172,24 @@ class ProjectStore(private val context: Context) {
      * Writes the replayable history run. Patches are immutable, so a file that
      * already exists for an action id is left alone (autosave stays cheap).
      */
-    fun saveHistory(id: String, history: PersistedHistory) {
+    /** Each project's last written history records, by step id (for [PersistedHistoryEntry.reused]). */
+    private val historyRecords = java.util.concurrent.ConcurrentHashMap<String, Map<Long, JSONObject>>()
+
+    /** Step ids whose files are on disk from the last history write of [id]. */
+    fun savedHistoryIds(id: String): Set<Long> = historyRecords[id]?.keys ?: emptySet()
+
+    private fun recordFiles(o: JSONObject, into: MutableSet<String>) {
+        o.optString("before", "").takeIf { it.isNotEmpty() }?.let { into.add(it) }
+        o.optString("after", "").takeIf { it.isNotEmpty() }?.let { into.add(it) }
+        val tiles = o.optJSONArray("tiles") ?: return
+        for (k in 0 until tiles.length()) {
+            val t = tiles.getJSONObject(k)
+            for (key in arrayOf("b", "a")) if (!t.isNull(key) && t.has(key)) into.add(t.optString(key))
+        }
+    }
+
+    @Synchronized
+    fun saveHistory(id: String, history: PersistedHistory, stamp: String? = null) {
         // A project deleted while its last save was still running must not
         // come back as a folder of undo history with no document.
         if (!File(projectDir(id), "manifest.json").exists()) return
@@ -1163,8 +1197,43 @@ class ProjectStore(private val context: Context) {
         val hdir = File(dir, "history").apply { mkdirs() }
         val keep = HashSet<String>()
         val entriesJson = JSONArray()
+        val previous = historyRecords[id] ?: emptyMap()
+        val records = HashMap<Long, JSONObject>()
+        var applied = history.appliedCount
+        var written = 0
 
         for (entry in history.entries) {
+            // Layer structure: just its states.
+            val structure = entry.structure
+            if (structure != null) {
+                val o = JSONObject().apply {
+                    put("id", entry.actionId)
+                    put("label", entry.label)
+                    put("kind", entry.kind.name)
+                    put("structure", JSONObject(structure))
+                }
+                entriesJson.put(o)
+                written++
+                continue
+            }
+            // Written by an earlier save: the same record, at today's layer index.
+            if (entry.reused) {
+                val prev = previous[entry.actionId]
+                if (prev == null) {
+                    // Should not happen: drop it and everything after it.
+                    applied = applied.coerceAtMost(written)
+                    break
+                }
+                val o = JSONObject(prev.toString()).apply {
+                    put("layer", entry.layerIndex)
+                    put("layerId", entry.layerId)
+                }
+                recordFiles(o, keep)
+                entriesJson.put(o)
+                records[entry.actionId] = o
+                written++
+                continue
+            }
             val tiles = entry.tiles
             if (tiles != null) {
                 // Tile form: one small PNG per changed tile crop.
@@ -1186,18 +1255,22 @@ class ProjectStore(private val context: Context) {
                         if (t.afterSolid >= 0L) put("aSolid", t.afterSolid) else put("a", crop(t.after, "a"))
                     })
                 }
-                entriesJson.put(JSONObject().apply {
+                val o = JSONObject().apply {
                     put("id", entry.actionId)
                     put("label", entry.label)
                     put("kind", entry.kind.name)
                     put("detail", entry.detail)
                     put("swatch", entry.swatch)
                     put("layer", entry.layerIndex)
+                    put("layerId", entry.layerId)
                     put("rect", JSONArray().put(entry.rect.left).put(entry.rect.top).put(entry.rect.right).put(entry.rect.bottom))
                     put("mask", entry.mask)
                     put("tileSize", entry.tileSize)
                     put("tiles", tilesJson)
-                })
+                }
+                entriesJson.put(o)
+                records[entry.actionId] = o
+                written++
                 continue
             }
             val beforeBmp = entry.before ?: continue
@@ -1212,47 +1285,82 @@ class ProjectStore(private val context: Context) {
             }
             keep.add(beforeName)
             keep.add(afterName)
-            entriesJson.put(
-                JSONObject().apply {
-                    put("id", entry.actionId)
-                    put("label", entry.label)
-                    put("kind", entry.kind.name)
-                    put("detail", entry.detail)
-                    put("swatch", entry.swatch)
-                    put("layer", entry.layerIndex)
-                    put(
-                        "rect",
-                        JSONArray().put(entry.rect.left).put(entry.rect.top)
-                            .put(entry.rect.right).put(entry.rect.bottom)
-                    )
-                    put("before", beforeName)
-                    put("after", afterName)
-                }
-            )
+            val o = JSONObject().apply {
+                put("id", entry.actionId)
+                put("label", entry.label)
+                put("kind", entry.kind.name)
+                put("detail", entry.detail)
+                put("swatch", entry.swatch)
+                put("layer", entry.layerIndex)
+                put("layerId", entry.layerId)
+                put("mask", entry.mask)
+                put(
+                    "rect",
+                    JSONArray().put(entry.rect.left).put(entry.rect.top)
+                        .put(entry.rect.right).put(entry.rect.bottom)
+                )
+                put("before", beforeName)
+                put("after", afterName)
+            }
+            entriesJson.put(o)
+            records[entry.actionId] = o
+            written++
         }
 
-        hdir.listFiles()?.forEach { file -> if (file.name !in keep) file.delete() }
-
+        // The manifest first (written whole, then renamed), so a crash never
+        // leaves it pointing at deleted patches; then unused patches go.
         val manifest = JSONObject().apply {
-            put("version", 1)
-            put("applied", history.appliedCount)
+            put("version", 2)
+            if (stamp != null) put("stamp", stamp)
+            put("applied", applied.coerceIn(0, written))
             put("entries", entriesJson)
         }
-        runCatching {
-            File(dir, "history.json").writeText(manifest.toString())
+        val ok = runCatching {
+            val tmp = File(dir, "history.json.tmp")
+            tmp.writeText(manifest.toString())
+            if (!tmp.renameTo(File(dir, "history.json"))) {
+                File(dir, "history.json").writeText(manifest.toString())
+                tmp.delete()
+            }
+        }.isSuccess
+        if (ok) {
+            historyRecords[id] = records
+            hdir.listFiles()?.forEach { file -> if (file.name !in keep) file.delete() }
         }
     }
 
-    fun loadHistory(id: String): PersistedHistory? = runCatching {
+    fun loadHistory(id: String, expected: String? = null): PersistedHistory? = runCatching {
         val dir = projectDir(id)
         val manifest = File(dir, "history.json")
         if (!manifest.exists()) return@runCatching null
         val json = JSONObject(manifest.readText())
+        // A history written for other pixels than those being opened would
+        // undo into the wrong picture.
+        if (expected != null) {
+            val stamp = json.optString("stamp", "")
+            if (stamp.isNotEmpty() && stamp != expected) return@runCatching null
+            if (stamp.isEmpty() && expected.contains("/j")) return@runCatching null
+        }
         val hdir = File(dir, "history")
         val entriesJson = json.optJSONArray("entries") ?: JSONArray()
         val entries = ArrayList<PersistedHistoryEntry>()
+        val records = HashMap<Long, JSONObject>()
         for (i in 0 until entriesJson.length()) {
             val o = entriesJson.getJSONObject(i)
+            val structure = o.optJSONObject("structure")
+            if (structure != null) {
+                entries.add(
+                    PersistedHistoryEntry(
+                        actionId = o.optLong("id", i + 1L),
+                        label = o.optString("label", "Edit"),
+                        kind = runCatching { EditKind.valueOf(o.optString("kind", "LayerOrder")) }.getOrDefault(EditKind.LayerOrder),
+                        detail = "", swatch = 0, layerIndex = -1, rect = android.graphics.Rect(),
+                        before = null, after = null, structure = structure.toString()
+                    )
+                )
+                continue
+            }
+            records[o.optLong("id", i + 1L)] = o
             val r0 = o.optJSONArray("rect")
             val rect0 = android.graphics.Rect(
                 r0?.optInt(0) ?: 0, r0?.optInt(1) ?: 0, r0?.optInt(2) ?: 0, r0?.optInt(3) ?: 0
@@ -1296,7 +1404,8 @@ class ProjectStore(private val context: Context) {
                         after = null,
                         mask = o.optBoolean("mask", false),
                         tiles = tiles,
-                        tileSize = o.optInt("tileSize", 0)
+                        tileSize = o.optInt("tileSize", 0),
+                        layerId = o.optLong("layerId", -1L)
                     )
                 )
                 continue
@@ -1320,10 +1429,13 @@ class ProjectStore(private val context: Context) {
                     layerIndex = o.optInt("layer", -1),
                     rect = rect,
                     before = before,
-                    after = after
+                    after = after,
+                    mask = o.optBoolean("mask", false),
+                    layerId = o.optLong("layerId", -1L)
                 )
             )
         }
+        historyRecords[id] = records
         PersistedHistory(json.optInt("applied", entries.size), entries)
     }.getOrNull()
 

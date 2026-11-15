@@ -430,7 +430,7 @@ class CanvasView(
 
     private fun cancelEverything() {
         ringFingers = false
-        com.yume.app.input.PenGestures.ringAim = null
+        com.yume.app.input.PenGestures.ringFingers = emptyList()
         session.predictedTip = null
         dropPending()
         cancelScheduledLongPress()
@@ -539,7 +539,7 @@ class CanvasView(
                 if (holdAction == com.yume.app.data.Customization.Action.ShortcutMenu) {
                     ringFingers = true
                     ringStart.clear()
-                    com.yume.app.input.PenGestures.ringAim = null
+                    com.yume.app.input.PenGestures.ringFingers = emptyList()
                     com.yume.app.input.PenGestures.onMenuAt?.invoke(gestureFocusX, gestureFocusY)
                 } else {
                     com.yume.app.data.Customization.dispatch(holdAction)
@@ -560,39 +560,31 @@ class CanvasView(
     private val ringStart = HashMap<Int, FloatArray>()
 
     /**
-     * Orbit selection: the finger that has moved furthest since the ring
-     * opened circles the one resting; the direction between them points at
-     * an item.
+     * The fingers that opened the ring, wherever they have moved to (canvas
+     * px): sliding one onto an item and lifting it chooses the item. Fingers
+     * that have barely moved (still resting where the ring opened) are left
+     * out.
      */
     private fun aimRing(event: MotionEvent) {
-        if (event.pointerCount != 2) return
-        for (i in 0 until 2) {
-            ringStart.getOrPut(event.getPointerId(i)) { floatArrayOf(event.getX(i), event.getY(i)) }
+        val slop = RING_AIM_DP * density
+        val out = ArrayList<androidx.compose.ui.geometry.Offset>(event.pointerCount)
+        for (i in 0 until event.pointerCount) {
+            val s = ringStart.getOrPut(event.getPointerId(i)) { floatArrayOf(event.getX(i), event.getY(i)) }
+            if (hypot(event.getX(i) - s[0], event.getY(i) - s[1]) >= slop) {
+                out.add(androidx.compose.ui.geometry.Offset(event.getX(i), event.getY(i)))
+            }
         }
-        val d = FloatArray(2) { i ->
-            val s = ringStart[event.getPointerId(i)]!!
-            hypot(event.getX(i) - s[0], event.getY(i) - s[1])
-        }
-        val mover = if (d[0] >= d[1]) 0 else 1
-        val pivot = 1 - mover
-        if (d[mover] < RING_AIM_DP * density && com.yume.app.input.PenGestures.ringAim == null) return
-        val a = Math.toDegrees(
-            kotlin.math.atan2(
-                (event.getY(mover) - event.getY(pivot)).toDouble(),
-                (event.getX(mover) - event.getX(pivot)).toDouble()
-            )
-        ).toFloat()
-        com.yume.app.input.PenGestures.ringAim = a
+        com.yume.app.input.PenGestures.ringFingers = out
     }
 
-    /** A finger lifted while aiming: run the aimed item (once). */
+    /** A finger lifted: the ring runs the item under a finger, if any (once). */
     private fun releaseRing() {
         if (!ringFingers) return
         ringFingers = false
-        if (com.yume.app.input.PenGestures.ringAim != null) {
+        if (com.yume.app.input.PenGestures.ringFingers.isNotEmpty()) {
             com.yume.app.input.PenGestures.onRingRelease?.invoke()
-            com.yume.app.input.PenGestures.ringAim = null
         }
+        com.yume.app.input.PenGestures.ringFingers = emptyList()
     }
 
     private var holdAnchorX = 0f
@@ -788,7 +780,7 @@ class CanvasView(
 private const val MENU_HOLD_MS = 520L
 private const val MENU_HOLD_SLOP_DP = 14f
 private const val MENU_HOLD_TURN_DEG = 6.0
-/** How far a finger orbits before the open ring starts following it. */
+/** How far a finger moves from where the ring opened before it can pick an item. */
 private const val RING_AIM_DP = 28f
 
 /** How long the pen rests before QuickShape snaps, and how still it must be. */

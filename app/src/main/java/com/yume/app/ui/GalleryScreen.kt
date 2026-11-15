@@ -430,7 +430,7 @@ private fun PressableRow(onClick: () -> Unit, content: @Composable androidx.comp
         Modifier
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(50))
-            .background(Color(0x1AFFFFFF))
+            .background(YumeColors.ink.copy(alpha = 0x1A / 255f))
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .padding(horizontal = 18.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -463,7 +463,7 @@ private fun ProjectCard(
                     shape = RoundedCornerShape(12.dp)
                     clip = true
                 }
-                .background(Color(0xFF1C1C22))
+                .background(YumeColors.panelAlt)
                 .combinedClickable(
                     interactionSource = source,
                     indication = null,
@@ -509,6 +509,7 @@ private fun ProjectCard(
                 )
                 Text(
                     text = "${formatDate(meta.updatedAt)}  ·  ${meta.width} × ${meta.height}" +
+                        (if (meta.timeMs >= 60_000L) "  ·  ${com.yume.app.engine.formatTimeSpent(meta.timeMs)}" else "") +
                         if (meta.strokeCount > 0) "  ·  ${meta.strokeCount} strokes" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = YumeColors.textDim,
@@ -584,7 +585,7 @@ private fun NewCanvasDialog(
                                 Modifier
                                     .size(26.dp * (r.w / long), 26.dp * (r.h / long))
                                     .clip(RoundedCornerShape(3.dp))
-                                    .background(if (selected) YumeColors.accent else Color(0x66FFFFFF))
+                                    .background(if (selected) YumeColors.accent else YumeColors.ink.copy(alpha = 0x66 / 255f))
                             )
                         }
                         Spacer(Modifier.height(6.dp))

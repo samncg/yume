@@ -1136,3 +1136,9 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 #   6B pencil 3.7; airbrush 9.7. On device a 300 px / 0 % finger swipe across
 #   the 4K canvas used to paint in one 577 ms runInput call with no frame
 #   until the lift; now a frame every ~17 ms while it paints.
+
+# --- Ring touch, persistent history, clipped blends, light themes, icons (Nov 2026)
+# NOT GATED: installed at the user's request with the gates skipped. Golden,
+# features, bleedtest, opacitytest and overlaytest still to be run on it.
+# overlaytest (new) passed during development: Overlay bands and a clipped
+# Overlay layer match the overlay formula, dense and sparse.
