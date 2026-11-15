@@ -616,6 +616,12 @@ class DrawingSession(
 
     private var lastInputAt = 0L
 
+    /**
+     * When painting last fell behind the pen (uptime ms): QuickShape waits
+     * until the stroke on screen has caught up, then for its hold.
+     */
+    @Volatile var backlogAt = 0L
+
     fun pushInput(event: InputEvent) {
         // Time spent: the gaps between inputs, except long pauses.
         val now = android.os.SystemClock.uptimeMillis()
@@ -708,7 +714,11 @@ class DrawingSession(
         // and the rest is painted in the next turns.
         val start = System.nanoTime()
         while (true) {
-            if (changed && System.nanoTime() - start > budgetNs && inputs.isNotEmpty()) break
+            if (changed && System.nanoTime() - start > budgetNs && inputs.isNotEmpty()) {
+                // Still painting what the pen already drew.
+                backlogAt = android.os.SystemClock.uptimeMillis()
+                break
+            }
             val event = inputs.poll() ?: break
             val timed = event !is InputEvent.Move && event !is InputEvent.Hover &&
                 event !is InputEvent.PickMove && event !is InputEvent.Gesture

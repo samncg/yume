@@ -1,5 +1,6 @@
 package com.yume.app.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
@@ -28,7 +29,10 @@ import com.kyant.backdrop.effects.vibrancy
 import com.yume.app.engine.CanvasGlass
 
 /** The backdrop glass surfaces sample. The editor provides the canvas proxy. */
-val LocalGlassBackdrop = staticCompositionLocalOf<Backdrop> { emptyBackdrop() }
+val LocalGlassBackdrop = staticCompositionLocalOf<Backdrop> { NoGlassBackdrop }
+
+/** Outside the editor there is nothing to blur: glass is drawn (nearly) solid there. */
+private val NoGlassBackdrop: Backdrop = emptyBackdrop()
 
 /**
  * Backdrop that draws the live canvas proxy ([CanvasGlass]) in window space,
@@ -90,6 +94,12 @@ fun Modifier.glass(
 ): Modifier {
     val backdrop = LocalGlassBackdrop.current
     val shape = RoundedCornerShape(corner.dp)
+    if (backdrop === NoGlassBackdrop) {
+        // No canvas behind (gallery, Settings): a see-through veil would show
+        // the cards unblurred through the panel.
+        val solid = if (YumeColors.light) YumeColors.panel.copy(alpha = 1f) else YumeColors.bar
+        return this.background(solid, shape)
+    }
     if (weight == GlassWeight.Light) {
         // Bars and capsules: plain frosted glass, a little see-through. No
         // lens at the rim and no drop shadow (its soft square read as a

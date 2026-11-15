@@ -144,7 +144,9 @@ fun YumeTheme(content: @Composable () -> Unit) {
     )
     // UI size (Settings): every dp in the interface scales with it.
     val base = androidx.compose.ui.platform.LocalDensity.current
-    val scale = com.yume.app.data.AppSettings.uiScale
+    // The slider's 100 % is 85 % of the system size (the old default was a
+    // little large); the range shown stays 60-160 %.
+    val scale = com.yume.app.data.AppSettings.uiScale * UI_SCALE_BASE
     val density = androidx.compose.ui.unit.Density(base.density * scale, base.fontScale)
     androidx.compose.runtime.CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides density) {
         MaterialTheme(
@@ -154,3 +156,6 @@ fun YumeTheme(content: @Composable () -> Unit) {
         )
     }
 }
+
+/** What Interface size 100 % means, relative to the system density. */
+const val UI_SCALE_BASE = 0.85f

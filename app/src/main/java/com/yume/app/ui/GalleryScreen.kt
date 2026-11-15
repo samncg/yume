@@ -92,6 +92,10 @@ private val CANVAS_RATIOS = listOf(
 private val CANVAS_LONG_EDGES = listOf(2048, 4096, 6144, 8192, 12288, 16384)
 private val CANVAS_EDGE_LABELS = listOf("2K", "4K", "6K", "8K", "12K", "16K")
 
+/** Canvases this large (long edge) are experimental: shown in [EXPERIMENTAL_COLOR] with a warning. */
+private const val EXPERIMENTAL_EDGE = 12288
+private val EXPERIMENTAL_COLOR = Color(0xFFE8833A)
+
 private const val CANVAS_MIN_EDGE = 64
 private const val CANVAS_MAX_EDGE = MemoryBudget.MAX_SPARSE_EDGE
 
@@ -505,13 +509,26 @@ private fun ProjectCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "${formatDate(meta.updatedAt)}  ·  ${meta.width} × ${meta.height}" +
-                        (if (meta.timeMs >= 60_000L) "  ·  ${com.yume.app.engine.formatTimeSpent(meta.timeMs)}" else "") +
-                        if (meta.strokeCount > 0) "  ·  ${meta.strokeCount} strokes" else "",
+                    text = "${formatDate(meta.updatedAt)}  ·  ${meta.width} × ${meta.height}",
                     style = MaterialTheme.typography.bodySmall,
                     color = YumeColors.textDim,
-                    maxLines = 1
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+                // Time spent and strokes on a line of their own, so neither is cut off.
+                val extra = listOfNotNull(
+                    if (meta.timeMs >= 60_000L) "${com.yume.app.engine.formatTimeSpent(meta.timeMs)} spent" else null,
+                    if (meta.strokeCount > 0) "${meta.strokeCount} strokes" else null
+                )
+                if (extra.isNotEmpty()) {
+                    Text(
+                        text = extra.joinToString("  ·  "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = YumeColors.textDim,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
             YumeIconButton(Glyph.More, onMenu, size = 32.dp, iconSize = 15.dp, tint = YumeColors.textDim, label = "More")
         }
@@ -597,11 +614,30 @@ private fun NewCanvasDialog(
             Spacer(Modifier.height(12.dp))
             SectionLabel("Resolution (long edge)")
             Spacer(Modifier.height(6.dp))
-            SegmentedRow(
-                options = CANVAS_EDGE_LABELS,
-                selectedIndex = edgeIndex,
-                onSelect = { e -> applyPreset(if (ratioIndex >= 0) ratioIndex else 0, e) }
-            )
+            // 12K and up are experimental: marked in their own colour.
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                CANVAS_EDGE_LABELS.forEachIndexed { e, label ->
+                    val selected = e == edgeIndex
+                    val heavy = CANVAS_LONG_EDGES[e] >= EXPERIMENTAL_EDGE
+                    val tone = if (heavy) EXPERIMENTAL_COLOR else YumeColors.accent
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) tone.copy(alpha = 0.22f) else YumeColors.panelAlt)
+                            .then(if (heavy) Modifier.border(1.dp, EXPERIMENTAL_COLOR.copy(alpha = 0.6f), RoundedCornerShape(10.dp)) else Modifier)
+                            .clickable { applyPreset(if (ratioIndex >= 0) ratioIndex else 0, e) }
+                            .padding(vertical = 9.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (heavy) EXPERIMENTAL_COLOR else if (selected) tone else YumeColors.text
+                        )
+                    }
+                }
+            }
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
@@ -650,6 +686,20 @@ private fun NewCanvasDialog(
                 style = MaterialTheme.typography.bodySmall,
                 color = if (!fits) YumeColors.danger else YumeColors.textDim
             )
+            if (maxOf(width, height) >= EXPERIMENTAL_EDGE) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Experimental: 12K and above can lag significantly while painting, " +
+                        "zooming, saving and opening. Use 8K or less for comfortable work.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = EXPERIMENTAL_COLOR,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(EXPERIMENTAL_COLOR.copy(alpha = 0.12f))
+                        .padding(10.dp)
+                )
+            }
             Spacer(Modifier.height(14.dp))
             Box(
                 Modifier

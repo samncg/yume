@@ -1154,3 +1154,15 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 # user's decision (keep the fix and append a new oracle section, or revert).
 # bigstroke6k (new, 6144^2, 900 px): Studio Pen at 0 % spacing paints
 #   ~3,400 canvas px/s (30 ms paint + 5 ms composite per 130 px); 5 %: ~9,000.
+
+# --- Clipped blend fix accepted (Nov 2026) ----------------------------------
+# The user chose to keep the fix: a clipped layer with a blend mode other than
+# Normal blends only its own pixels (kept to the base alpha). Lines above are
+# unchanged; from this commit on, phase 35 of the golden run is:
+phase=35-comp-clip L0=26b5fa73 L1=412503cf/4512cb4c L2=5505eea5/0934e1ed L3=9ff289b5 L4=6c1e9f58 L5=61c12fff L6=d6e24de1 C=5e04c64a
+# (every other golden line as before; layer hashes unchanged, only the
+# composite.) The v1 oracle recorded the old self-blend, so v1v2 35 now
+# reads maxch=87 offEdge=4454 by design.
+# Guide pages / QuickShape timing / UI scale / 12K warning / solid gallery
+# dialogs: UI and input timing only (no painting or compositing change), not
+# gated beyond the build.

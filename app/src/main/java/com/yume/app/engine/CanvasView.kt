@@ -603,14 +603,24 @@ class CanvasView(
         holdAnchorX = x
         holdAnchorY = y
         quickShapeAction?.let { handler.removeCallbacks(it) }
-        val action = Runnable {
-            if (mode == Mode.Stroke && !twoFinger) {
-                session.pushInput(InputEvent.QuickShape)
-                performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+        val hold = com.yume.app.data.AppSettings.quickShapeHoldMs.toLong()
+        lateinit var action: Runnable
+        action = Runnable {
+            if (mode != Mode.Stroke || twoFinger) return@Runnable
+            // Only once the stroke is fully drawn: while painting still trails
+            // the pen, wait, and give the full hold after it catches up.
+            val now = android.os.SystemClock.uptimeMillis()
+            val since = now - session.backlogAt
+            // (backlogAt moves on for as long as painting trails the pen.)
+            if (since < hold) {
+                handler.postDelayed(action, (hold - since).coerceAtLeast(16L))
+                return@Runnable
             }
+            session.pushInput(InputEvent.QuickShape)
+            performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
         }
         quickShapeAction = action
-        handler.postDelayed(action, com.yume.app.data.AppSettings.quickShapeHoldMs.toLong())
+        handler.postDelayed(action, hold)
     }
 
     private fun cancelQuickShape() {

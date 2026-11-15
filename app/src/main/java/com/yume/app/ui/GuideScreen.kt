@@ -26,6 +26,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.animation.core.animateFloat
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -135,7 +140,7 @@ private val TUTORIAL = listOf(
     TutorialStep(
         Glyph.Sparkle, "Welcome to Yume",
         listOf(
-            "This tour walks through everything, one step at a time. Use Next and Back, or jump with the dots below.",
+            "This tour walks through everything, one step at a time. Swipe to turn the page, use Next and Back, or jump with the dots below.",
             "Every gesture, button and default you meet here can be changed in Settings: the last step shows where.",
             "You can open this guide again any time: Guide in the gallery, or Actions in the editor."
         )
@@ -275,7 +280,6 @@ private val TUTORIAL = listOf(
 /** A step-by-step tour, with every gesture as a quick reference at the end. */
 @Composable
 fun GuideScreen(onClose: () -> Unit) {
-    var step by remember { mutableIntStateOf(0) }
     var reference by remember { mutableStateOf(false) }
     var section by remember { mutableIntStateOf(0) }
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -298,32 +302,49 @@ fun GuideScreen(onClose: () -> Unit) {
             ) {
                 PanelHeader(if (reference) "Quick reference" else "Guide", onClose)
                 if (!reference) {
-                    val s = TUTORIAL[step]
-                    Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                Modifier
-                                    .size(46.dp)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(YumeColors.accentSoft),
-                                contentAlignment = Alignment.Center
-                            ) { GlyphIcon(s.glyph, YumeColors.accent, size = 24.dp) }
-                            Spacer(Modifier.width(14.dp))
-                            Text(s.title, style = MaterialTheme.typography.titleLarge, color = YumeColors.text)
-                        }
-                        Spacer(Modifier.height(16.dp))
-                        s.body.forEach { para ->
-                            Text(para, style = MaterialTheme.typography.bodyMedium, color = YumeColors.text)
-                            Spacer(Modifier.height(10.dp))
-                        }
-                        if (step == TUTORIAL.lastIndex) {
-                            Spacer(Modifier.height(4.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                SmallButton("Open Settings") {
-                                    onClose()
-                                    SettingsHost.open = true
+                    // Swipe between pages; Back / Next and the dots move it too.
+                    val pager = androidx.compose.foundation.pager.rememberPagerState { TUTORIAL.size }
+                    val scope = androidx.compose.runtime.rememberCoroutineScope()
+                    fun go(i: Int) {
+                        scope.launch { pager.animateScrollToPage(i.coerceIn(0, TUTORIAL.lastIndex)) }
+                    }
+                    val step = pager.currentPage
+                    androidx.compose.foundation.pager.HorizontalPager(
+                        state = pager,
+                        modifier = Modifier.weight(1f, fill = false),
+                        pageSpacing = 24.dp,
+                        verticalAlignment = Alignment.Top
+                    ) { page ->
+                        val s = TUTORIAL[page]
+                        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                            // The page's animation: what the step is about, in motion.
+                            TutorialAnimation(page, Modifier.fillMaxWidth().height(150.dp))
+                            Spacer(Modifier.height(14.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    Modifier
+                                        .size(40.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(YumeColors.accentSoft),
+                                    contentAlignment = Alignment.Center
+                                ) { GlyphIcon(s.glyph, YumeColors.accent, size = 22.dp) }
+                                Spacer(Modifier.width(12.dp))
+                                Text(s.title, style = MaterialTheme.typography.titleLarge, color = YumeColors.text)
+                            }
+                            Spacer(Modifier.height(14.dp))
+                            s.body.forEach { para ->
+                                Text(para, style = MaterialTheme.typography.bodyMedium, color = YumeColors.text)
+                                Spacer(Modifier.height(10.dp))
+                            }
+                            if (page == TUTORIAL.lastIndex) {
+                                Spacer(Modifier.height(4.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    SmallButton("Open Settings") {
+                                        onClose()
+                                        SettingsHost.open = true
+                                    }
+                                    SmallButton("Gesture reference") { reference = true }
                                 }
-                                SmallButton("Gesture reference") { reference = true }
                             }
                         }
                     }
@@ -341,23 +362,23 @@ fun GuideScreen(onClose: () -> Unit) {
                                     .size(if (i == step) 10.dp else 7.dp)
                                     .clip(RoundedCornerShape(50))
                                     .background(if (i == step) YumeColors.accent else YumeColors.track)
-                                    .clickable { step = i }
+                                    .clickable { go(i) }
                             )
                         }
                     }
                     Spacer(Modifier.height(12.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "${step + 1} of ${TUTORIAL.size}",
+                            "${step + 1} of ${TUTORIAL.size}  ·  swipe to turn the page",
                             style = MaterialTheme.typography.bodySmall,
                             color = YumeColors.textDim,
                             modifier = Modifier.weight(1f)
                         )
                         if (step > 0) {
-                            SmallButton("Back") { step-- }
+                            SmallButton("Back") { go(step - 1) }
                             Spacer(Modifier.width(8.dp))
                         }
-                        if (step < TUTORIAL.lastIndex) SmallButton("Next") { step++ }
+                        if (step < TUTORIAL.lastIndex) SmallButton("Next") { go(step + 1) }
                         else SmallButton("Done") { onClose() }
                     }
                 } else {
@@ -407,6 +428,236 @@ fun GuideScreen(onClose: () -> Unit) {
                     }
                     Spacer(Modifier.height(12.dp))
                     SmallButton("Back to the tour") { reference = false }
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------ page animations
+
+/**
+ * A small looping animation for tutorial page [page], drawn in the theme's
+ * colours: a pen drawing a stroke, fingers pinching, layers trading places…
+ */
+@Composable
+private fun TutorialAnimation(page: Int, modifier: Modifier) {
+    val loop = androidx.compose.animation.core.rememberInfiniteTransition(label = "guide")
+    val t by loop.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(2800, easing = androidx.compose.animation.core.LinearEasing)
+        ),
+        label = "t"
+    )
+    val ink = YumeColors.text
+    val dim = YumeColors.textDim
+    val accent = YumeColors.accent
+    val panel = YumeColors.panelAlt
+    val track = YumeColors.track
+    androidx.compose.foundation.Canvas(
+        modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(YumeColors.panel)
+    ) {
+        val w = size.width
+        val h = size.height
+        val cx = w / 2f
+        val cy = h / 2f
+        val u = h / 10f
+        fun ease(x: Float) = (x * x * (3f - 2f * x)).coerceIn(0f, 1f)
+        fun seg(a: Float, b: Float) = ease(((t - a) / (b - a)).coerceIn(0f, 1f))
+        fun pen(x: Float, y: Float) {
+            drawCircle(accent, u * 0.45f, Offset(x, y))
+            drawCircle(Color.White.copy(alpha = 0.9f), u * 0.18f, Offset(x, y))
+        }
+        fun finger(x: Float, y: Float, down: Boolean = true) {
+            drawCircle(ink.copy(alpha = if (down) 0.28f else 0.12f), u * 0.9f, Offset(x, y))
+            drawCircle(ink.copy(alpha = 0.6f), u * 0.9f, Offset(x, y), style = androidx.compose.ui.graphics.drawscope.Stroke(2f))
+        }
+        // A wavy stroke from x0 to x0 + len, drawn up to fraction [f].
+        fun stroke(x0: Float, y0: Float, len: Float, f: Float, color: Color, width: Float): Offset {
+            val p = androidx.compose.ui.graphics.Path()
+            val n = 48
+            var last = Offset(x0, y0)
+            for (i in 0..(n * f).toInt()) {
+                val k = i / n.toFloat()
+                val x = x0 + len * k
+                val y = y0 + kotlin.math.sin(k * 6.2832f) * u * 1.4f
+                if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
+                last = Offset(x, y)
+            }
+            drawPath(p, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width, cap = androidx.compose.ui.graphics.StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
+            return last
+        }
+        when (page) {
+            0 -> { // Welcome: sparkles breathing around the name.
+                for (i in 0 until 6) {
+                    val a = (i / 6f + t) * 6.2832f
+                    val r = u * (3.2f + kotlin.math.sin(t * 6.2832f + i) * 0.4f)
+                    drawCircle(accent.copy(alpha = 0.35f + 0.3f * kotlin.math.sin(t * 6.2832f * 2 + i).coerceAtLeast(0f)), u * 0.35f,
+                        Offset(cx + kotlin.math.cos(a) * r * 1.6f, cy + kotlin.math.sin(a) * r * 0.8f))
+                }
+                drawRoundRect(accent, Offset(cx - u * 2.2f, cy - u * 1.2f), androidx.compose.ui.geometry.Size(u * 4.4f, u * 2.4f),
+                    androidx.compose.ui.geometry.CornerRadius(u * 0.6f))
+            }
+            1 -> { // New canvas: a card grows out of the "+".
+                val g = seg(0.1f, 0.55f)
+                val cw = u * 6f * g
+                val ch = u * 4.4f * g
+                drawRoundRect(Color.White, Offset(cx - cw / 2f, cy - ch / 2f), androidx.compose.ui.geometry.Size(cw, ch),
+                    androidx.compose.ui.geometry.CornerRadius(u * 0.4f))
+                if (g < 0.2f) {
+                    drawLine(accent, Offset(cx - u, cy), Offset(cx + u, cy), 6f)
+                    drawLine(accent, Offset(cx, cy - u), Offset(cx, cy + u), 6f)
+                }
+                if (t > 0.6f) stroke(cx - u * 2.4f, cy, u * 4.8f, seg(0.6f, 0.95f), accent, u * 0.4f)
+            }
+            2 -> { // The editor: a highlight runs along the toolbar.
+                drawRoundRect(panel, Offset(u, u), androidx.compose.ui.geometry.Size(w - 2 * u, u * 1.8f), androidx.compose.ui.geometry.CornerRadius(u))
+                val n = 10
+                val step = (w - 4 * u) / n
+                val hot = ((t * n).toInt()) % n
+                for (i in 0 until n) {
+                    val x = 2 * u + step * (i + 0.5f)
+                    drawCircle(if (i == hot) accent else dim, u * 0.35f, Offset(x, u * 1.9f))
+                }
+                drawRoundRect(panel, Offset(u, u * 3.4f), androidx.compose.ui.geometry.Size(u * 1.4f, h - u * 4.4f), androidx.compose.ui.geometry.CornerRadius(u * 0.7f))
+                drawRoundRect(Color.White, Offset(u * 3.4f, u * 3.4f), androidx.compose.ui.geometry.Size(w - u * 4.4f, h - u * 4.4f), androidx.compose.ui.geometry.CornerRadius(u * 0.3f))
+            }
+            3 -> { // Paint: the pen draws a stroke, pressing harder in the middle.
+                val f = seg(0f, 0.8f)
+                val end = stroke(u * 1.5f, cy, w - u * 3f, f, accent, u * (0.3f + 0.5f * kotlin.math.sin(f * 3.1416f)))
+                if (t < 0.85f) pen(end.x, end.y)
+            }
+            4 -> { // Brushes: a grid, one brush picked, its stroke below.
+                val pick = ((t * 3).toInt()) % 6
+                for (i in 0 until 6) {
+                    val x = cx + (i % 3 - 1) * u * 3f
+                    val y = u * 2.6f + (i / 3) * u * 2.6f
+                    drawRoundRect(if (i == pick) accent.copy(alpha = 0.3f) else panel, Offset(x - u * 1.2f, y - u * 1.1f),
+                        androidx.compose.ui.geometry.Size(u * 2.4f, u * 2.2f), androidx.compose.ui.geometry.CornerRadius(u * 0.4f))
+                    drawCircle(ink.copy(alpha = 0.3f + 0.12f * i), u * (0.3f + 0.08f * i), Offset(x, y))
+                }
+            }
+            5 -> { // Colour: a hue ring turns; a drop of colour lands.
+                val r = u * 3.2f
+                for (i in 0 until 36) {
+                    val a = (i / 36f) * 6.2832f + t * 6.2832f
+                    val c = Color.hsv((i * 10f) % 360f, 0.75f, 0.95f)
+                    drawCircle(c, u * 0.4f, Offset(cx - u * 3f + kotlin.math.cos(a) * r, cy + kotlin.math.sin(a) * r))
+                }
+                val d = seg(0.3f, 0.7f)
+                val c = Color.hsv((t * 360f) % 360f, 0.75f, 0.95f)
+                drawCircle(c, u * (0.6f + 1.8f * seg(0.7f, 0.95f)), Offset(cx + u * 4f, cy - u * 2.5f + u * 2.5f * d))
+            }
+            6 -> { // Move around: two fingers pinch and twist a square.
+                val s = 1f + 0.35f * kotlin.math.sin(t * 6.2832f)
+                val rot = 18f * kotlin.math.sin(t * 6.2832f)
+                rotate(rot, Offset(cx, cy)) {
+                    val side = u * 4f * s
+                    drawRect(Color.White, Offset(cx - side / 2f, cy - side / 2f), androidx.compose.ui.geometry.Size(side, side))
+                }
+                val a = Math.toRadians(rot.toDouble() + 45.0)
+                val d = u * 3.4f * s
+                finger(cx + (kotlin.math.cos(a) * d).toFloat(), cy + (kotlin.math.sin(a) * d).toFloat())
+                finger(cx - (kotlin.math.cos(a) * d).toFloat(), cy - (kotlin.math.sin(a) * d).toFloat())
+            }
+            7 -> { // Undo: a stroke appears, a two-finger tap takes it back.
+                val f = if (t < 0.5f) seg(0f, 0.45f) else 1f - seg(0.62f, 0.85f)
+                stroke(u * 1.5f, cy, w - u * 3f, f, accent, u * 0.45f)
+                if (t in 0.5f..0.62f) {
+                    finger(cx - u * 1.2f, cy + u * 2.6f)
+                    finger(cx + u * 1.2f, cy + u * 2.6f)
+                }
+            }
+            8 -> { // Erase: a stroke, then the eraser wipes through it.
+                stroke(u * 1.5f, cy, w - u * 3f, 1f, accent, u * 0.6f)
+                val ex = u * 1.5f + (w - u * 3f) * seg(0.15f, 0.85f)
+                drawRect(YumeColors.panel, Offset(u * 1.5f - u, 0f), androidx.compose.ui.geometry.Size(ex - u * 1.5f + u, h))
+                drawRoundRect(ink.copy(alpha = 0.8f), Offset(ex - u * 0.6f, cy - u * 1.2f), androidx.compose.ui.geometry.Size(u * 1.2f, u * 2.4f),
+                    androidx.compose.ui.geometry.CornerRadius(u * 0.3f))
+            }
+            9 -> { // Layers: three sheets; the top one slides to the bottom.
+                val colors = listOf(accent, Color(0xFF5DA9F2), Color(0xFFA8D24C))
+                val m = seg(0.25f, 0.75f)
+                for (i in 0 until 3) {
+                    val slot = if (i == 0) 2f * m else i - m
+                    val y = u * 2f + slot * u * 2.2f
+                    drawRoundRect(colors[i].copy(alpha = 0.85f), Offset(cx - u * 3.5f + slot * u * 0.6f, y),
+                        androidx.compose.ui.geometry.Size(u * 7f, u * 1.8f), androidx.compose.ui.geometry.CornerRadius(u * 0.3f))
+                }
+            }
+            10 -> { // Select and transform: marching dashes around a shape that moves.
+                val dx = u * 3f * kotlin.math.sin(t * 6.2832f)
+                drawCircle(accent, u * 1.6f, Offset(cx + dx, cy))
+                drawRect(ink, Offset(cx + dx - u * 2.2f, cy - u * 2.2f), androidx.compose.ui.geometry.Size(u * 4.4f, u * 4.4f),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(2f,
+                        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(12f, 8f), t * 80f)))
+            }
+            11 -> { // Fill: colour floods out from the tap.
+                drawRoundRect(ink.copy(alpha = 0.5f), Offset(cx - u * 4f, cy - u * 3f), androidx.compose.ui.geometry.Size(u * 8f, u * 6f),
+                    androidx.compose.ui.geometry.CornerRadius(u * 0.4f), style = androidx.compose.ui.graphics.drawscope.Stroke(3f))
+                clipRect(cx - u * 4f, cy - u * 3f, cx + u * 4f, cy + u * 3f) {
+                    drawCircle(accent.copy(alpha = 0.8f), u * 6f * seg(0.15f, 0.8f), Offset(cx - u, cy))
+                }
+                if (t < 0.2f) finger(cx - u, cy)
+            }
+            12 -> { // QuickShape: a wobbly line, a pause, then it snaps straight.
+                val x0 = u * 1.5f
+                val x1 = w - u * 1.5f
+                val snap = seg(0.6f, 0.75f)
+                val p = androidx.compose.ui.graphics.Path()
+                val f = seg(0f, 0.4f)
+                for (i in 0..(40 * f).toInt()) {
+                    val k = i / 40f
+                    val y = cy + (1f - snap) * kotlin.math.sin(k * 25f) * u * 0.5f
+                    if (i == 0) p.moveTo(x0 + (x1 - x0) * k, y) else p.lineTo(x0 + (x1 - x0) * k, y)
+                }
+                drawPath(p, accent, style = androidx.compose.ui.graphics.drawscope.Stroke(u * 0.4f, cap = androidx.compose.ui.graphics.StrokeCap.Round))
+                if (t in 0.4f..0.75f) {
+                    pen(x0 + (x1 - x0) * f, cy)
+                    drawArc(ink, -90f, 360f * seg(0.4f, 0.6f), false, Offset(x1 - u * 1.5f, cy - u * 2.4f),
+                        androidx.compose.ui.geometry.Size(u * 1.2f, u * 1.2f), style = androidx.compose.ui.graphics.drawscope.Stroke(3f))
+                }
+            }
+            13 -> { // Shortcut ring: two fingers hold, the ring opens, a finger slides to an item.
+                val open = seg(0.15f, 0.35f)
+                for (i in 0 until 6) {
+                    val a = (-90f + i * 60f) * 0.017453f
+                    val r = u * 3.2f * open
+                    drawCircle(if (i == 1 && t > 0.7f) accent else panel, u * 0.9f * open, Offset(cx + kotlin.math.cos(a) * r, cy + kotlin.math.sin(a) * r))
+                }
+                val slide = seg(0.45f, 0.7f)
+                val a1 = (-90f + 60f) * 0.017453f
+                finger(cx - u * 0.8f, cy + u * 0.4f, t < 0.85f)
+                finger(cx + u * 0.8f + (kotlin.math.cos(a1) * u * 3.2f - u * 0.8f) * slide, cy - u * 0.4f + (kotlin.math.sin(a1) * u * 3.2f + u * 0.4f) * slide, t < 0.85f)
+            }
+            14 -> { // Adjustments: a slider moves and the picture's hue follows.
+                val v = 0.5f + 0.5f * kotlin.math.sin(t * 6.2832f)
+                drawRoundRect(Color.hsv(360f * v, 0.6f, 0.9f), Offset(cx - u * 4f, u), androidx.compose.ui.geometry.Size(u * 8f, u * 5f),
+                    androidx.compose.ui.geometry.CornerRadius(u * 0.4f))
+                drawLine(track, Offset(cx - u * 4f, u * 8f), Offset(cx + u * 4f, u * 8f), 6f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                drawCircle(accent, u * 0.5f, Offset(cx - u * 4f + u * 8f * v, u * 8f))
+            }
+            15 -> { // Save and share: a progress bar fills, a tick appears.
+                val p = seg(0.05f, 0.75f)
+                drawRoundRect(track, Offset(cx - u * 4f, cy - u * 0.4f), androidx.compose.ui.geometry.Size(u * 8f, u * 0.8f), androidx.compose.ui.geometry.CornerRadius(u * 0.4f))
+                drawRoundRect(accent, Offset(cx - u * 4f, cy - u * 0.4f), androidx.compose.ui.geometry.Size(u * 8f * p, u * 0.8f), androidx.compose.ui.geometry.CornerRadius(u * 0.4f))
+                if (t > 0.78f) {
+                    drawLine(accent, Offset(cx - u * 0.8f, cy - u * 2.2f), Offset(cx - u * 0.1f, cy - u * 1.5f), 8f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                    drawLine(accent, Offset(cx - u * 0.1f, cy - u * 1.5f), Offset(cx + u * 1.2f, cy - u * 3f), 8f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                }
+            }
+            else -> { // Make it yours: switches flip and a slider glides.
+                for (i in 0 until 3) {
+                    val y = u * 2.2f + i * u * 2.4f
+                    val on = ((t * 3 + i * 0.4f) % 1f) > 0.5f
+                    drawLine(dim, Offset(cx - u * 4f, y), Offset(cx + u, y), 4f)
+                    drawRoundRect(if (on) accent else track, Offset(cx + u * 2f, y - u * 0.6f), androidx.compose.ui.geometry.Size(u * 2.2f, u * 1.2f),
+                        androidx.compose.ui.geometry.CornerRadius(u * 0.6f))
+                    drawCircle(Color.White, u * 0.5f, Offset(cx + u * (if (on) 3.6f else 2.6f), y))
                 }
             }
         }
