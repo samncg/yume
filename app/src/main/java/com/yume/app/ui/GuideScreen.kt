@@ -90,7 +90,7 @@ private val GUIDE = listOf(
             GuideItem("Brush Studio groups", "Sketching, Inking, Calligraphy, Painting, Airbrushing, Textures, Elements…"),
             GuideItem("Long-press a brush", "Add it to (or remove it from) ★ Favorites"),
             GuideItem("Recent", "The brushes you painted with last"),
-            GuideItem("More settings → Import brushes…", "Procreate .brush / .brushset, Photoshop .abr, Clip Studio .sut, GIMP .gbr, images"),
+            GuideItem("More settings → Import brushes…", "Procreate .brush / .brushset, Photoshop .abr, Clip Studio .sut / .sutg, GIMP .gbr, images; several files at once"),
             GuideItem("Side rail sliders", "Brush size and opacity; drag the rail by its handle to move it")
         )
     ),

@@ -1110,3 +1110,13 @@ feature=88-brush-undo L0=c37ad379 L1=58d77751/e068eda2 L2=d5802b36 L3=23eae7e1 C
 # liftend (new, 2400x1200, assist 0.5, smoothing 0.8, pressure falling over the
 #   last 4 samples): widths toward the end now fall steadily (pen 62 -> 34 px,
 #   was a 50 px stub; acrylic 160 -> 93, was a flat 148).
+
+# --- Brush import: Clip Studio tips, .sutg, ABR names, Procreate sets (Nov 2026)
+# Importer only; no painting or compositing code changed (golden / features
+# unaffected). brushimport (test.abr / .brush / .brushset / .gbr / .sut): all
+# import with a tip as before (test.sut now keyed by row: it has no
+# CatalogPath column). importtest on a real 21-brush set (PLGR 2026 v2):
+#   .abr 6 brushes, names / diameters / spacing from the descriptor;
+#   .brushset 6 (was 16: Reset/ copies and QuickLook previews skipped);
+#   .sutg 6 and each .sut 1, every one with its real tip (was round), the
+#   textured ones with their texture; materials up to 7 MB read in pieces.

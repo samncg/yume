@@ -192,6 +192,8 @@ object YumeHarness {
                     out.append(ScenePainter.paintSunset(app, save = only == "sunset"))
                 } else if (only == "bleedtest") {
                     out.append(scoreBleedTest(app))
+                } else if (only == "importtest") {
+                    out.append(scoreImportTest(app))
                 } else if (only == "liftend") {
                     out.append(scoreLiftEnd(app))
                 } else if (only == "smudgeperf") {
@@ -4022,6 +4024,73 @@ object YumeHarness {
      * Writes files/liftend.png and reports the width just before the lift
      * point against the width at mid stroke.
      */
+    /**
+     * Imports every file in files/importtest/ with the real importer and
+     * reports what came in; writes files/importtest.png, a sheet of every
+     * imported tip (and texture, right of it) with a test stroke under it.
+     */
+    private fun scoreImportTest(app: YumeApp): String {
+        val out = StringBuilder()
+        val dir = File(app.filesDir, "importtest")
+        val files = dir.listFiles()?.sortedBy { it.name }.orEmpty()
+        if (files.isEmpty()) return "importtest: no files in ${dir.absolutePath}\n"
+        val all = ArrayList<com.yume.app.engine.BrushPreset>()
+        for (f in files) {
+            val t0 = System.nanoTime()
+            val r = com.yume.app.engine.ForeignBrushes.import(f.readBytes(), f.name, app.cacheDir)
+            val ms = (System.nanoTime() - t0) / 1e6
+            out.append("importtest ${f.name}: ${r.presets.size} brush(es) in ${"%.0f".format(ms)} ms. ${r.note}\n")
+            for (p in r.presets) {
+                out.append("    ${p.name}: size ${p.size.toInt()} spacing ${"%.2f".format(p.spacing)} opacity ${"%.2f".format(p.opacity)} " +
+                    "tip=${if (p.shapeId.isNotEmpty()) "yes" else "round"} texture=${if (p.grainId.isNotEmpty()) "yes ${"%.2f".format(p.grain)}" else "no"} " +
+                    "rot ${p.rotation.toInt()} mode ${p.rotationMode}\n")
+            }
+            all.addAll(r.presets)
+        }
+        // Sheet: tip | texture | stroke.
+        val cell = 200
+        val rows = all.size
+        val sheet = Bitmap.createBitmap(cell * 4, max(1, rows) * cell, Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(sheet)
+        c.drawColor(0xFF303030.toInt())
+        val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+        for ((k, p) in all.withIndex()) {
+            val y = k * cell
+            p.shapeId.takeIf { it.isNotEmpty() }?.let { com.yume.app.engine.BrushAssets.shape(it) }?.let {
+                c.drawRect(4f, y + 4f, cell - 4f, y + cell - 4f, android.graphics.Paint().apply { color = 0xFFFFFFFF.toInt() })
+                val tint = android.graphics.Paint(paint).apply { colorFilter = android.graphics.PorterDuffColorFilter(0xFF000000.toInt(), android.graphics.PorterDuff.Mode.SRC_IN) }
+                c.drawBitmap(it, null, android.graphics.RectF(4f, y + 4f, cell - 4f, y + cell - 4f), tint)
+            }
+            p.grainId.takeIf { it.isNotEmpty() }?.let { com.yume.app.engine.BrushAssets.grain(it) }?.let {
+                c.drawBitmap(it, null, android.graphics.RectF(cell + 4f, y + 4f, 2f * cell - 4f, y + cell - 4f), paint)
+            }
+            // A stroke with the brush, scaled to fit the cell.
+            val w = cell * 2
+            val engine = DrawingEngine(w, cell)
+            engine.backgroundColor = 0xFFFFFFFF.toInt()
+            val session = DrawingSession("it", "IT", engine, History())
+            identityView(session, w, cell)
+            session.presets = listOf(p.copy(size = 60f))
+            session.activePresetId = p.id
+            session.category = p.category
+            session.tool = Tool.Brush
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            val l = engine.newLayer("S")
+            engine.selectLayer(l.id)
+            session.color = 0xFF202040.toInt()
+            session.stroke((0..20).map { P(30f + it * 17f, cell / 2f + 40f * kotlin.math.sin(it / 3f), 0.4f + 0.6f * kotlin.math.sin(it / 20f * 3.14f)) })
+            session.runCommands()
+            engine.compositeAll()
+            val flat = engine.flatten()
+            c.drawBitmap(flat, 2f * cell, y.toFloat(), null)
+            flat.recycle()
+        }
+        java.io.FileOutputStream(File(app.filesDir, "importtest.png")).use { sheet.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        sheet.recycle()
+        return out.toString()
+    }
+
     private fun scoreLiftEnd(app: YumeApp): String {
         val out = StringBuilder()
         val w = 2400

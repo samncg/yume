@@ -19,9 +19,10 @@ import kotlin.math.min
  *   brush's settings archive.
  * - Photoshop `.abr` (versions 1, 2, 6 to 10): every sampled tip; spacing
  *   where the file says it.
- * - Clip Studio Paint `.sut` (best effort): brush names and any embedded tip
- *   images; a brush whose tip is stored in Clip Studio's own image format
- *   comes in with a round tip.
+ * - Clip Studio Paint `.sut` and `.sutg` (a group of brushes): every brush,
+ *   with its tip and texture read out of Clip Studio's own material format
+ *   ([ClipStudioMaterial]), and its size, spacing, opacity, flow, hardness,
+ *   direction and texture strength.
  * - GIMP `.gbr`, and plain images (PNG, JPEG, WebP) as a tip shape.
  *
  * Tip images are greyscale masks; whichever way round a file stores them
@@ -86,13 +87,13 @@ object ForeignBrushes {
      * The side that fills the border is the empty one: a mask framed by high
      * values is inverted.
      */
-    private fun coverageOf(values: IntArray, w: Int, h: Int): Bitmap? {
+    private fun coverageOf(values: IntArray, w: Int, h: Int, autoInvert: Boolean = true): Bitmap? {
         if (w <= 0 || h <= 0 || values.size < w * h) return null
         var sum = 0L
         var n = 0
         for (x in 0 until w) { sum += values[x] + values[(h - 1) * w + x]; n += 2 }
         for (y in 0 until h) { sum += values[y * w] + values[y * w + w - 1]; n += 2 }
-        val invert = n > 0 && sum / n > 127
+        val invert = autoInvert && n > 0 && sum / n > 127
         val px = IntArray(w * h)
         var any = false
         for (i in 0 until w * h) {
@@ -207,6 +208,9 @@ object ForeignBrushes {
             }
         } else {
             val sub = r.s16()
+            // Tips by their id, and the descriptor (names, sizes, spacing).
+            val tips = LinkedHashMap<String, String>()
+            var desc: ByteArray? = null
             while (r.left > 12) {
                 val sig = String(bytes, r.p, 4, Charsets.US_ASCII)
                 if (sig != "8BIM") break
@@ -222,6 +226,9 @@ object ForeignBrushes {
                         var padded = size
                         while (padded % 4 != 0) padded++
                         val next = r.p + padded
+                        val idLen = bytes[r.p].toInt() and 0xFF
+                        val tipId = if (idLen in 1..80 && r.p + 1 + idLen <= bytes.size)
+                            String(bytes, r.p + 1, idLen, Charsets.US_ASCII) else ""
                         r.skip(if (sub == 1) 47 else 301)
                         val top = r.s32(); val left = r.s32(); val bottom = r.s32(); val right = r.s32()
                         val depth = r.s16()
@@ -232,16 +239,106 @@ object ForeignBrushes {
                         if (w in 1..5000 && h in 1..5000) {
                             val mask = runCatching { sampled(r, w, h, depth, compressed) }.getOrNull()
                             val id = storeShape(mask?.let { coverageOf(it, w, h) })
-                            if (id.isNotEmpty()) out.add(newPreset("$name $n", shapeId = id, spacing = 0.25f))
+                            if (id.isNotEmpty()) tips[tipId.ifEmpty { "#$n" }] = id
                         }
                         r.p = next
                     }
+                } else if (key == "desc" && end <= bytes.size) {
+                    desc = bytes.copyOfRange(r.p, end)
                 }
                 r.p = end + (len and 1)
+            }
+            var capped = false
+            val used = HashSet<String>()
+            desc?.let { d ->
+                for (b in abrDescriptor(d)) {
+                    val id = tips[b.tipId] ?: continue
+                    used.add(b.tipId)
+                    var p = newPreset(b.name.ifBlank { "$name ${out.size + 1}" }, shapeId = id,
+                        spacing = (b.spacing ?: 25f) / 100f)
+                    b.diameter?.let {
+                        if (it > 900f) capped = true
+                        p = p.copy(size = it.coerceIn(1f, 900f))
+                    }
+                    out.add(p)
+                }
+            }
+            // Tips no brush in the descriptor refers to (or no descriptor).
+            var n = 0
+            for ((tid, id) in tips) {
+                n++
+                if (tid in used) continue
+                out.add(newPreset("$name $n", shapeId = id, spacing = 0.25f))
+            }
+            if (capped && out.isNotEmpty()) {
+                return Result(out, "Imported ${out.size} Photoshop brush${if (out.size == 1) "" else "es"}. Sizes above 900 px were set to 900 px.")
             }
         }
         return if (out.isEmpty()) Result(emptyList(), "No sampled brush tips found in that .abr file.")
         else Result(out, "Imported ${out.size} Photoshop brush${if (out.size == 1) "" else "es"}.")
+    }
+
+    private class AbrBrush(val name: String, val tipId: String, val diameter: Float?, val spacing: Float?)
+
+    /**
+     * The brushes of an .abr descriptor ("desc" section): every brushPreset
+     * object's name, its sampled tip id, diameter (px) and spacing (%). Read
+     * by locating the keys inside each preset's span, not by a full
+     * descriptor parse.
+     */
+    private fun abrDescriptor(d: ByteArray): List<AbrBrush> {
+        val marker = "brushPreset".toByteArray(Charsets.US_ASCII)
+        val starts = ArrayList<Int>()
+        var i = 0
+        while (true) {
+            i = indexOf(d, marker, i)
+            if (i < 0) break
+            // The preset object, not the "brushPreset" bool of a tool preset.
+            if (i + marker.size + 4 <= d.size && String(d, i + marker.size, 4, Charsets.US_ASCII) != "bool") starts.add(i)
+            i += marker.size
+        }
+        val out = ArrayList<AbrBrush>()
+        for ((k, st) in starts.withIndex()) {
+            val en = if (k + 1 < starts.size) starts[k + 1] else d.size
+            val name = abrText(d, "Nm  TEXT", st, en).orEmpty()
+            val tip = abrText(d, "sampledDataTEXT", st, en) ?: continue
+            out.add(AbrBrush(name, tip, abrUnit(d, "Dmtr", "#Pxl", st, en), abrUnit(d, "Spcn", "#Prc", st, en)))
+        }
+        return out
+    }
+
+    private fun indexOf(hay: ByteArray, needle: ByteArray, from: Int, until: Int = hay.size): Int {
+        var i = max(0, from)
+        val last = min(until, hay.size) - needle.size
+        while (i <= last) {
+            var k = 0
+            while (k < needle.size && hay[i + k] == needle[k]) k++
+            if (k == needle.size) return i
+            i++
+        }
+        return -1
+    }
+
+    /** A TEXT value (u32 length in UTF-16 units, then UTF-16BE) after [key]. */
+    private fun abrText(d: ByteArray, key: String, from: Int, until: Int): String? {
+        val k = indexOf(d, key.toByteArray(Charsets.US_ASCII), from, until)
+        if (k < 0) return null
+        val at = k + key.length
+        if (at + 4 > d.size) return null
+        val n = ((d[at].toInt() and 0xFF) shl 24) or ((d[at + 1].toInt() and 0xFF) shl 16) or
+            ((d[at + 2].toInt() and 0xFF) shl 8) or (d[at + 3].toInt() and 0xFF)
+        if (n !in 0..1000 || at + 4 + 2 * n > d.size) return null
+        return String(d, at + 4, 2 * n, Charsets.UTF_16BE).trimEnd('\u0000').trim()
+    }
+
+    /** A UntF value (unit tag, then a big-endian double) after [key]. */
+    private fun abrUnit(d: ByteArray, key: String, unit: String, from: Int, until: Int): Float? {
+        val k = indexOf(d, (key + "UntF" + unit).toByteArray(Charsets.US_ASCII), from, until)
+        if (k < 0) return null
+        val at = k + key.length + 8
+        if (at + 8 > d.size) return null
+        val v = ByteBuffer.wrap(d, at, 8).order(ByteOrder.BIG_ENDIAN).double
+        return if (v.isFinite()) v.toFloat() else null
     }
 
     /** One sampled tip: raw or PackBits rows, 8 or 16 bit; returns 8-bit values. */
@@ -297,11 +394,21 @@ object ForeignBrushes {
             }
         }
         val out = ArrayList<BrushPreset>()
-        for ((dir, files) in folders) {
+        // Each brush folder carries a Reset/ copy (its original settings) and
+        // a QuickLook/ preview: neither is a brush of its own.
+        folders.keys.removeAll { d -> d.split('/').any { it == "Reset" || it == "QuickLook" } }
+        val anyBrush = folders.values.any { it.containsKey("Brush.archive") || it.containsKey("Shape.png") }
+        // The set's own order (brushset.plist lists the folders).
+        val order = folders[""]?.get("brushset.plist")?.let { plist ->
+            Regex("<string>([0-9A-Fa-f-]{36})</string>").findAll(plist.decodeToString()).map { it.groupValues[1] }.toList()
+        }.orEmpty()
+        val ordered = folders.entries.sortedBy { (d, _) -> order.indexOf(d).let { if (it < 0) Int.MAX_VALUE else it } }
+        for ((dir, files) in ordered) {
             val shape = files["Shape.png"]
             val grain = files["Grain.png"]
             val archive = files["Brush.archive"]
             if (shape == null && archive == null) {
+                if (anyBrush) continue
                 // A zip of plain tip images.
                 for ((f, data) in files) {
                     if (!f.lowercase().let { it.endsWith(".png") || it.endsWith(".jpg") || it.endsWith(".jpeg") }) continue
@@ -324,7 +431,13 @@ object ForeignBrushes {
                 ?: if (dir.isEmpty()) name else "$name ${out.size + 1}"
             var p = newPreset(title, shapeId = shapeId, grainId = grainId, spacing = num("plotSpacing") ?: 0.1f)
             num("paintOpacity")?.let { p = p.copy(opacity = it.coerceIn(0.05f, 1f)) }
-            num("paintSize")?.let { p = p.copy(size = (4f + it * 200f).coerceIn(2f, 300f)) }
+            // Size: the slider (0..1) between the brush's own min and max
+            // (both in hundreds of pixels).
+            num("paintSize")?.let { ps ->
+                val mx = num("maxSize") ?: 2f
+                val mn = num("minSize") ?: 0.01f
+                p = p.copy(size = ((mn + (mx - mn) * ps) * 100f).coerceIn(2f, 900f))
+            }
             num("plotJitter")?.let { p = p.copy(jitter = it.coerceIn(0f, 1f)) }
             num("plotSmoothing")?.let { p = p.copy(smoothing = it.coerceIn(0f, 1f)) }
             num("dynamicsPressureSize")?.let { p = p.copy(pressureSize = it.coerceIn(0f, 1f)) }
@@ -346,39 +459,187 @@ object ForeignBrushes {
         val f = File(scratch, "import-${System.nanoTime()}.sut")
         f.writeBytes(bytes)
         val out = ArrayList<BrushPreset>()
+        var capped = false
+        var roundTips = 0
         try {
             val db = android.database.sqlite.SQLiteDatabase.openDatabase(
                 f.absolutePath, null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY
             )
             db.use {
-                val names = ArrayList<String>()
+                // Materials (tips and textures) by catalog path.
+                val materials = HashMap<String, ByteArray>()
                 runCatching {
-                    db.rawQuery("SELECT NodeName FROM Node", null).use { c ->
-                        while (c.moveToNext()) c.getString(0)?.takeIf { it.isNotBlank() }?.let(names::add)
+                    // Read in 1 MB pieces: a cursor row holds at most 2 MB, and a
+                    // material with a large tip or texture is several MB.
+                    val rows = ArrayList<Triple<Long, String, Int>>()
+                    val withPath = runCatching {
+                        db.rawQuery("SELECT rowid, CatalogPath, length(FileData) FROM MaterialFile", null).use { c ->
+                            while (c.moveToNext()) {
+                                val path = c.getString(1)?.trimStart('.') ?: "#" + c.getLong(0)
+                                rows.add(Triple(c.getLong(0), path, c.getInt(2)))
+                            }
+                        }
+                    }.isSuccess
+                    if (!withPath) {
+                        // Older files: no catalog path, materials by row.
+                        db.rawQuery("SELECT rowid, length(FileData) FROM MaterialFile", null).use { c ->
+                            while (c.moveToNext()) rows.add(Triple(c.getLong(0), "#" + c.getLong(0), c.getInt(1)))
+                        }
+                    }
+                    for ((rowid, path, len) in rows) {
+                        if (len <= 0 || len > 256 * 1024 * 1024 || materials.containsKey(path)) continue
+                        val buf = java.io.ByteArrayOutputStream(len)
+                        val piece = 1 shl 20
+                        var at = 0
+                        while (at < len) {
+                            val n = minOf(piece, len - at)
+                            db.rawQuery(
+                                "SELECT substr(FileData, ?, ?) FROM MaterialFile WHERE rowid = ?",
+                                arrayOf((at + 1).toString(), n.toString(), rowid.toString())
+                            ).use { c -> if (c.moveToFirst()) c.getBlob(0)?.let { buf.write(it) } }
+                            at += n
+                        }
+                        materials[path] = buf.toByteArray()
                     }
                 }
-                val tips = ArrayList<String>()
+                val shapeIds = HashMap<String, String>()
+                val grainIds = HashMap<String, String>()
+                fun materialFor(ref: ByteArray?): String? {
+                    if (ref == null) return null
+                    val text = utf16Strings(ref)
+                    return materials.keys.firstOrNull { key -> text.any { it.contains(key) } }
+                }
+                fun shapeFor(key: String): String = shapeIds.getOrPut(key) {
+                    val blob = materials[key] ?: return@getOrPut ""
+                    val mask = runCatching { ClipStudioMaterial.decode(blob) }.getOrNull()
+                    val bmp = mask?.let { coverageOf(it.values, it.width, it.height, autoInvert = false) }
+                        ?: embeddedPng(blob)?.let { png ->
+                            BitmapFactory.decodeByteArray(png, 0, png.size)?.let { coverageOf(grey(it), it.width, it.height) }
+                        }
+                    storeShape(bmp)
+                }
+                fun grainFor(key: String): String = grainIds.getOrPut(key) {
+                    val blob = materials[key] ?: return@getOrPut ""
+                    val mask = runCatching { ClipStudioMaterial.decode(blob) }.getOrNull() ?: return@getOrPut ""
+                    storeGrain(coverageOf(mask.values, mask.width, mask.height, autoInvert = false))
+                }
+
+                // Brush settings by variant id.
+                class Variant(
+                    val size: Float?, val interval: Float?, val opacity: Float?, val flow: Float?,
+                    val hardness: Float?, val rotation: Float?, val rotationEffector: Int?,
+                    val textureDensity: Float?, val pattern: ByteArray?, val texture: ByteArray?
+                )
+                val variants = HashMap<Long, Variant>()
                 runCatching {
-                    db.rawQuery("SELECT FileData FROM MaterialFile", null).use { c ->
+                    db.rawQuery("SELECT * FROM Variant", null).use { c ->
+                        fun col(n: String) = c.getColumnIndex(n)
+                        fun num(n: String): Float? = col(n).takeIf { it >= 0 && !c.isNull(it) }?.let { c.getDouble(it).toFloat() }
+                        fun int(n: String): Int? = col(n).takeIf { it >= 0 && !c.isNull(it) }?.let {
+                            if (c.getType(it) == android.database.Cursor.FIELD_TYPE_INTEGER) c.getInt(it) else null
+                        }
+                        fun blob(n: String): ByteArray? = col(n).takeIf { it >= 0 && !c.isNull(it) }?.let {
+                            if (c.getType(it) == android.database.Cursor.FIELD_TYPE_BLOB) c.getBlob(it) else null
+                        }
                         while (c.moveToNext()) {
-                            val blob = c.getBlob(0) ?: continue
-                            embeddedPng(blob)?.let { png ->
-                                BitmapFactory.decodeByteArray(png, 0, png.size)?.let { bmp ->
-                                    storeShape(coverageOf(grey(bmp), bmp.width, bmp.height)).takeIf { it.isNotEmpty() }?.let(tips::add)
-                                }
+                            val id = col("VariantID").takeIf { it >= 0 }?.let { c.getLong(it) } ?: continue
+                            variants[id] = Variant(
+                                num("BrushSize"), num("BrushInterval"), num("Opacity"), num("BrushFlow"),
+                                num("BrushHardness"), num("BrushRotation"), int("BrushRotationEffector"),
+                                num("TextureDensity"), blob("BrushPatternImageArray"), blob("TextureImage")
+                            )
+                        }
+                    }
+                }
+
+                // One preset per named brush (a .sutg holds several).
+                val nodes = ArrayList<Pair<String, Long>>()
+                runCatching {
+                    db.rawQuery("SELECT NodeName, NodeVariantID FROM Node", null).use { c ->
+                        while (c.moveToNext()) {
+                            val n = c.getString(0)?.trim().orEmpty()
+                            val v = if (c.isNull(1)) 0L else c.getLong(1)
+                            if (n.isNotEmpty() && v != 0L) nodes.add(n to v)
+                        }
+                    }
+                }
+                if (nodes.isEmpty()) {
+                    // Older files: the names alone, with the first variant.
+                    runCatching {
+                        db.rawQuery("SELECT NodeName FROM Node", null).use { c ->
+                            while (c.moveToNext()) c.getString(0)?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                                nodes.add(it to (variants.keys.minOrNull() ?: 0L))
                             }
                         }
                     }
                 }
-                val title = names.lastOrNull() ?: name
-                out.add(newPreset(title, shapeId = tips.firstOrNull().orEmpty(), spacing = 0.1f))
+                if (nodes.isEmpty()) nodes.add(name to (variants.keys.minOrNull() ?: 0L))
+
+                // A brush whose tip reference cannot be resolved (older or
+                // hand-made files) takes the first material that decodes.
+                val fallbackShape: String by lazy {
+                    materials.keys.asSequence().map(::shapeFor).firstOrNull { it.isNotEmpty() }.orEmpty()
+                }
+                for ((brushName, vid) in nodes) {
+                    val v = variants[vid]
+                    val shapeId = (materialFor(v?.pattern)?.let(::shapeFor)).orEmpty()
+                        .ifEmpty { if (materialFor(v?.pattern) == null) fallbackShape else "" }
+                    val grainId = materialFor(v?.texture)?.let(::grainFor).orEmpty()
+                    if (shapeId.isEmpty()) roundTips++
+                    // Clip Studio's interval is a percentage of the brush size.
+                    val spacing = ((v?.interval ?: 10f) / 100f).coerceIn(0.02f, 2f)
+                    var p = newPreset(brushName, shapeId = shapeId, grainId = grainId, spacing = spacing)
+                    v?.size?.let {
+                        if (it > 900f) capped = true
+                        p = p.copy(size = it.coerceIn(1f, 900f))
+                    }
+                    v?.opacity?.let { p = p.copy(opacity = (it / 100f).coerceIn(0.02f, 1f)) }
+                    v?.flow?.let { p = p.copy(flow = (it / 100f).coerceIn(0.02f, 1f)) }
+                    if (shapeId.isEmpty()) v?.hardness?.let { p = p.copy(hardness = (it / 100f).coerceIn(0f, 1f)) }
+                    v?.rotation?.let { p = p.copy(rotation = ((it % 360f) + 360f) % 360f) }
+                    // Rotation effector bit 64: the tip follows the stroke direction.
+                    if ((v?.rotationEffector ?: 0) and 64 != 0) p = p.copy(rotationMode = 1)
+                    if (grainId.isNotEmpty()) {
+                        p = p.copy(grain = ((v?.textureDensity ?: 60f) / 100f).coerceIn(0.05f, 1f))
+                    }
+                    out.add(p)
+                }
             }
         } finally {
             f.delete()
         }
-        val tipNote = if (out.firstOrNull()?.shapeId.isNullOrEmpty())
-            " Its tip is stored in Clip Studio's own format, so it uses a round tip." else ""
-        return Result(out, "Imported “${out.firstOrNull()?.name ?: name}” from Clip Studio.$tipNote")
+        val n = out.size
+        val what = if (n == 1) "“${out[0].name}”" else "$n brushes"
+        val notes = buildList {
+            if (capped) add("Sizes above 900 px were set to 900 px.")
+            if (roundTips > 0) add(
+                if (roundTips == n) "Its tip could not be read, so it uses a round tip."
+                else "$roundTips of them use a round tip (their tip could not be read)."
+            )
+        }
+        return Result(out, "Imported $what from Clip Studio." + notes.joinToString(" ", prefix = if (notes.isEmpty()) "" else " "))
+    }
+
+    /** Printable UTF-16BE runs inside [b] (material references are stored that way). */
+    private fun utf16Strings(b: ByteArray): List<String> {
+        val out = ArrayList<String>()
+        val sb = StringBuilder()
+        var i = 0
+        while (i + 1 < b.size) {
+            val hi = b[i].toInt() and 0xFF
+            val lo = b[i + 1].toInt() and 0xFF
+            if (hi == 0 && lo in 0x20..0x7E) {
+                sb.append(lo.toChar())
+            } else {
+                if (sb.length >= 6) out.add(sb.toString())
+                sb.setLength(0)
+            }
+            i += 2
+        }
+        if (sb.length >= 6) out.add(sb.toString())
+        // A reference can also sit at an odd offset: try that alignment too.
+        if (out.isEmpty() && b.size > 2) return utf16Strings(b.copyOfRange(1, b.size))
+        return out
     }
 
     /** The first PNG stream inside [blob], if any. */

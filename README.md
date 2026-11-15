@@ -233,14 +233,36 @@ blender keeps up with the pen (`smudgeperf` harness: 6–11 ms per frame at 40,
 120 and 300 px, was 12–87 ms).
 
 **Importing brushes from other apps** — *Import brushes…* (More settings)
-reads Yume's own `.yumebrush` files and:
+reads Yume's own `.yumebrush` files and the formats below. Several files can
+be picked at once (a set exported as one file per brush).
 
 - **Procreate** `.brush` and `.brushset`: tip and grain images, name, spacing,
-  size, opacity, jitter, streamline, pressure response and rotation.
-- **Photoshop** `.abr` (versions 1, 2 and 6–10): every sampled tip.
-- **Clip Studio Paint** `.sut`: the brush name and any embedded tip image (a
-  tip stored in Clip Studio's own image format comes in as a round tip).
+  size (the size slider between the brush's own minimum and maximum),
+  opacity, jitter, streamline, pressure response and rotation. A set comes in
+  in its own order; each brush's `Reset/` copy and preview are skipped.
+- **Photoshop** `.abr` (versions 1, 2 and 6–10): every sampled tip, with each
+  brush's name, diameter and spacing from the file's descriptor.
+- **Clip Studio Paint** `.sut` and `.sutg` (a group: every brush in it): the
+  tip and the texture, read from Clip Studio's own material format, with
+  size, spacing, opacity, flow, hardness, angle, direction and texture
+  strength. See *How Clip Studio tips are read* below.
 - **GIMP** `.gbr`, and any PNG, JPEG or WebP image as a stamp shape.
+
+Sizes above the brush maximum (900 px) are set to 900 px, and the import
+message says so.
+
+*How Clip Studio tips are read* (`engine/ClipStudioMaterial.kt`): a brush
+file is a SQLite database (brush names in `Node`, settings in `Variant`,
+materials in `MaterialFile`). A material is a tar archive whose
+`material_0.layer` is a "C2F" container of `[length][tag][data][crc]` chunks;
+its data chunks are another SQLite file, the first pages of which are
+protected and cannot be read. The tip itself is stored as 256 x 256 tiles
+(`BlockDataBeginChunk` records, zlib, one byte of alpha per pixel), and its
+size in a `Parameter` record. Large tiles continue on overflow pages, so the
+readable table pages are walked with SQLite's own payload rules to put each
+record back together; the page size is in the protected header, so the one
+under which the most tiles decompress is used. Material blobs are read in
+1 MB pieces (a cursor row holds at most 2 MB).
 
 Imported brushes land in the **Imported** group.
 
@@ -1027,9 +1049,10 @@ step. Any GPU failure turns the GPU path off for the rest of the run.
 - **Latency: no front-buffer rendering yet.** Stylus events are delivered
   unbatched and the stroke tip is predicted ahead of the pen, but frames
   still go through the normal double-buffered surface.
-- **Clip Studio brushes:** tips stored in Clip Studio's own image format
-  (rather than an embedded PNG) come in as a round tip. Krita `.kpp` presets
-  are not read.
+- **Clip Studio brushes:** dual brushes, watercolour edges and colour
+  jitter are not carried over, and pressure curves keep Yume's defaults.
+  Photoshop pattern textures (the `patt` section) are not read yet. Krita
+  `.kpp` presets are not read.
 
 - **Groups cannot be nested.** A group holds layers, not other groups. The
   compositor renders groups with one scratch surface and the layer model is
