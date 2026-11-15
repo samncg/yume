@@ -1166,3 +1166,8 @@ phase=35-comp-clip L0=26b5fa73 L1=412503cf/4512cb4c L2=5505eea5/0934e1ed L3=9ff2
 # Guide pages / QuickShape timing / UI scale / 12K warning / solid gallery
 # dialogs: UI and input timing only (no painting or compositing change), not
 # gated beyond the build.
+
+# --- Pass-through groups (Nov 2026) --------------------------------------------
+# A Normal group whose layers use other blend modes passes through: its layers
+# blend with everything below the group. Golden output identical to the
+# accepted baseline (phase 35 = 5e04c64a); features identical; overlaytest PASS.

@@ -1594,11 +1594,28 @@ class DrawingEngine(val width: Int, val height: Int) {
                         inner = child.tiles
                     }
                     gc.restoreToCount(gcp)
-                    groupPaint.reset()
-                    groupPaint.isFilterBitmap = true
-                    groupPaint.alpha = (group.opacity * 255f).toInt().coerceIn(0, 255)
-                    groupPaint.blendMode = group.blend.mode
-                    drawBuffer(c, buf, rect, groupPaint)
+                    // A Normal group with blending layers inside passes
+                    // through (as in Photoshop and Procreate): its layers blend
+                    // with everything below the group, not only with each
+                    // other. The isolated buffer above still serves as the
+                    // base for a layer clipped to the group.
+                    val passThrough = group.blend == LayerBlend.Normal &&
+                        (i until end).any { k -> layers[k].visible && layers[k].blend != LayerBlend.Normal }
+                    if (passThrough) {
+                        var pBase: PixelSource? = null
+                        for (k in i until end) {
+                            val child = layers[k]
+                            if (!child.visible || child.opacity <= 0.002f) continue
+                            drawLayerInto(c, child, rect, pBase, group.opacity)
+                            pBase = child.tiles
+                        }
+                    } else {
+                        groupPaint.reset()
+                        groupPaint.isFilterBitmap = true
+                        groupPaint.alpha = (group.opacity * 255f).toInt().coerceIn(0, 255)
+                        groupPaint.blendMode = group.blend.mode
+                        drawBuffer(c, buf, rect, groupPaint)
+                    }
                     base = BitmapSource(buf, if (sparseMode) rect else null)
                 }
                 i = end
@@ -1660,7 +1677,7 @@ class DrawingEngine(val width: Int, val height: Int) {
         CompositeProfile.blitNanos += System.nanoTime() - t0
     }
 
-    private fun drawLayerInto(c: Canvas, layer: Layer, rect: Rect, clipBase: PixelSource?) {
+    private fun drawLayerInto(c: Canvas, layer: Layer, rect: Rect, clipBase: PixelSource?, opacityScale: Float = 1f) {
         if (CompositeProfile.enabled) CompositeProfile.layerDraws++
         val hasMask = layer.maskEnabled && layer.hasMask
         val clipped = layer.clipping && clipBase != null
@@ -1670,7 +1687,7 @@ class DrawingEngine(val width: Int, val height: Int) {
             layerPaint.reset()
             layerPaint.isFilterBitmap = true
             layerPaint.isAntiAlias = false
-            layerPaint.alpha = (layer.opacity * 255f).toInt().coerceIn(0, 255)
+            layerPaint.alpha = (layer.opacity * opacityScale * 255f).toInt().coerceIn(0, 255)
             layerPaint.blendMode = layer.blend.mode
             if (previewed) {
                 val filter = pv!!.filter
@@ -1737,7 +1754,7 @@ class DrawingEngine(val width: Int, val height: Int) {
         bc.restoreToCount(cp)
         layerPaint.reset()
         layerPaint.isFilterBitmap = true
-        layerPaint.alpha = (layer.opacity * 255f).toInt().coerceIn(0, 255)
+        layerPaint.alpha = (layer.opacity * opacityScale * 255f).toInt().coerceIn(0, 255)
         layerPaint.blendMode = layer.blend.mode
         if (previewed && pv!!.filter != null) layerPaint.colorFilter = pv.filter
         drawBuffer(c, buf, rect, layerPaint)

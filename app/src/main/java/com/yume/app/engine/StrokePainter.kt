@@ -29,7 +29,7 @@ import kotlin.random.Random
  * once into a small reusable scratch bitmap sized to the dab itself and then
  * blended into the affected tiles with unscaled 1:1 blits. The scratch follows
  * the brush, never the canvas, so painting memory is independent of the
- * document size. See the Stage 2 notes in README.md.
+ * document size. See the Stage 2 notes in docs/reference/README.md.
  */
 class StrokePainter(private val engine: DrawingEngine) {
 

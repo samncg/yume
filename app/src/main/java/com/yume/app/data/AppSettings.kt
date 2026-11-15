@@ -31,6 +31,12 @@ object AppSettings {
         holdToRepeatUndo = p.getBoolean("holdToRepeatUndo", holdToRepeatUndo)
         railOnRight = p.getBoolean("railOnRight", railOnRight)
         uiScale = p.getFloat("uiScale", uiScale)
+        // Interface size is now relative to 85 % of the old size: a size saved
+        // before keeps looking the same (the old 85 % now reads 100 %).
+        if (p.contains("uiScale") && !p.getBoolean("uiScaleRebased", false)) {
+            uiScale = (Math.round(uiScale / com.yume.app.ui.UI_SCALE_BASE * 20f) / 20f).coerceIn(0.6f, 1.6f)
+            p.edit().putFloat("uiScale", uiScale).putBoolean("uiScaleRebased", true).apply()
+        }
     }
 
     private fun put(block: SharedPreferences.Editor.() -> Unit) {
