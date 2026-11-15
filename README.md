@@ -232,6 +232,13 @@ cores take more): a 300 px wet-bleed dab went from ~75 ms to ~7 ms, so the
 blender keeps up with the pen (`smudgeperf` harness: 6–11 ms per frame at 40,
 120 and 300 px, was 12–87 ms).
 
+**Brush cursor** — while the pen hovers, the cursor is a preview of the dab
+itself: the brush's own tip (shape, hardness, grain, wet edges) at its size
+and angle, in the current colour at up to 80 % of the brush opacity, over a
+faint dark halo so it reads on light and dark paint alike. The eraser and
+smudge show it in neutral white / grey. Round tips keep the thin ring; while
+painting, the ring follows the newest dab (size with pressure and taper).
+
 **Importing brushes from other apps** — *Import brushes…* (More settings)
 reads Yume's own `.yumebrush` files and the formats below. Several files can
 be picked at once (a set exported as one file per brush).

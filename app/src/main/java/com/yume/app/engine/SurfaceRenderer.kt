@@ -707,6 +707,12 @@ class SurfaceRenderer(
         canvas.drawLine(from[0], from[1], tip[0], tip[1], predictPaint)
     }
 
+    private val cursorPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    private val cursorDst = android.graphics.RectF()
+    private val cursorHalo = android.graphics.PorterDuffColorFilter(0xFF000000.toInt(), android.graphics.PorterDuff.Mode.SRC_IN)
+    private var cursorTint = 0
+    private var cursorTintFilter: android.graphics.ColorFilter? = null
+
     private fun drawHover(canvas: Canvas, matrix: Matrix) {
         if (session.transformActive) return
         // While the pen paints, the ring sits on the newest dab and has its
@@ -719,6 +725,49 @@ class SurfaceRenderer(
         val docSize = live?.get(2) ?: session.brushSize
         matrix.mapPoints(mapped, floatArrayOf(docX, docY))
         val radius = max(2.5f, docSize * 0.5f * session.view.scale)
+
+        // Hovering: a preview of the dab itself (shape, hardness, grain, wet
+        // edges), at the brush's size and angle, in its colour and opacity.
+        val preset = if (live == null) session.cursorPreset else null
+        var ring = true
+        if (preset != null && radius >= 4f) {
+            val dab = runCatching { BrushDab.dab(preset) }.getOrNull()
+            if (dab != null && !dab.isRecycled) {
+                val tint = when (preset.category) {
+                    BrushCategory.Brush -> session.color
+                    BrushCategory.Eraser -> 0xFFFFFFFF.toInt()
+                    BrushCategory.Smudge -> 0xFFB8B8C0.toInt()
+                }
+                // Visible but not mistaken for paint: at most 80 % of the
+                // stroke's own opacity, at least 30 %.
+                val a = when (preset.category) {
+                    BrushCategory.Brush -> (preset.opacity * 0.8f).coerceIn(0.3f, 0.8f)
+                    else -> 0.55f
+                }
+                val angle = session.view.rotationDeg + if (preset.rotationMode == 0 || preset.rotationMode == 1) preset.rotation else 0f
+                canvas.save()
+                canvas.translate(mapped[0], mapped[1])
+                if (angle != 0f) canvas.rotate(angle)
+                // A soft dark halo under it so a light colour shows on white
+                // and a dark one on black.
+                cursorDst.set(-radius * 1.06f, -radius * 1.06f, radius * 1.06f, radius * 1.06f)
+                cursorPaint.colorFilter = cursorHalo
+                cursorPaint.alpha = (a * 0.45f * 255f).toInt()
+                canvas.drawBitmap(dab, null, cursorDst, cursorPaint)
+                cursorDst.set(-radius, -radius, radius, radius)
+                if (tint != cursorTint) {
+                    cursorTint = tint
+                    cursorTintFilter = android.graphics.PorterDuffColorFilter(tint or 0xFF000000.toInt(), android.graphics.PorterDuff.Mode.SRC_IN)
+                }
+                cursorPaint.colorFilter = cursorTintFilter
+                cursorPaint.alpha = (a * 255f).toInt()
+                canvas.drawBitmap(dab, null, cursorDst, cursorPaint)
+                canvas.restore()
+                // A shaped tip is its own outline; a round one keeps the ring.
+                ring = preset.shapeId.isEmpty()
+            }
+        }
+        if (!ring) return
 
         overlay.style = Paint.Style.STROKE
         overlay.pathEffect = null

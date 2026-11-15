@@ -615,6 +615,13 @@ class DrawingSession(
     private val activePreset: BrushPreset
         get() = presets.firstOrNull { it.id == activePresetId } ?: presets.first()
 
+    /**
+     * The preset the hover cursor previews: the painting tools only (a
+     * selection or fill cursor stays a plain ring).
+     */
+    val cursorPreset: BrushPreset?
+        get() = if (tool == Tool.Brush || tool == Tool.Eraser || tool == Tool.Smudge) activePreset else null
+
     /** Brush diameter in document pixels, used for the hover cursor. */
     val brushSize: Float get() = activePreset.size
     val brushOpacity: Float get() = activePreset.opacity
