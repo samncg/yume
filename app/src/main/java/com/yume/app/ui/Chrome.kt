@@ -104,6 +104,13 @@ private val BUTTON = 44.dp
 private val GAP = 2.dp
 private val PAD = 4.dp
 
+/** The button size that fits [count] buttons of a capsule into [width] (at most the normal size). */
+fun capsuleButtonFor(width: androidx.compose.ui.unit.Dp, count: Int): androidx.compose.ui.unit.Dp {
+    if (count <= 0) return BUTTON
+    val b = (width - PAD * 2 - GAP * (count - 1)) / count
+    return b.coerceIn(30.dp, BUTTON)
+}
+
 /**
  * A glass pill of toolbar buttons. The selected tool is covered by a
  * completely clear liquid-glass bubble that refracts the button under it
@@ -117,8 +124,11 @@ fun GlassToolCapsule(
     modifier: Modifier = Modifier,
     /** Window x of the centre of a button the user just tapped (panel origin). */
     onAnchor: (Float) -> Unit = {},
-    trailing: (@Composable RowScope.() -> Unit)? = null
+    trailing: (@Composable RowScope.() -> Unit)? = null,
+    /** Button size; smaller on a phone so a whole row of tools fits. */
+    button: androidx.compose.ui.unit.Dp = BUTTON
 ) {
+    val BUTTON = button
     val centers = remember(items.size) { FloatArray(items.size) }
     val layer = rememberLayerBackdrop()
     val density = LocalDensity.current

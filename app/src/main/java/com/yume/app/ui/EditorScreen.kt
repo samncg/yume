@@ -204,6 +204,8 @@ fun EditorScreen(
             )
         }
 
+        // Phones: the tools row lives at the bottom, in thumb reach.
+        val phoneBar = isCompact()
         Column(Modifier.fillMaxSize()) {
             if (state.chromeVisible) {
                 Box(Modifier.onGloballyPositioned {
@@ -211,6 +213,7 @@ fun EditorScreen(
                     barBottom = it.positionInRoot().y + it.size.height
                 }) {
                 EditorTopBar(
+                    part = if (phoneBar) BarPart.Top else BarPart.All,
                     state = state,
                     activePanel = panel,
                     onExit = onExit,
@@ -272,7 +275,9 @@ fun EditorScreen(
                         fun originOf(id: PanelId?) = androidx.compose.ui.graphics.TransformOrigin(
                             ((id?.let { panelAnchors[it] } ?: rootWidth) / rootWidth.coerceAtLeast(1f))
                                 .coerceIn(0f, 1f),
-                            ((barCenterY - areaTop) / areaHeight).coerceIn(-0.5f, 0f)
+                            // Phone tool panels grow up out of the bottom bar.
+                            if (phoneBar && id in TOOL_PANELS) 1.05f
+                            else ((barCenterY - areaTop) / areaHeight).coerceIn(-0.5f, 0f)
                         )
                         // No size animation: by default the container shrinks toward
                         // the empty state and clips the closing panel to that box,
@@ -300,6 +305,9 @@ fun EditorScreen(
                             val margin = with(LocalDensity.current) { 12.dp.toPx() }
                             val areaW = constraints.maxWidth
                             val anchor = panelAnchors[shown] ?: areaW.toFloat()
+                            // On a phone a tool's panel sits just above the
+                            // bottom bar, next to the tool that opened it.
+                            val atBottom = phoneBar && shown in TOOL_PANELS
                             Box(
                                 Modifier
                                     .layout { measurable, c ->
@@ -307,7 +315,11 @@ fun EditorScreen(
                                         // Centred under its button, kept on screen.
                                         val x = (anchor - p.width / 2f)
                                             .coerceIn(margin, (areaW - p.width - margin).coerceAtLeast(margin))
-                                        layout(c.maxWidth, p.height) { p.place(x.roundToInt(), 0) }
+                                        if (atBottom && c.hasBoundedHeight) {
+                                            layout(c.maxWidth, c.maxHeight) { p.place(x.roundToInt(), c.maxHeight - p.height) }
+                                        } else {
+                                            layout(c.maxWidth, p.height) { p.place(x.roundToInt(), 0) }
+                                        }
                                     }
                                     // Clear of the gesture bar, so a tall
                                     // panel's last row (Apply / Cancel) can
@@ -335,6 +347,46 @@ fun EditorScreen(
                         }
                     }
                 }
+            }
+            if (phoneBar && state.chromeVisible) {
+                    EditorTopBar(
+                        part = BarPart.Tools,
+                        state = state,
+                        activePanel = panel,
+                        onExit = onExit,
+                        onRename = { renaming = true },
+                        onTool = { tool, panelId ->
+                            // First tap selects the tool; a tap on the tool that is
+                            // already selected opens (or closes) its settings.
+                            val sameTool = state.tool == tool
+                            session.chooseTool(tool)
+                            showPanel(
+                                when {
+                                    sameTool && panelId != null -> if (panel == panelId) null else panelId
+                                    // A tool's settings are open: the new tool's
+                                    // settings take their place (none for a tool
+                                    // without settings).
+                                    panel in TOOL_PANELS -> panelId
+                                    else -> panel
+                                }
+                            )
+                        },
+                        onPanel = { id -> showPanel(if (panel == id) null else id) },
+                        onAnchor = { x -> panelAnchorX = x },
+                        onColorDrop = object : ColorDropHandler {
+                            override fun dragging(window: Offset?, tolerance: Int?) {
+                                dropDot = window
+                                dropTolerance = tolerance
+                            }
+                            override fun drop(window: Offset) =
+                                session.colorDropAt(window.x - canvasOrigin.x, window.y - canvasOrigin.y)
+                            override fun begin(window: Offset) =
+                                session.colorDropBegin(window.x - canvasOrigin.x, window.y - canvasOrigin.y)
+                            override fun startTolerance(): Int = state.fillTolerance
+                            override fun adjust(tolerance: Int) = session.colorDropAdjust(tolerance)
+                            override fun end() = session.colorDropEnd()
+                        }
+                    )
             }
         }
 
@@ -706,7 +758,9 @@ private fun EditorTopBar(
     onTool: (Tool, PanelId?) -> Unit,
     onPanel: (PanelId) -> Unit,
     onAnchor: (Float) -> Unit = {},
-    onColorDrop: ColorDropHandler? = null
+    onColorDrop: ColorDropHandler? = null,
+    /** Which part to draw: on a phone the tools row sits at the bottom of the screen. */
+    part: BarPart = BarPart.All
 ) {
     // Floating glass capsules, grouped by intent: the document, then tools
     // that change what is there, then tools that put paint down, then layers
@@ -748,15 +802,18 @@ private fun EditorTopBar(
                 onAnchor = onAnchor
             )
     }
+    var toolButton by remember { mutableStateOf<androidx.compose.ui.unit.Dp?>(null) }
     val toolsPill: @Composable (Modifier) -> Unit = { modifier ->
             // The order and the hidden tools are the user's (Settings, Layout).
+            val tb = toolButton
             GlassToolCapsule(
                 com.yume.app.data.Customization.visibleTools.map { t ->
                     val (glyph, label, toolPanel) = toolChrome(t)
                     CapsuleItem(glyph, label, selected = state.tool == t) { onTool(t, toolPanel) }
                 },
                 onAnchor = onAnchor,
-                modifier = modifier
+                modifier = modifier,
+                button = tb ?: 44.dp
             )
     }
     val rightPill: @Composable () -> Unit = {
@@ -803,10 +860,22 @@ private fun EditorTopBar(
     androidx.compose.foundation.layout.BoxWithConstraints(
         Modifier
             .fillMaxWidth()
-            .statusBarsPadding()
+            .then(if (part == BarPart.Tools) Modifier.navigationBarsPadding() else Modifier.statusBarsPadding())
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        if (maxWidth >= TOOLBAR_ONE_ROW_MIN) {
+        val barWidth = maxWidth
+        val toolsShown = (com.yume.app.data.Customization.pillSlots[com.yume.app.data.Customization.Pill.Tools]
+            ?: com.yume.app.data.Customization.PillSlot.Right) != com.yume.app.data.Customization.PillSlot.Hidden
+        if (part == BarPart.Tools) {
+            // Phone: the tools alone, fitted to the width, at the bottom.
+            if (toolsShown) {
+                toolButton = capsuleButtonFor(barWidth, com.yume.app.data.Customization.visibleTools.size)
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    pill(com.yume.app.data.Customization.Pill.Tools)
+                }
+            }
+        } else if (maxWidth >= TOOLBAR_ONE_ROW_MIN) {
+            toolButton = null
             Row(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -834,11 +903,15 @@ private fun EditorTopBar(
                     Spacer(Modifier.weight(1f))
                     right.filter { it != com.yume.app.data.Customization.Pill.Tools }.forEach { pill(it) }
                 }
-                if ((com.yume.app.data.Customization.pillSlots[com.yume.app.data.Customization.Pill.Tools] ?: com.yume.app.data.Customization.PillSlot.Right) != com.yume.app.data.Customization.PillSlot.Hidden) {
+                if (part == BarPart.All && toolsShown) {
+                    // On its own row the tools shrink to fit the width, so
+                    // none is cut off at the edge (it still scrolls if even
+                    // the smallest buttons cannot fit).
+                    toolButton = capsuleButtonFor(barWidth, com.yume.app.data.Customization.visibleTools.size)
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                         pill(com.yume.app.data.Customization.Pill.Tools)
                     }
-                }
+                } else toolButton = null
             }
         }
     }
@@ -1007,6 +1080,9 @@ private fun TransformBar(
         YumeIconButton(Glyph.Check, onCommit, size = 40.dp, tint = YumeColors.accent)
     }
 }
+
+/** The parts of the editor's bar (a phone splits it between top and bottom). */
+private enum class BarPart { All, Top, Tools }
 
 /** Narrower than this, the toolbar wraps the tools pill onto its own row. */
 private val TOOLBAR_ONE_ROW_MIN = 1000.dp

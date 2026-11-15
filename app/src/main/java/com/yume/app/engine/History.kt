@@ -345,7 +345,9 @@ class History(
         redoStack.clear()
         bytes = 0
         actions.forEachIndexed { index, action ->
-            if (index < appliedCount) undoStack.addLast(action) else redoStack.addLast(action)
+            // The redo stack's last element is the next step to redo: the
+            // oldest undone step goes last.
+            if (index < appliedCount) undoStack.addLast(action) else redoStack.addFirst(action)
             bytes += action.bytes
         }
         changed()

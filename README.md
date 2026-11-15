@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="../../releases/latest"><img alt="Download" src="https://img.shields.io/badge/download-APK-9E908A?style=for-the-badge&logo=android&logoColor=white"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.2.0-CFC6B8?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.2.1-CFC6B8?style=for-the-badge">
   <img alt="Android 10+" src="https://img.shields.io/badge/Android-10%2B-5B5352?style=for-the-badge&logo=android&logoColor=white">
   <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-Jetpack%20Compose-7B6F6F?style=for-the-badge&logo=kotlin&logoColor=white">
 </p>
@@ -31,8 +31,9 @@ glass, and every gesture, button and default can be changed in Settings.
 - **Goes big.** Sparse, tiled layers keep memory to the painted area, so a 6K
   canvas opens and paints like a small one (12K and 16K are there too, as
   experimental sizes).
-- **Tablet or phone.** On a phone the gallery, toolbar, Brush Studio and every
-  panel rearrange for a narrow screen.
+- **Tablet or phone.** On a phone the tools move to a bar at the bottom, in
+  thumb reach, and the gallery, Brush Studio and every panel rearrange for a
+  narrow screen.
 - **Never loses work.** Everything saves as you go, recovers after a crash, and
   the full undo history comes back when you reopen an artwork.
 
