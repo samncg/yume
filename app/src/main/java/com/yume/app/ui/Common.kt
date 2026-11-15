@@ -713,68 +713,78 @@ fun Modifier.claimCanvasTouchesInside(): Modifier = claimCanvasTouches()
 // ------------------------------------------------------------- list helpers
 
 /**
- * A gradual blur at the top and bottom edges of a scrolling list: rows
- * passing out of view soften instead of being cut off. An edge blurs only
- * while there is more content past it. Android 13+ (GPU, AGSL mask over a
- * blurred copy of the layer); older versions are left sharp.
+ * A progressive blur at the top and bottom edges of a scrolling list: rows
+ * passing out of view grow steadily softer and fade away instead of being
+ * cut off. An edge blurs only while there is more content past it. Android
+ * 13+ (GPU: three blur strengths, each kept by an AGSL mask only in its own
+ * band of the edge, cross-faded with its neighbours); older versions are
+ * left sharp.
  */
-fun Modifier.edgeBlur(state: androidx.compose.foundation.ScrollState, edge: androidx.compose.ui.unit.Dp = 28.dp): Modifier {
+fun Modifier.edgeBlur(state: androidx.compose.foundation.ScrollState, edge: androidx.compose.ui.unit.Dp = 36.dp): Modifier {
     if (android.os.Build.VERSION.SDK_INT < 33) return this
     return this.graphicsLayer {
         val e = edge.toPx()
         val top = if (state.value > 0) e else 0f
         val bottom = if (state.value < state.maxValue) e else 0f
-        renderEffect = if (top == 0f && bottom == 0f) null else EdgeBlur.effect(top, bottom, size.height)
+        renderEffect = if (top == 0f && bottom == 0f) null else EdgeBlur.effect(top, bottom, size.height, density)
     }
 }
 
 private object EdgeBlur {
-    private const val MASK = """
+    // d: how deep p lies in an edge band, 0 inside the list, 1 at its edge.
+    // Level 0 is the sharp layer, 1..3 ever stronger blurs; each keeps only
+    // its share of the band, the shares summing to one, and everything
+    // fades out over the outermost part.
+    private const val BAND = """
         uniform shader content;
         uniform float top;
         uniform float bottom;
         uniform float h;
+        uniform float level;
         half4 main(float2 p) {
-            half4 c = content.eval(p);
-            float t = 0.0;
-            if (top > 0.0) t = max(t, 1.0 - smoothstep(0.0, top, p.y));
-            if (bottom > 0.0) t = max(t, smoothstep(h - bottom, h, p.y));
-            return c * t;
+            float d = 0.0;
+            if (top > 0.0) d = max(d, 1.0 - p.y / top);
+            if (bottom > 0.0) d = max(d, (p.y - (h - bottom)) / bottom);
+            d = clamp(d, 0.0, 1.0);
+            float s1 = smoothstep(0.0, 0.3, d);
+            float s2 = smoothstep(0.3, 0.6, d);
+            float s3 = smoothstep(0.6, 0.9, d);
+            float w;
+            if (level < 0.5) w = 1.0 - s1;
+            else if (level < 1.5) w = s1 - s2;
+            else if (level < 2.5) w = s2 - s3;
+            else w = s3;
+            if (w <= 0.0) return half4(0.0);
+            float fade = 1.0 - smoothstep(0.55, 1.0, d);
+            return content.eval(p) * (w * fade);
         }
     """
-    private const val FADE = """
-        uniform shader content;
-        uniform float top;
-        uniform float bottom;
-        uniform float h;
-        half4 main(float2 p) {
-            half4 c = content.eval(p);
-            float a = 1.0;
-            if (top > 0.0) a *= mix(0.25, 1.0, smoothstep(0.0, top * 0.7, p.y));
-            if (bottom > 0.0) a *= mix(0.25, 1.0, 1.0 - smoothstep(h - bottom * 0.7, h, p.y));
-            return c * a;
-        }
-    """
-    private val cache = HashMap<Triple<Float, Float, Float>, androidx.compose.ui.graphics.RenderEffect>()
+    private val cache = HashMap<List<Float>, androidx.compose.ui.graphics.RenderEffect>()
 
     @androidx.annotation.RequiresApi(33)
-    fun effect(top: Float, bottom: Float, h: Float): androidx.compose.ui.graphics.RenderEffect {
-        val key = Triple(top, bottom, h)
+    fun effect(top: Float, bottom: Float, h: Float, density: Float): androidx.compose.ui.graphics.RenderEffect {
+        val key = listOf(top, bottom, h, density)
         cache[key]?.let { return it }
         if (cache.size > 16) cache.clear()
-        fun shader(src: String) = android.graphics.RuntimeShader(src).apply {
-            setFloatUniform("top", top)
-            setFloatUniform("bottom", bottom)
-            setFloatUniform("h", h)
-        }
-        val blur = android.graphics.RenderEffect.createBlurEffect(14f, 14f, android.graphics.Shader.TileMode.CLAMP)
-        // The blurred copy, kept only near the edges, over the sharp layer.
-        val maskedBlur = android.graphics.RenderEffect.createChainEffect(
-            android.graphics.RenderEffect.createRuntimeShaderEffect(shader(MASK), "content"), blur
+        fun band(level: Int) = android.graphics.RenderEffect.createRuntimeShaderEffect(
+            android.graphics.RuntimeShader(BAND).apply {
+                setFloatUniform("top", top)
+                setFloatUniform("bottom", bottom)
+                setFloatUniform("h", h)
+                setFloatUniform("level", level.toFloat())
+            }, "content"
         )
-        val sharpFaded = android.graphics.RenderEffect.createRuntimeShaderEffect(shader(FADE), "content")
-        val out = android.graphics.RenderEffect.createBlendModeEffect(sharpFaded, maskedBlur, android.graphics.BlendMode.SRC_OVER)
-            .asComposeRenderEffect()
+        // Outside the list counts as empty (DECAL), so nothing smears in.
+        fun blurred(level: Int, dp: Float): android.graphics.RenderEffect {
+            val r = dp * density
+            return android.graphics.RenderEffect.createChainEffect(band(level), android.graphics.RenderEffect.createBlurEffect(r, r, android.graphics.Shader.TileMode.DECAL))
+        }
+        val plus = android.graphics.BlendMode.PLUS
+        val out = android.graphics.RenderEffect.createBlendModeEffect(
+            android.graphics.RenderEffect.createBlendModeEffect(band(0), blurred(1, 1.5f), plus),
+            android.graphics.RenderEffect.createBlendModeEffect(blurred(2, 3.5f), blurred(3, 7f), plus),
+            plus
+        ).asComposeRenderEffect()
         cache[key] = out
         return out
     }
