@@ -771,11 +771,14 @@ private fun EditorTopBar(
     // Floating glass capsules. One row when the screen is wide enough; on a
     // narrow (portrait) screen the tools pill moves to a second row of its
     // own instead of being squeezed between the others.
+    // A tight row (a tablet in portrait, a phone in landscape) leaves the
+    // name out, so the tools keep their size.
+    var tightBar by remember { mutableStateOf(false) }
     val titleCapsule: @Composable () -> Unit = {
             Capsule {
                 YumeIconButton(Glyph.Gallery, onExit, size = 44.dp, iconSize = 20.dp, label = "Gallery")
                 // Tap the name to rename the document.
-                Text(
+                if (!tightBar) Text(
                     text = state.title,
                     style = MaterialTheme.typography.labelLarge,
                     color = YumeColors.text,
@@ -881,6 +884,7 @@ private fun EditorTopBar(
             // One row. Where it is tight (a tablet in portrait, a phone in
             // landscape) the tool buttons shrink to the room the other pills
             // leave, measured as they lay out.
+            tightBar = maxWidth < TOOLBAR_ONE_ROW_MIN
             val density = LocalDensity.current
             val others = remember { androidx.compose.runtime.mutableStateMapOf<com.yume.app.data.Customization.Pill, Int>() }
             val shown = left + center + right

@@ -224,7 +224,11 @@ fun GlassToolCapsule(
 @Composable
 fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f) {
     // Shorter sliders on a phone, so the rail covers less of the canvas.
-    val railSliderH = if (isCompact()) 104.dp else 150.dp
+    // The sliders share what height the screen has (a phone in landscape is
+    // short): the rest of the rail needs about 240 dp.
+    val railScale = com.yume.app.data.AppSettings.uiScale * UI_SCALE_BASE
+    val railH = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp / railScale
+    val railSliderH = ((railH - 330f) / 2f).coerceIn(56f, if (isCompact()) 104f else 150f).dp
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("yume_ui", 0) }
     var locked by remember { mutableStateOf(prefs.getBoolean("rail_locked", false)) }

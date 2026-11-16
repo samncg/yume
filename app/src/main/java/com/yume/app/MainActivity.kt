@@ -91,6 +91,9 @@ class MainActivity : ComponentActivity() {
         if (debuggable && intent?.getBooleanExtra("force_portrait", false) == true) {
             requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
+        if (debuggable && intent?.getBooleanExtra("force_landscape", false) == true) {
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        }
         com.yume.app.input.PenGestures.init(applicationContext)
         enableEdgeToEdge()
         setContent {
