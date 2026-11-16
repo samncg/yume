@@ -205,7 +205,9 @@ fun EditorScreen(
         }
 
         // Phones: the tools row lives at the bottom, in thumb reach.
-        val phoneBar = isCompact()
+        // Whenever one row of pills does not fit (phones, a tablet in portrait,
+        // a phone in landscape) the tools go to a bar at the bottom.
+        val phoneBar = compactWidthDp() - 24f < TOOLBAR_ONE_ROW_MIN.value
         Column(Modifier.fillMaxSize()) {
             if (state.chromeVisible) {
                 Box(Modifier.onGloballyPositioned {
