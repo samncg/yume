@@ -200,6 +200,8 @@ object YumeHarness {
                     out.append(scoreLiftEnd(app))
                 } else if (only == "smudgeperf") {
                     out.append(scoreSmudgePerf())
+                } else if (only == "freeze8k") {
+                    out.append(scoreFreeze8k(app))
                 } else if (only == "histpersist") {
                     out.append(scoreHistPersist(app))
                 } else if (only == "overlaytest") {
@@ -3743,6 +3745,79 @@ object YumeHarness {
      * opacity change, a save, then a fresh session restored from disk that
      * must undo to the blank start and redo to the final picture.
      */
+    /**
+     * Where painting stalls after big strokes at 8K: the time the render
+     * thread spends ending each stroke (history capture, streaming to disk)
+     * and in each autosave's history snapshot, which runs on that thread.
+     */
+    private fun scoreFreeze8k(app: YumeApp): String {
+        val out = StringBuilder()
+        val size = 8192
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        var cache: TileCache? = null
+        val ps = app.projectStore
+        val project = ps.createProject("harness-freeze8k", size, size, BG)
+        fun ms(t0: Long) = (System.nanoTime() - t0) / 1_000_000
+        try {
+            val am = app.getSystemService(android.app.ActivityManager::class.java)
+            cache = TileCache.open(app.cacheDir, project.id, TileCache.defaultBudget(am))
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = BG
+            val session = DrawingSession("fz", "FZ", engine, History())
+            session.history.spill = com.yume.app.engine.HistorySpill(File(cache!!.dir, "history.spill"))
+            identityView(session, size, size)
+            session.presets = presets
+            session.activePresetId = hard.id
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            session.category = BrushCategory.Brush
+            val l = engine.newLayer("Ink")
+            engine.selectLayer(l.id)
+            engine.compositeAll()
+            session.setBrushSize(900f)
+            session.runCommands()
+            for (k in 0 until 6) {
+                session.color = (0xFF000000.toInt() or (k * 0x2A3B4C))
+                val y = 700f + k * 1250f
+                val pts = (0..40).map { i -> P(300f + i * 190f, y + kotlin.math.sin(i * 0.4f) * 500f) }
+                val t0 = System.nanoTime()
+                session.pushInput(InputEvent.Down(0, pts[0].x, pts[0].y, 1f, 0f, true, false))
+                session.runInput()
+                for (i in 1 until pts.size) {
+                    session.pushInput(InputEvent.Move(0, floatArrayOf(pts[i].x), floatArrayOf(pts[i].y), floatArrayOf(1f), 0f))
+                    session.runInput()
+                }
+                val paintMs = ms(t0)
+                val spillBefore = session.history.spilledActions
+                val tu = System.nanoTime()
+                session.pushInput(InputEvent.Up(0))
+                session.runInput()
+                session.runCommands()
+                val endMs = ms(tu)
+                val strokeMs = "paint $paintMs + end $endMs (spilled ${session.history.spilledActions - spillBefore} step now)"
+                val t1 = System.nanoTime()
+                val h = session.historyForDiskNow(ps.savedHistoryIds(project.id))
+                val snapMs = ms(t1)
+                val t2 = System.nanoTime()
+                ps.saveHistory(project.id, h, ps.historyStamp(project.id))
+                h.entries.forEach { e -> e.tiles?.forEach { t -> t.before?.recycle(); t.after?.recycle() } }
+                val saveMs = ms(t2)
+                out.append("freeze8k stroke $k: paint+end ${strokeMs} ms, history snapshot (render thread) ${snapMs} ms, " +
+                    "history write ${saveMs} ms, spilled ${session.history.spilledActions}\n")
+            }
+            session.history.spill?.close()
+        } catch (t: Throwable) {
+            Log.e(TAG, "freeze8k failed", t)
+            out.append("freeze8k: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            cache?.close()
+            runCatching { ps.deleteProject(project.id) }
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
     private fun scoreHistPersist(app: YumeApp): String {
         val out = StringBuilder()
         val size = 6144

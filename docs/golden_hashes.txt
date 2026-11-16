@@ -1171,3 +1171,11 @@ phase=35-comp-clip L0=26b5fa73 L1=412503cf/4512cb4c L2=5505eea5/0934e1ed L3=9ff2
 # A Normal group whose layers use other blend modes passes through: its layers
 # blend with everything below the group. Golden output identical to the
 # accepted baseline (phase 35 = 5e04c64a); features identical; overlaytest PASS.
+
+# --- Live input split for big brushes; ColorDrop opacity (Nov 2026) -----------
+# Moves are queued point by point, and in the live render loop a long jump
+# between points is painted a few dabs per turn. Harness runInput() drains
+# unchanged: golden and features byte-identical to the previous gate.
+# freeze8k (new, harness) and on-device 8K with a 900 px brush at 0 % spacing:
+# loop turns were ~200 ms each while painting (4-5 fps); now only the stroke
+# ends exceed 100 ms (130-240 ms at lift).

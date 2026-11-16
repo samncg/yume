@@ -628,7 +628,23 @@ class DrawingSession(
         val gap = now - lastInputAt
         if (lastInputAt > 0L && gap in 0L until ACTIVE_GAP_MS) engine.activeMs += gap
         lastInputAt = now
-        inputs.add(event)
+        // A move carrying many points (a fast finger or pen batches them) is
+        // queued point by point: each point is painted on its own either
+        // way, and the render loop can then draw a frame between them
+        // instead of only after the whole batch (with a huge brush one batch
+        // could take a fifth of a second).
+        if (event is InputEvent.Move && event.xs.size > 1) {
+            for (i in event.xs.indices) {
+                inputs.add(
+                    InputEvent.Move(
+                        event.pointerId, floatArrayOf(event.xs[i]), floatArrayOf(event.ys[i]),
+                        floatArrayOf(event.pressures[i]), event.tilt, event.orientation
+                    )
+                )
+            }
+        } else {
+            inputs.add(event)
+        }
         wakeListener?.invoke()
     }
 
@@ -706,6 +722,51 @@ class DrawingSession(
         return if (s == 0L) 0L else now - s
     }
 
+    /** The rest of a long move, painted a few dabs per render-loop turn. */
+    private val splitMoves = ArrayDeque<InputEvent>()
+    private var lastInX = Float.NaN
+    private var lastInY = Float.NaN
+
+    /**
+     * Live painting only: a move far from the previous point (a fast finger
+     * over a zoomed-out 8K canvas with a huge brush can be a dozen dabs of
+     * 900 px, a fifth of a second) is cut into pieces of a few dabs along the
+     * same line, so a frame is drawn between them. The first piece is
+     * returned; the rest wait in [splitMoves].
+     */
+    private fun splitLongMove(event: InputEvent): InputEvent {
+        when (event) {
+            is InputEvent.Down -> { lastInX = event.x; lastInY = event.y; return event }
+            is InputEvent.Move -> {}
+            else -> return event
+        }
+        val x1 = event.xs.last()
+        val y1 = event.ys.last()
+        val x0 = lastInX
+        val y0 = lastInY
+        lastInX = x1
+        lastInY = y1
+        if (event.xs.size != 1 || !strokeInProgress || x0.isNaN() ||
+            (tool != Tool.Brush && tool != Tool.Eraser && tool != Tool.Smudge)
+        ) return event
+        val preset = presets.firstOrNull { it.id == activePresetId } ?: return event
+        // Screen px per piece: about four dabs at the brush's full size.
+        val dabDoc = preset.size * kotlin.math.max(0.02f, preset.spacing)
+        val pieceScreen = kotlin.math.max(6f, dabDoc * 4f * view.scale)
+        val dist = kotlin.math.hypot(x1 - x0, y1 - y0)
+        val pieces = kotlin.math.ceil(dist / pieceScreen).toInt()
+        if (pieces <= 1) return event
+        val p1 = event.pressures[0]
+        val first = InputEvent.Move(event.pointerId, floatArrayOf(x0 + (x1 - x0) / pieces), floatArrayOf(y0 + (y1 - y0) / pieces), floatArrayOf(p1), event.tilt, event.orientation)
+        for (k in pieces downTo 2) {
+            val f = k / pieces.toFloat()
+            splitMoves.addFirst(
+                InputEvent.Move(event.pointerId, floatArrayOf(x0 + (x1 - x0) * f), floatArrayOf(y0 + (y1 - y0) * f), floatArrayOf(p1), event.tilt, event.orientation)
+            )
+        }
+        return first
+    }
+
     fun runInput(budgetNs: Long = Long.MAX_VALUE): Boolean {
         var changed = false
         // A time budget: a big brush can take longer to paint than the
@@ -713,18 +774,26 @@ class DrawingSession(
         // nothing until the stroke ends. Past the budget the frame is drawn
         // and the rest is painted in the next turns.
         val start = System.nanoTime()
+        val live = budgetNs != Long.MAX_VALUE
         while (true) {
-            if (changed && System.nanoTime() - start > budgetNs && inputs.isNotEmpty()) {
+            if (changed && System.nanoTime() - start > budgetNs && (inputs.isNotEmpty() || splitMoves.isNotEmpty())) {
                 // Still painting what the pen already drew.
                 backlogAt = android.os.SystemClock.uptimeMillis()
                 break
             }
-            val event = inputs.poll() ?: break
+            var event = splitMoves.removeFirstOrNull() ?: inputs.poll() ?: break
+            if (live) event = splitLongMove(event)
             val timed = event !is InputEvent.Move && event !is InputEvent.Hover &&
                 event !is InputEvent.PickMove && event !is InputEvent.Gesture
             if (timed) workSince = android.os.SystemClock.uptimeMillis()
+            val evT0 = System.nanoTime()
             changed = try {
-                handle(event) || changed
+                handle(event).also {
+                    val evMs = (System.nanoTime() - evT0) / 1_000_000
+                    if (com.yume.app.BuildConfig.DEBUG && evMs > 100) {
+                        android.util.Log.w("YumeStall", "event ${event.javaClass.simpleName} ${evMs} ms")
+                    }
+                } || changed
             } catch (t: Throwable) {
                 android.util.Log.e("Yume", "input failed: ${event.javaClass.simpleName}", t)
                 changed
@@ -2111,7 +2180,13 @@ class DrawingSession(
     fun colorDropAt(vx: Float, vy: Float) = post {
         val doc = FloatArray(2)
         view.toDocument(vx, vy, doc)
-        fillAtInternal(doc[0], doc[1], color, true)
+        fillAtInternal(doc[0], doc[1], dropColor(), true)
+    }
+
+    /** ColorDrop's colour: the current colour at the current opacity setting. */
+    private fun dropColor(): Int {
+        val a = (Color.alpha(color) * brushOpacity.coerceIn(0f, 1f) + 0.5f).toInt().coerceIn(1, 255)
+        return (color and 0x00FFFFFF) or (a shl 24)
     }
 
     // ColorDrop with a threshold: drop and hold, then slide to adjust.
@@ -2127,7 +2202,7 @@ class DrawingSession(
         dropX = doc[0]
         dropY = doc[1]
         val before = history.version
-        fillAtInternal(dropX, dropY, color, true)
+        fillAtInternal(dropX, dropY, dropColor(), true)
         dropVersion = if (history.version != before) history.version else -1
     }
 
@@ -2147,7 +2222,7 @@ class DrawingSession(
             if (dropVersion >= 0 && dropVersion == history.version) doUndo()
             fillTolerance = t
             val before = history.version
-            fillAtInternal(dropX, dropY, color, true)
+            fillAtInternal(dropX, dropY, dropColor(), true)
             dropVersion = if (history.version != before) history.version else -1
             requestState()
         }

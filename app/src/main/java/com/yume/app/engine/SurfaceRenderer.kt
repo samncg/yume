@@ -148,8 +148,11 @@ class SurfaceRenderer(
         try {
             while (running) {
                 var work = false
+                val st0 = System.nanoTime()
                 session.runCommands()
+                val st1 = System.nanoTime()
                 if (session.runInput(INPUT_BUDGET_NS)) work = true
+                val st2 = System.nanoTime()
                 if (session.consumePendingPreview()) work = true
                 if (session.tickFrame()) work = true
                 session.rebuildTransformIfNeeded()
@@ -181,6 +184,7 @@ class SurfaceRenderer(
                 } finally {
                     if (cache != null) cache.blockingLoads = true
                 }
+                val st3 = System.nanoTime()
                 // While tiles are pending, keep polling for them.
                 if (cache != null && cache.pendingPrefetches() > 0) work = true
                 // The zoomed-out view still has mip tiles to refresh (they are
@@ -197,9 +201,19 @@ class SurfaceRenderer(
                 if (renderRequested) {
                     renderRequested = false
                     drawFrame()
+                    val st4 = System.nanoTime()
                     updateGlass()
+                    val st5 = System.nanoTime()
                     // Safe point: nothing holds a writable tile between frames.
                     cache?.evictIfNeeded()
+                    val st6 = System.nanoTime()
+                    // Debug: any turn of the loop long enough to feel like a
+                    // freeze, and where its time went.
+                    if (com.yume.app.BuildConfig.DEBUG && st6 - st0 > 150_000_000L) {
+                        android.util.Log.w("YumeStall", "turn ${(st6 - st0) / 1_000_000} ms: commands ${(st1 - st0) / 1_000_000} " +
+                            "input ${(st2 - st1) / 1_000_000} flush ${(st3 - st2) / 1_000_000} draw ${(st4 - st3) / 1_000_000} " +
+                            "glass ${(st5 - st4) / 1_000_000} evict ${(st6 - st5) / 1_000_000}")
+                    }
                 } else {
                     lock.withLock {
                         if (!renderRequested && running) {
