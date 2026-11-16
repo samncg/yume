@@ -47,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.geometry.Offset
@@ -205,9 +206,9 @@ fun EditorScreen(
         }
 
         // Phones: the tools row lives at the bottom, in thumb reach.
-        // Whenever one row of pills does not fit (phones, a tablet in portrait,
-        // a phone in landscape) the tools go to a bar at the bottom.
-        val phoneBar = compactWidthDp() - 24f < TOOLBAR_ONE_ROW_MIN.value
+        // On a phone in portrait the tools go to a bar at the bottom; wider
+        // screens keep one row at the top (the tools shrink to fit it).
+        val phoneBar = isCompact()
         Column(Modifier.fillMaxSize()) {
             if (state.chromeVisible) {
                 Box(Modifier.onGloballyPositioned {
@@ -876,20 +877,35 @@ private fun EditorTopBar(
                     pill(com.yume.app.data.Customization.Pill.Tools)
                 }
             }
-        } else if (maxWidth >= TOOLBAR_ONE_ROW_MIN) {
-            toolButton = null
+        } else if (part == BarPart.All) {
+            // One row. Where it is tight (a tablet in portrait, a phone in
+            // landscape) the tool buttons shrink to the room the other pills
+            // leave, measured as they lay out.
+            val density = LocalDensity.current
+            val others = remember { androidx.compose.runtime.mutableStateMapOf<com.yume.app.data.Customization.Pill, Int>() }
+            val shown = left + center + right
+            toolButton = if (maxWidth >= TOOLBAR_ONE_ROW_MIN || !toolsShown) null else {
+                val othersDp = with(density) { others.filterKeys { it != com.yume.app.data.Customization.Pill.Tools && it in shown }.values.sum().toDp() }
+                val gaps = 10.dp * (shown.size - 1).coerceAtLeast(0)
+                capsuleButtonFor(barWidth - othersDp - gaps - 16.dp, com.yume.app.data.Customization.visibleTools.size)
+            }
+            @Composable
+            fun measured(p: com.yume.app.data.Customization.Pill) {
+                if (p == com.yume.app.data.Customization.Pill.Tools) pill(p)
+                else Box(Modifier.onSizeChanged { others[p] = it.width }) { pill(p) }
+            }
             Row(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                left.forEach { pill(it) }
+                left.forEach { measured(it) }
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        center.forEach { pill(it) }
+                        center.forEach { measured(it) }
                     }
                 }
-                right.forEach { pill(it) }
+                right.forEach { measured(it) }
             }
         } else {
             // Narrow: the tools get a row of their own under the others.

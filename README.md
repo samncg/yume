@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="../../releases/latest"><img alt="Download" src="https://img.shields.io/badge/download-APK-9E908A?style=for-the-badge&logo=android&logoColor=white"></a>
-  <img alt="Version" src="https://img.shields.io/badge/version-1.2.2-CFC6B8?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.2.3-CFC6B8?style=for-the-badge">
   <img alt="Android 10+" src="https://img.shields.io/badge/Android-10%2B-5B5352?style=for-the-badge&logo=android&logoColor=white">
   <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-Jetpack%20Compose-7B6F6F?style=for-the-badge&logo=kotlin&logoColor=white">
 </p>
