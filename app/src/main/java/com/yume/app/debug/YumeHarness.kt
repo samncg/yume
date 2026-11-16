@@ -206,6 +206,8 @@ object YumeHarness {
                     out.append(scoreHistPersist(app))
                 } else if (only == "overlaytest") {
                     out.append(scoreOverlayTest())
+                } else if (only == "hoist") {
+                    out.append(scoreHoist())
                 } else if (only == "bigstroke") {
                     out.append(scoreBigStroke())
                 } else if (only == "bigstroke6k") {
@@ -4417,6 +4419,129 @@ object YumeHarness {
         } catch (t: Throwable) {
             Log.e(TAG, "liftend failed", t)
             out.append("liftend: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /**
+     * Pan/zoom behind a painting backlog: the view must change on the first
+     * live turn, and the stroke must land on the same pixels as without the
+     * gesture (its queued screen points are carried into the new view).
+     */
+    private fun scoreHoist(): String {
+        val out = StringBuilder()
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        try {
+            val size = 2048
+            fun run(gesture: Boolean): Pair<DrawingSession, DrawingEngine> {
+                val engine = DrawingEngine(size, size)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val session = DrawingSession("ho", "HO", engine, History())
+                identityView(session, size, size)
+                session.presets = com.yume.app.engine.BrushLibrary.defaults
+                session.assist = 0f
+                session.quickShapeEnabled = false
+                val p = session.presets.first { it.id == "studio-pen" }
+                pick(session, p, p.category)
+                session.runCommands()
+                session.setBrushSize(240f)
+                session.runCommands()
+                val l = engine.newLayer("Paint")
+                engine.selectLayer(l.id)
+                session.pushInput(InputEvent.Down(0, 200f, 1000f, 0.8f, 0f, false, false))
+                for (i in 1..40) {
+                    val x = 200f + i * 40f
+                    val y = 1000f + kotlin.math.sin(i * 0.3f) * 200f
+                    session.pushInput(InputEvent.Move(0, floatArrayOf(x), floatArrayOf(y), floatArrayOf(0.8f), 0f))
+                }
+                session.pushInput(InputEvent.Up(0))
+                if (gesture) {
+                    session.pushInput(InputEvent.Gesture(1000f, 1000f, 1f, 0f, 0f, 0f, first = true))
+                    session.pushInput(InputEvent.Gesture(1000f, 1000f, 1.5f, 10f, 300f, -120f))
+                    val scale0 = session.view.scale
+                    session.runInput(1L)
+                    val moved = session.view.scale != scale0
+                    out.append("hoist: view changed on the first turn: ${if (moved) "PASS" else "FAIL"} (scale $scale0 -> ${session.view.scale})\n")
+                }
+                var turns = 0
+                while (session.runInput(1L) && turns < 100000) turns++
+                session.runInput()
+                session.runCommands()
+                return session to engine
+            }
+            val (_, ea) = run(false)
+            val (_, eb) = run(true)
+            val la = ea.layers.last()
+            val lb = eb.layers.last()
+            var ink = 0
+            var bad = 0
+            var y = 0
+            while (y < size) {
+                var x = 0
+                while (x < size) {
+                    val a = la.tiles.getPixel(x, y) ushr 24
+                    val b = lb.tiles.getPixel(x, y) ushr 24
+                    if (a > 0) ink++
+                    if (kotlin.math.abs(a - b) > 8) bad++
+                    x += 2
+                }
+                y += 2
+            }
+            out.append("hoist: stroke same as without the gesture: ${if (ink > 1000 && bad * 1000 < ink) "PASS" else "FAIL"} (ink $ink samples, differing $bad)\n")
+
+            // Undo while a big stroke is still being painted: the stroke goes,
+            // the one before it stays (button = command, or two-finger tap).
+            fun undoCase(tap: Boolean): String {
+                val engine = DrawingEngine(size, size)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val session = DrawingSession("hu", "HU", engine, History())
+                identityView(session, size, size)
+                session.presets = com.yume.app.engine.BrushLibrary.defaults
+                session.assist = 0f
+                session.quickShapeEnabled = false
+                val p = session.presets.first { it.id == "studio-pen" }
+                pick(session, p, p.category)
+                session.runCommands()
+                session.setBrushSize(240f)
+                session.runCommands()
+                val l = engine.newLayer("Paint")
+                engine.selectLayer(l.id)
+                fun queue(y0: Float) {
+                    session.pushInput(InputEvent.Down(0, 200f, y0, 0.8f, 0f, false, false))
+                    for (i in 1..40) {
+                        session.pushInput(InputEvent.Move(0, floatArrayOf(200f + i * 40f), floatArrayOf(y0 + kotlin.math.sin(i * 0.3f) * 150f), floatArrayOf(0.8f), 0f))
+                    }
+                    session.pushInput(InputEvent.Up(0))
+                }
+                queue(500f)
+                session.runInput()
+                session.runCommands()
+                fun alphaAt(x: Int, y: Int) = l.tiles.getPixel(x, y) ushr 24
+                val firstInk = alphaAt(1000, 500 + (kotlin.math.sin(20 * 0.3f) * 150f).toInt())
+                queue(1400f)
+                session.runInput(1L)
+                session.runInput(1L)
+                if (tap) session.pushInput(InputEvent.Tap(2)) else session.undo()
+                session.runCommands()
+                var turns = 0
+                while (session.runInput(1L) && turns < 100000) turns++
+                session.runInput()
+                session.runCommands()
+                var second = 0
+                var y = 1100
+                while (y < 1700) { var x = 0; while (x < size) { if (alphaAt(x, y) > 0) second++; x += 4 }; y += 4 }
+                val firstStill = alphaAt(1000, 500 + (kotlin.math.sin(20 * 0.3f) * 150f).toInt())
+                val ok = second == 0 && firstInk > 200 && firstStill == firstInk
+                return "hoist: undo (${if (tap) "two-finger tap" else "button"}) during a trailing stroke: ${if (ok) "PASS" else "FAIL"} (second stroke samples left $second, first stroke alpha $firstInk -> $firstStill)\n"
+            }
+            out.append(undoCase(false))
+            out.append(undoCase(true))
+        } catch (t: Throwable) {
+            Log.e(TAG, "hoist failed", t)
+            out.append("hoist: FAIL ${t.javaClass.simpleName}: ${t.message}\n")
         } finally {
             TileStoreConfig.useSparseLayers = oldS
         }

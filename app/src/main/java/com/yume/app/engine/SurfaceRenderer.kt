@@ -731,7 +731,9 @@ class SurfaceRenderer(
      * the real dabs replace it as they catch up.
      */
     private fun drawPendingInk(canvas: Canvas, matrix: Matrix) {
-        if (session.tool != Tool.Brush) return
+        // The stroke's own look, kept when the tool changes mid-stroke.
+        val ink = session.liveInk ?: return
+        val eraser = ink.eraser
         val live = session.liveCursor() ?: return
         val n = session.pendingInk(pendingPts)
         if (n == 0) return
@@ -741,8 +743,12 @@ class SurfaceRenderer(
         pendingPath.moveTo(from[0], from[1])
         for (i in 0 until n) pendingPath.lineTo(pendingPts[i * 2], pendingPts[i * 2 + 1])
         pendingPaint.strokeWidth = max(1f, live[2] * session.view.scale)
-        pendingPaint.color = session.color
-        pendingPaint.alpha = (255 * session.brushOpacity.coerceIn(0.05f, 1f)).toInt()
+        // The eraser's unpainted part shows the paper (exact on a single
+        // layer; the real erase replaces it a moment later either way).
+        val paper = session.engine.backgroundColor
+        pendingPaint.color = if (!eraser) ink.color
+            else if ((paper ushr 24) == 0) 0xFFE6E6E6.toInt() else paper or (0xFF shl 24)
+        pendingPaint.alpha = (255 * ink.opacity.coerceIn(0.05f, 1f)).toInt()
         canvas.drawPath(pendingPath, pendingPaint)
     }
 

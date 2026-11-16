@@ -727,6 +727,13 @@ class DrawingSession(
      * oldest first, up to the end of the stroke: what the canvas will show
      * once painting catches up. Owner thread. Returns the count of points.
      */
+    /** How the stroke being painted looks as plain ink (fixed when it starts: switching tools or colours mid-stroke changes nothing). */
+    class LiveInk(val eraser: Boolean, val color: Int, val opacity: Float)
+
+    /** The stroke being painted, for [pendingInk]'s preview; null for smudge. */
+    @Volatile var liveInk: LiveInk? = null
+        private set
+
     fun pendingInk(out: FloatArray): Int {
         if (!painter.isActive) return 0
         var n = 0
@@ -772,10 +779,9 @@ class DrawingSession(
         val y0 = lastInY
         lastInX = x1
         lastInY = y1
-        if (event.xs.size != 1 || !strokeInProgress || x0.isNaN() ||
-            (tool != Tool.Brush && tool != Tool.Eraser && tool != Tool.Smudge)
-        ) return event
-        val preset = presets.firstOrNull { it.id == activePresetId } ?: return event
+        if (event.xs.size != 1 || !strokeInProgress || x0.isNaN() || !painter.isActive) return event
+        // The stroke's own brush: the tool may have changed since it started.
+        val preset = strokePreset ?: return event
         // Screen px per piece: about four dabs at the brush's full size.
         val dabDoc = preset.size * kotlin.math.max(0.02f, preset.spacing)
         val pieceScreen = kotlin.math.max(6f, dabDoc * 4f * view.scale)
@@ -793,6 +799,85 @@ class DrawingSession(
         return first
     }
 
+    /**
+     * Pan / zoom while painting still trails the pen: the two-finger gesture
+     * waits behind the stroke's unpainted points in the queue, so the view
+     * froze until a big stroke finished. Gestures queued behind such a
+     * backlog are applied at once instead. The points before them are in
+     * screen space as the old view showed it, so each is carried over to
+     * where the same document point sits in the new view; they then paint
+     * exactly where they would have. Returns whether the view changed.
+     */
+    private fun hoistGestures(): Boolean {
+        if (transform != null) return false
+        var changed = false
+        while (true) {
+            var gesture: InputEvent.Gesture? = null
+            var before = 0
+            var downs = 0
+            for (e in inputs) {
+                if (e is InputEvent.Gesture) { gesture = e; break }
+                if (e is InputEvent.Tap) {
+                    // An undo tap behind the stroke still being painted: the
+                    // stroke goes now instead of after it is fully painted.
+                    if (e.fingers != 2 || downs > 0 || !painter.isActive) return changed
+                    splitMoves.clear()
+                    repeat(before) { inputs.poll() }
+                    inputs.poll() // the tap
+                    dropLiveStroke()
+                    return true
+                }
+                if (e is InputEvent.Down) downs++
+                when (e) {
+                    is InputEvent.Move, is InputEvent.Up, is InputEvent.Hover,
+                    is InputEvent.Down, InputEvent.CancelStroke, InputEvent.QuickShape -> before++
+                    else -> return changed
+                }
+            }
+            if (gesture == null) return changed
+            // Already next in line with nothing to paint first: the normal path.
+            if (before == 0 && splitMoves.isEmpty()) return changed
+            val prefix = ArrayList<InputEvent>(splitMoves.size + before)
+            prefix.addAll(splitMoves)
+            splitMoves.clear()
+            repeat(before) { inputs.poll()?.let { prefix.add(it) } }
+            inputs.poll() // the gesture (only this thread takes from the queue)
+            val inverseBefore = android.graphics.Matrix().also { view.matrix.invert(it) }
+            handle(gesture)
+            changed = true
+            val pt = FloatArray(2)
+            fun carry(x: Float, y: Float): FloatArray {
+                pt[0] = x
+                pt[1] = y
+                inverseBefore.mapPoints(pt)
+                view.matrix.mapPoints(pt)
+                return pt
+            }
+            if (!lastInX.isNaN()) {
+                carry(lastInX, lastInY)
+                lastInX = pt[0]
+                lastInY = pt[1]
+            }
+            for (e in prefix) {
+                splitMoves.addLast(when (e) {
+                    is InputEvent.Move -> {
+                        val xs = FloatArray(e.xs.size)
+                        val ys = FloatArray(e.ys.size)
+                        for (i in xs.indices) {
+                            carry(e.xs[i], e.ys[i])
+                            xs[i] = pt[0]
+                            ys[i] = pt[1]
+                        }
+                        e.copy(xs = xs, ys = ys)
+                    }
+                    is InputEvent.Down -> carry(e.x, e.y).let { e.copy(x = it[0], y = it[1]) }
+                    is InputEvent.Hover -> carry(e.x, e.y).let { e.copy(x = it[0], y = it[1]) }
+                    else -> e
+                })
+            }
+        }
+    }
+
     fun runInput(budgetNs: Long = Long.MAX_VALUE): Boolean {
         var changed = false
         // A time budget: a big brush can take longer to paint than the
@@ -804,6 +889,7 @@ class DrawingSession(
         // Live painting may reuse resampled big tips (exact painting, as in
         // the harness, never does).
         painter.fastDabs = live || fastDabsForTest
+        if (live) changed = hoistGestures()
         while (true) {
             if (changed && System.nanoTime() - start > budgetNs && (inputs.isNotEmpty() || splitMoves.isNotEmpty())) {
                 // Still painting what the pen already drew.
@@ -1399,6 +1485,8 @@ class DrawingSession(
         recordStrokePoint(x, y, pressure)
         assistLocked = false
         painter.begin(layer, brush, color, x, y, pressure, tilt, assistStrength = assist)
+        liveInk = if (brush.category == BrushCategory.Smudge) null
+            else LiveInk(brush.category == BrushCategory.Eraser, color, brush.opacity)
         FrameLogger.strokeActive = true
         // Cache the layers below for the tiles this stroke touches, so a frame
         // composites the stroke instead of the whole stack.
@@ -3105,6 +3193,7 @@ class DrawingSession(
     private fun doUndo() = working { doUndoWork() }
 
     private fun doUndoWork() {
+        if (dropLiveStroke()) return
         if (transform != null) cancelTransformInternal()
         cancelAdjustmentInternal()
         val action = history.peekUndo() ?: return
@@ -3118,9 +3207,26 @@ class DrawingSession(
         }
     }
 
+    /**
+     * Undo while a stroke is still being painted (a big brush trailing the
+     * pen, or a finger still down): the stroke itself is what goes. Its
+     * painted part is put back and its unpainted points then do nothing
+     * (the painter is no longer active). Undoing the step before it instead
+     * restored old pixels under the half-painted stroke, which went on
+     * painting over them: a garbled canvas.
+     */
+    private fun dropLiveStroke(): Boolean {
+        if (!painter.isActive) return false
+        handle(InputEvent.CancelStroke)
+        requestState()
+        return true
+    }
+
     private fun doRedo() = working { doRedoWork() }
 
     private fun doRedoWork() {
+        // Redoing under a half-painted stroke would mix the two.
+        if (painter.isActive) return
         val action = history.peekRedo() ?: return
         if (!ensureHistoryBudget(action, undo = false)) return
         if (history.redo(engine)) {
