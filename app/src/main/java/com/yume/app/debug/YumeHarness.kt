@@ -209,7 +209,10 @@ object YumeHarness {
                 } else if (only == "bigstroke") {
                     out.append(scoreBigStroke())
                 } else if (only == "bigstroke6k") {
-                    out.append(scoreBigStroke(6144, 900f))
+                    repeat(2) {
+                        out.append(scoreBigStroke(6144, 900f))
+                        out.append(scoreBigStroke(6144, 900f, fast = true))
+                    }
                 } else if (only == "opacitytest") {
                     out.append(scoreOpacityTest())
                 } else if (only == "motionuser") {
@@ -4425,7 +4428,7 @@ object YumeHarness {
      * batch cost and the cost at lift, for a few brushes at 300 px (Studio Pen
      * also at spacing 0, as users set it).
      */
-    private fun scoreBigStroke(size: Int = 4096, brushPx: Float = 300f): String {
+    private fun scoreBigStroke(size: Int = 4096, brushPx: Float = 300f, fast: Boolean = false): String {
         val out = StringBuilder()
         val oldS = TileStoreConfig.useSparseLayers
         TileStoreConfig.useSparseLayers = true
@@ -4455,6 +4458,7 @@ object YumeHarness {
                 val n = 30
                 var paintNs = 0L
                 var flushNs = 0L
+                session.fastDabsForTest = fast
                 session.pushInput(InputEvent.Down(0, 100f, y, 0.6f, 0f, false, false))
                 session.runInput()
                 for (i in 1..n) {
@@ -4479,7 +4483,8 @@ object YumeHarness {
                 session.runCommands()
                 engine.flush()
                 val endMs = (System.nanoTime() - e0) / 1e6
-                out.append("bigstroke $id ${brushPx.toInt()}px at $size spacing ${p.spacing}: per batch avg ${"%.1f".format(total / n)} ms worst ${"%.1f".format(worst)} ms, lift ${"%.0f".format(endMs)} ms (paint ${paintNs / 1_000_000 / n} + composite ${flushNs / 1_000_000 / n} ms per batch)\n")
+                val pz = session.painterForDebug(); out.append("  tips hit ${pz.tipHits} miss ${pz.tipMisses} skip ${pz.tipSkips}\n"); pz.tipHits = 0; pz.tipMisses = 0; pz.tipSkips = 0
+                out.append("bigstroke${if (fast) " FAST" else ""} $id ${brushPx.toInt()}px at $size spacing ${p.spacing}: per batch avg ${"%.1f".format(total / n)} ms worst ${"%.1f".format(worst)} ms, lift ${"%.0f".format(endMs)} ms (paint ${paintNs / 1_000_000 / n} + composite ${flushNs / 1_000_000 / n} ms per batch)\n")
             }
         } catch (t: Throwable) {
             Log.e(TAG, "bigstroke failed", t)

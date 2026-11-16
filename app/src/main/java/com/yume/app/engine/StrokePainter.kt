@@ -528,6 +528,7 @@ class StrokePainter(private val engine: DrawingEngine) {
         selectionClip = null
         selectionBounds = null
         releaseShadows()
+        clearTipCache()
         strokeOpacity = 1f
         // tileCapture deliberately survives: the session turns it into a patch.
     }
@@ -981,16 +982,32 @@ class StrokePainter(private val engine: DrawingEngine) {
 
     private fun stampDab(
         source: Bitmap,
-        left: Float,
-        top: Float,
-        right: Float,
-        bottom: Float,
+        left0: Float,
+        top0: Float,
+        right0: Float,
+        bottom0: Float,
         blit: Paint
     ) {
+        var left = left0
+        var top = top0
+        var right = right0
+        var bottom = bottom0
+        val rot = dabAngle
+        // Live painting with a huge round-ish tip: snap the dab to half a
+        // pixel and its size to a whole pixel, so neighbouring dabs share a
+        // resampled tip from [tipCache] (the resample is most of a big dab's
+        // cost). Invisible at this size; off for exact (harness) painting.
+        val cacheable = fastDabs && rot == 0f && (right0 - left0) >= FAST_DAB_MIN
+        if (cacheable) {
+            val size = kotlin.math.round(right0 - left0)
+            left = kotlin.math.round(left0 * 2f) / 2f
+            top = kotlin.math.round(top0 * 2f) / 2f
+            right = left + size
+            bottom = top + size
+        }
         // Integer bounding box of the dab plus one pixel of margin: a filtered,
         // antialiased edge can reach past its own rect.
         val px = dabBounds
-        val rot = dabAngle
         if (rot != 0f) {
             // Rotated: the scratch must hold the turned square.
             val cx = (left + right) * 0.5f
@@ -1016,10 +1033,24 @@ class StrokePainter(private val engine: DrawingEngine) {
 
         val w = px.width()
         val h = px.height()
-        val scratch = ensureDabScratch(w, h) ?: return
-        val sc = dabScratchCanvas ?: return
-
         dart.set(left, top, right, bottom)
+        // A cached tip fits only an unclipped dab (its pixels sit at the same
+        // place relative to the box).
+        val fullW = ceil(right).toInt() - floor(left).toInt() + 2
+        val fullH = ceil(bottom).toInt() - floor(top).toInt() + 2
+        val tipKey = if (cacheable && w == fullW && h == fullH) {
+            TipKey(System.identityHashCode(source), source.generationId, (right - left).toInt(),
+                ((left - floor(left)) * 2f).toInt(), ((top - floor(top)) * 2f).toInt(),
+                blit.isAntiAlias, blit.isDither)
+        } else null
+        val cached = tipKey?.let { tipCache[it] }
+        if (tipKey != null) { if (cached != null) tipHits++ else tipMisses++ } else if (cacheable) tipSkips++
+        if (cached != null) {
+            blendDabFrom(cached, px, w, h, blit)
+            return
+        }
+        val scratch = (if (tipKey != null) newTip(w, h) else ensureDabScratch(w, h)) ?: return
+        val sc = if (tipKey != null) Canvas(scratch) else (dabScratchCanvas ?: return)
 
         // 1. Dab colour + coverage, at the dab's real document position.
         val s0 = sc.save()
@@ -1042,6 +1073,11 @@ class StrokePainter(private val engine: DrawingEngine) {
         if (rot != 0f) sc.rotate(rot, dart.centerX(), dart.centerY())
         sc.drawBitmap(source, null, dart, dabScratchPaint)
         sc.restoreToCount(s1)
+        if (tipKey != null) {
+            tipCache[tipKey] = scratch
+            blendDabFrom(scratch, px, w, h, blit)
+            return
+        }
 
         // 2. Modulate and blend with the real paint, 1:1.
         dabBlendPaint.reset()
@@ -1077,6 +1113,73 @@ class StrokePainter(private val engine: DrawingEngine) {
                 st.editTile(tx, ty) { tc ->
                     if (sel != null) tc.clipPath(sel)
                     tc.drawBitmap(scratch, dabSrcRect, dabDstRect, dabBlendPaint)
+                }
+            }
+        }
+    }
+
+    /** Live painting (the render loop): big dabs may reuse a cached resampled tip. */
+    @Volatile var fastDabs = false
+    @JvmField var tipHits = 0L
+    @JvmField var tipMisses = 0L
+    @JvmField var tipSkips = 0L
+
+    private data class TipKey(
+        val source: Int, val generation: Int, val size: Int,
+        val fx: Int, val fy: Int, val aa: Boolean, val dither: Boolean
+    )
+
+    /** Recently resampled big tips, least recently used dropped first. */
+    private val tipCache = object : java.util.LinkedHashMap<TipKey, Bitmap>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<TipKey, Bitmap>): Boolean {
+            if (size > TIP_CACHE_MAX) {
+                eldest.value.recycle()
+                return true
+            }
+            return false
+        }
+    }
+
+    private fun newTip(w: Int, h: Int): Bitmap? =
+        runCatching { Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888) }.getOrNull()
+
+    /** Drops the cached tips (a stroke ended: the next may use another brush). */
+    fun clearTipCache() {
+        tipCache.values.forEach { it.recycle() }
+        tipCache.clear()
+    }
+
+    /** Pass 2 from an already resampled tip: exactly the blend [stampDab] does. */
+    private fun blendDabFrom(tip: Bitmap, px: Rect, w: Int, h: Int, blit: Paint) {
+        val sel = selectionClip
+        dabBlendPaint.reset()
+        dabBlendPaint.blendMode = blit.blendMode
+        dabBlendPaint.isAntiAlias = false
+        dabBlendPaint.isFilterBitmap = false
+        dabBlendPaint.isDither = blit.isDither
+        dabBlendPaint.alpha = blit.alpha
+        dabBlendPaint.colorFilter = blit.colorFilter
+        dabSrcRect.set(0, 0, w, h)
+        dabDstRect.set(px)
+        if (strokeOpacity < 1f && blit === paint) {
+            stampBuffered(tip, px)
+            return
+        }
+        val st = store
+        if (st == null) {
+            val c = canvas ?: return
+            c.drawBitmap(tip, dabSrcRect, dabDstRect, dabBlendPaint)
+            return
+        }
+        val tileSize = st.tileSize
+        val ty1 = (px.bottom - 1) / tileSize
+        val tx1 = (px.right - 1) / tileSize
+        for (ty in px.top / tileSize..ty1) {
+            for (tx in px.left / tileSize..tx1) {
+                tileCapture?.capture(tx, ty)
+                st.editTile(tx, ty) { tc ->
+                    if (sel != null) tc.clipPath(sel)
+                    tc.drawBitmap(tip, dabSrcRect, dabDstRect, dabBlendPaint)
                 }
             }
         }
@@ -1203,6 +1306,7 @@ class StrokePainter(private val engine: DrawingEngine) {
         store = null
         selectionClip = null
         selectionBounds = null
+        clearTipCache()
         // tileCapture is kept so a quick-shape redraw starts from the original
         // pre-stroke pixels.
     }
@@ -1318,3 +1422,9 @@ class StrokePainter(private val engine: DrawingEngine) {
         }
     }
 }
+
+/** Dabs at least this wide (document px) may reuse a cached tip while painting live. */
+private const val FAST_DAB_MIN = 200f
+/** Cached tips kept (a 900 px tip is about 3 MB). */
+private const val TIP_CACHE_MAX = 12
+

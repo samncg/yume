@@ -722,6 +722,32 @@ class DrawingSession(
         return if (s == 0L) 0L else now - s
     }
 
+    /**
+     * The pen's points not painted yet (screen px, x/y pairs into [out]),
+     * oldest first, up to the end of the stroke: what the canvas will show
+     * once painting catches up. Owner thread. Returns the count of points.
+     */
+    fun pendingInk(out: FloatArray): Int {
+        if (!painter.isActive) return 0
+        var n = 0
+        fun add(e: InputEvent): Boolean {
+            if (e !is InputEvent.Move) return e !is InputEvent.Up && e !is InputEvent.CancelStroke
+            for (i in e.xs.indices) {
+                if (n * 2 + 1 >= out.size) return false
+                out[n * 2] = e.xs[i]
+                out[n * 2 + 1] = e.ys[i]
+                n++
+            }
+            return true
+        }
+        for (e in splitMoves) if (!add(e)) return n
+        for (e in inputs) if (!add(e)) return n
+        return n
+    }
+
+    /** Harness: measure the live-painting tip cache outside the render loop. */
+    @Volatile var fastDabsForTest = false
+
     /** The rest of a long move, painted a few dabs per render-loop turn. */
     private val splitMoves = ArrayDeque<InputEvent>()
     private var lastInX = Float.NaN
@@ -775,6 +801,9 @@ class DrawingSession(
         // and the rest is painted in the next turns.
         val start = System.nanoTime()
         val live = budgetNs != Long.MAX_VALUE
+        // Live painting may reuse resampled big tips (exact painting, as in
+        // the harness, never does).
+        painter.fastDabs = live || fastDabsForTest
         while (true) {
             if (changed && System.nanoTime() - start > budgetNs && (inputs.isNotEmpty() || splitMoves.isNotEmpty())) {
                 // Still painting what the pen already drew.

@@ -420,6 +420,7 @@ class SurfaceRenderer(
             drawSymmetry(canvas, matrix, engine.width, engine.height)
             drawSelection(canvas, matrix)
             drawGradientGuide(canvas, matrix)
+            drawPendingInk(canvas, matrix)
             drawPrediction(canvas, matrix)
             drawHover(canvas, matrix)
             recordFrame()
@@ -715,6 +716,36 @@ class SurfaceRenderer(
      * replaced by real paint as the samples arrive, so the line on screen
      * keeps up with the pen instead of trailing behind it.
      */
+    private val pendingPts = FloatArray(4096)
+    private val pendingPath = android.graphics.Path()
+    private val pendingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+
+    /**
+     * While painting trails the pen (a huge brush on a big canvas), the part
+     * of the stroke not painted yet is drawn as plain ink at the brush's
+     * current size and colour, so the stroke appears under the pen at once;
+     * the real dabs replace it as they catch up.
+     */
+    private fun drawPendingInk(canvas: Canvas, matrix: Matrix) {
+        if (session.tool != Tool.Brush) return
+        val live = session.liveCursor() ?: return
+        val n = session.pendingInk(pendingPts)
+        if (n == 0) return
+        val from = floatArrayOf(live[0], live[1])
+        matrix.mapPoints(from)
+        pendingPath.rewind()
+        pendingPath.moveTo(from[0], from[1])
+        for (i in 0 until n) pendingPath.lineTo(pendingPts[i * 2], pendingPts[i * 2 + 1])
+        pendingPaint.strokeWidth = max(1f, live[2] * session.view.scale)
+        pendingPaint.color = session.color
+        pendingPaint.alpha = (255 * session.brushOpacity.coerceIn(0.05f, 1f)).toInt()
+        canvas.drawPath(pendingPath, pendingPaint)
+    }
+
     private fun drawPrediction(canvas: Canvas, matrix: Matrix) {
         val tip = session.predictedTip ?: return
         if (!session.strokeInProgress) return
