@@ -204,6 +204,8 @@ object YumeHarness {
                     out.append(scoreFreeze8k(app))
                 } else if (only == "histpersist") {
                     out.append(scoreHistPersist(app))
+                } else if (only == "histpersistbig") {
+                    out.append(scoreHistPersist(app, 6144, zigzag = true))
                 } else if (only == "overlaytest") {
                     out.append(scoreOverlayTest())
                 } else if (only == "hoist") {
@@ -3823,9 +3825,8 @@ object YumeHarness {
         return out.toString()
     }
 
-    private fun scoreHistPersist(app: YumeApp): String {
+    private fun scoreHistPersist(app: YumeApp, size: Int = 6144, zigzag: Boolean = false): String {
         val out = StringBuilder()
-        val size = 6144
         val oldS = TileStoreConfig.useSparseLayers
         TileStoreConfig.useSparseLayers = true
         var cache: TileCache? = null
@@ -3856,7 +3857,14 @@ object YumeHarness {
             for (k in 0 until 8) {
                 session.color = (0xFF000000.toInt() or (k * 0x1F3A57))
                 val y = 500f + k * 650f
-                session.stroke(listOf(P(200f, y), P(3000f, y + 200f), P(5900f, y - 100f)))
+                if (zigzag) {
+                    // Each stroke over the 192 MB copy budget (about 500 tiles).
+                    val c = size / 2f
+                    val a = size * 0.39f
+                    session.stroke((0..20).map { i -> P(200f + k * 40f + i * (size - 800f) / 20f, c + if ((i + k) % 2 == 0) -a else a) })
+                } else {
+                    session.stroke(listOf(P(200f, y), P(3000f, y + 200f), P(5900f, y - 100f)))
+                }
                 session.runCommands()
                 states.add(hashNow(engine))
             }
@@ -3877,6 +3885,11 @@ object YumeHarness {
                 rounds++
             } while (hist!!.entries.size < steps && rounds < 6)
             out.append("histpersist: saved ${hist!!.entries.size} of $steps steps in $rounds saves (applied ${hist!!.appliedCount})\n")
+            if (zigzag) {
+                val first = session.historyForDiskNow(emptySet())
+                val big = first.entries.count { e -> e.tiles?.any { it.fetch != null } == true }
+                out.append("histpersist: tiles per step ${first.entries.map { it.tiles?.size ?: 0 }}, $big of them over the copy budget (saved lazily)\n")
+            }
             session.history.spill?.close()
 
             // Reopen.

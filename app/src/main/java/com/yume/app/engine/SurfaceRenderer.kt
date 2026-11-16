@@ -731,24 +731,57 @@ class SurfaceRenderer(
      * the real dabs replace it as they catch up.
      */
     private fun drawPendingInk(canvas: Canvas, matrix: Matrix) {
-        // The stroke's own look, kept when the tool changes mid-stroke.
-        val ink = session.liveInk ?: return
-        val eraser = ink.eraser
-        val live = session.liveCursor() ?: return
         val n = session.pendingInk(pendingPts)
         if (n == 0) return
-        val from = floatArrayOf(live[0], live[1])
-        matrix.mapPoints(from)
-        pendingPath.rewind()
-        pendingPath.moveTo(from[0], from[1])
-        for (i in 0 until n) pendingPath.lineTo(pendingPts[i * 2], pendingPts[i * 2 + 1])
-        pendingPaint.strokeWidth = max(1f, live[2] * session.view.scale)
         // The eraser's unpainted part shows the paper (exact on a single
         // layer; the real erase replaces it a moment later either way).
         val paper = session.engine.backgroundColor
-        pendingPaint.color = if (!eraser) ink.color
-            else if ((paper ushr 24) == 0) 0xFFE6E6E6.toInt() else paper or (0xFF shl 24)
-        pendingPaint.alpha = (255 * ink.opacity.coerceIn(0.05f, 1f)).toInt()
+        fun look(ink: DrawingSession.LiveInk, widthPx: Float) {
+            pendingPaint.strokeWidth = max(1f, widthPx)
+            pendingPaint.color = if (!ink.eraser) ink.color
+                else if ((paper ushr 24) == 0) 0xFFE6E6E6.toInt() else paper or (0xFF shl 24)
+            pendingPaint.alpha = (255 * ink.opacity.coerceIn(0.05f, 1f)).toInt()
+        }
+        var i = 0
+        // The stroke being painted: from the painted tip, in its own look
+        // (kept when the tool changes mid-stroke).
+        val ink = session.liveInk
+        val live = session.liveCursor()
+        if (!pendingPts[0].isNaN()) {
+            if (ink != null && live != null) {
+                val from = floatArrayOf(live[0], live[1])
+                matrix.mapPoints(from)
+                pendingPath.rewind()
+                pendingPath.moveTo(from[0], from[1])
+                while (i < n && !pendingPts[i * 2].isNaN()) {
+                    pendingPath.lineTo(pendingPts[i * 2], pendingPts[i * 2 + 1])
+                    i++
+                }
+                look(ink, live[2] * session.view.scale)
+                canvas.drawPath(pendingPath, pendingPaint)
+            } else {
+                while (i < n && !pendingPts[i * 2].isNaN()) i++
+            }
+        }
+        if (i >= n) return
+        // Strokes drawn after it, still queued: in the tool's current look,
+        // at the brush's full size.
+        val queued = session.queuedInk() ?: return
+        pendingPath.rewind()
+        while (i < n) {
+            if (pendingPts[i * 2].isNaN()) {
+                i++
+                if (i < n) {
+                    pendingPath.moveTo(pendingPts[i * 2], pendingPts[i * 2 + 1])
+                    // A tap leaves a dot.
+                    pendingPath.lineTo(pendingPts[i * 2] + 0.01f, pendingPts[i * 2 + 1])
+                }
+            } else {
+                pendingPath.lineTo(pendingPts[i * 2], pendingPts[i * 2 + 1])
+            }
+            i++
+        }
+        look(queued, session.brushSize * session.view.scale)
         canvas.drawPath(pendingPath, pendingPaint)
     }
 

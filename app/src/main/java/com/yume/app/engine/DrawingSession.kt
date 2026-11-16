@@ -165,7 +165,13 @@ class PersistedTile(
     val afterSolid: Long = -1L,
     /** Loaded history: the crop's saved PNG, decoded only when needed. */
     val beforeFile: java.io.File? = null,
-    val afterFile: java.io.File? = null
+    val afterFile: java.io.File? = null,
+    /**
+     * A step too big to copy at once: the saver reads each crop here when it
+     * writes it (true = before), an owned bitmap or null for an empty tile.
+     * Throws when the step can no longer be read (it left the history).
+     */
+    val fetch: ((Boolean) -> Bitmap?)? = null
 )
 
 data class PersistedHistory(
@@ -722,11 +728,6 @@ class DrawingSession(
         return if (s == 0L) 0L else now - s
     }
 
-    /**
-     * The pen's points not painted yet (screen px, x/y pairs into [out]),
-     * oldest first, up to the end of the stroke: what the canvas will show
-     * once painting catches up. Owner thread. Returns the count of points.
-     */
     /** How the stroke being painted looks as plain ink (fixed when it starts: switching tools or colours mid-stroke changes nothing). */
     class LiveInk(val eraser: Boolean, val color: Int, val opacity: Float)
 
@@ -734,21 +735,55 @@ class DrawingSession(
     @Volatile var liveInk: LiveInk? = null
         private set
 
-    fun pendingInk(out: FloatArray): Int {
-        if (!painter.isActive) return 0
+    /**
+     * How strokes still waiting in the queue (drawn after the one being
+     * painted) will look: the tool as it is now, since that is what paints
+     * them. Null when the tool does not lay down ink.
+     */
+    fun queuedInk(): LiveInk? = when (tool) {
+        Tool.Brush -> LiveInk(false, color, brushOpacity)
+        Tool.Eraser -> LiveInk(true, color, brushOpacity)
+        else -> null
+    }
+
+    /**
+     * The pen's points not painted yet (screen px, x/y pairs into [out]),
+     * oldest first: the rest of the stroke being painted, then any strokes
+     * drawn after it that wait in the queue. A NaN x starts a queued stroke
+     * at the point after it. Owner thread. Returns the count of pairs.
+     */
+    fun pendingInk(out: FloatArray, queued: Boolean = true): Int {
         var n = 0
-        fun add(e: InputEvent): Boolean {
-            if (e !is InputEvent.Move) return e !is InputEvent.Up && e !is InputEvent.CancelStroke
-            for (i in e.xs.indices) {
-                if (n * 2 + 1 >= out.size) return false
-                out[n * 2] = e.xs[i]
-                out[n * 2 + 1] = e.ys[i]
-                n++
-            }
-            return true
+        // Collecting the current stroke (only while it is being painted).
+        var inStroke = painter.isActive
+        var segStart = 0
+        var full = false
+        fun put(x: Float, y: Float) {
+            if (n * 2 + 1 >= out.size) { full = true; return }
+            out[n * 2] = x
+            out[n * 2 + 1] = y
+            n++
         }
-        for (e in splitMoves) if (!add(e)) return n
-        for (e in inputs) if (!add(e)) return n
+        fun add(e: InputEvent) {
+            when (e) {
+                is InputEvent.Move -> if (inStroke) for (i in e.xs.indices) put(e.xs[i], e.ys[i])
+                is InputEvent.Down -> if (queued && !inStroke) {
+                    segStart = n
+                    put(Float.NaN, 0f)
+                    put(e.x, e.y)
+                    inStroke = true
+                }
+                is InputEvent.Up -> inStroke = false
+                InputEvent.CancelStroke -> {
+                    // A touch that became a gesture: its ink never lands.
+                    if (inStroke && segStart < n && out[segStart * 2].isNaN()) n = segStart
+                    inStroke = false
+                }
+                else -> {}
+            }
+        }
+        for (e in splitMoves) { add(e); if (full) return n }
+        for (e in inputs) { add(e); if (full) return n }
         return n
     }
 
@@ -4196,8 +4231,16 @@ class DrawingSession(
                         // fresh bitmaps, without pulling the step into memory.
                         // One step too big to copy ends the saved history.
                         val stepBytes = action.changes.size.toLong() * store.tileSize * store.tileSize * 8L
-                        if (stepBytes > PERSIST_STEP_MAX || copied + stepBytes > PERSIST_TOTAL_MAX) break
                         val spill = action.stream ?: history.spill
+                        if (stepBytes > PERSIST_STEP_MAX || copied + stepBytes > PERSIST_TOTAL_MAX) {
+                            // Too big to copy in one go (a huge brush across a
+                            // 12K canvas): the saver fetches it tile by tile
+                            // instead. Breaking here used to end the saved
+                            // history at this step, so one big stroke wiped
+                            // every step before it from disk.
+                            entries.add(lazyEntry(action, index, store.tileSize))
+                            continue
+                        }
                         val tiles = try {
                             action.changes.map { c ->
                                 val bRaw = c.before?.let { SolidTiles.rawOf(it) }
@@ -4244,6 +4287,71 @@ class DrawingSession(
             val dropped = run.size - entries.size
             return PersistedHistory((applied - dropped).coerceAtLeast(0), entries)
         }
+    }
+
+    /**
+     * [action] described for the saver without copying its pixels: each crop
+     * is read on the owner thread when the saver writes it, one at a time.
+     */
+    private fun lazyEntry(action: TilePixelAction, index: Int, tileSize: Int): PersistedHistoryEntry {
+        val tiles = action.changes.map { c ->
+            val bRaw = c.before?.let { SolidTiles.rawOf(it) }
+            val aRaw = c.after?.let { SolidTiles.rawOf(it) }
+            // Both sides come in one owner turn: the "after" crop waits here
+            // for the saver's next call (it writes before, then after).
+            var heldAfter: Bitmap? = null
+            var holding = false
+            PersistedTile(
+                c.tx, c.ty, Rect(c.clip), null, null,
+                beforeSolid = bRaw?.let { it.toLong() and 0xFFFFFFFFL } ?: -1L,
+                afterSolid = aRaw?.let { it.toLong() and 0xFFFFFFFFL } ?: -1L,
+                fetch = { before ->
+                    if (!before && holding) {
+                        holding = false
+                        heldAfter.also { heldAfter = null }
+                    } else if (before && aRaw == null) {
+                        val (b, a) = fetchCrops(action, c, true, true)
+                        heldAfter = a
+                        holding = true
+                        b
+                    } else {
+                        fetchCrops(action, c, before, !before).let { if (before) it.first else it.second }
+                    }
+                }
+            )
+        }
+        return PersistedHistoryEntry(
+            actionId = action.id, label = action.label, kind = action.kind,
+            detail = action.detail, swatch = action.swatch, layerIndex = index,
+            rect = Rect(action.bounds), before = null, after = null, mask = action.mask,
+            tiles = tiles, tileSize = tileSize, layerId = action.layerId
+        )
+    }
+
+    /** Crops of a still-live step (the sides asked for), copied in one owner turn (see [lazyEntry]). */
+    private fun fetchCrops(action: TilePixelAction, c: TileChange, wantBefore: Boolean, wantAfter: Boolean): Pair<Bitmap?, Bitmap?> {
+        var outB: Bitmap? = null
+        var outA: Bitmap? = null
+        var failure: Throwable? = null
+        val ran = runOnOwner {
+            try {
+                if (!history.contains(action)) throw java.io.IOException("step ${action.id} left the history")
+                val spill = action.stream ?: history.spill
+                fun side(before: Boolean): Bitmap? {
+                    val (b, owned) = c.cropFor(before, spill)
+                    return if (b == null) null else if (owned) b else b.copy(Bitmap.Config.ARGB_8888, false)
+                }
+                if (wantBefore) outB = side(true)
+                if (wantAfter) outA = side(false)
+            } catch (t: Throwable) {
+                outB?.recycle()
+                outB = null
+                failure = t
+            }
+        }
+        if (!ran) throw java.io.IOException("editor closed before step ${action.id} was saved")
+        failure?.let { throw it }
+        return outB to outA
     }
 
     /** Re-attaches edits restored from disk to the freshly loaded layers. */

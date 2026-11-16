@@ -311,6 +311,9 @@ class History(
     /** Every step, undo and redo. */
     fun actionsForPersist(): List<HistoryAction> = undoStack.toList() + redoStack.toList()
 
+    /** Whether [action] is still on the undo or redo stack (not trimmed or discarded). */
+    fun contains(action: HistoryAction): Boolean = undoStack.any { it === action } || redoStack.any { it === action }
+
     fun persistableRun(): Pair<List<HistoryAction>, Int> = persistableRun { action ->
         action is PixelAction || action is TilePixelAction
     }

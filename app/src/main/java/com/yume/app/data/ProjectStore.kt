@@ -1199,7 +1199,7 @@ class ProjectStore(private val context: Context) {
         val dir = projectDir(id)
         val hdir = File(dir, "history").apply { mkdirs() }
         val keep = HashSet<String>()
-        val entriesJson = JSONArray()
+        var entriesJson = JSONArray()
         val previous = historyRecords[id] ?: emptyMap()
         val records = HashMap<Long, JSONObject>()
         var applied = history.appliedCount
@@ -1241,23 +1241,51 @@ class ProjectStore(private val context: Context) {
             if (tiles != null) {
                 // Tile form: one small PNG per changed tile crop.
                 val tilesJson = JSONArray()
-                for (t in tiles) {
-                    fun crop(b: Bitmap?, tag: String): Any {
-                        if (b == null) return JSONObject.NULL
-                        val name = "h${entry.actionId}_${t.tx}_${t.ty}_$tag.png"
-                        val f = File(hdir, name)
-                        if (!f.exists()) writePng(f, b)
-                        keep.add(name)
-                        return name
+                val stepFiles = ArrayList<String>()
+                val readable = try {
+                    for (t in tiles) {
+                        fun crop(given: Bitmap?, before: Boolean, tag: String): Any {
+                            val name = "h${entry.actionId}_${t.tx}_${t.ty}_$tag.png"
+                            val f = File(hdir, name)
+                            val fetch = t.fetch
+                            if (fetch != null) {
+                                // A big step read crop by crop (one tile in memory).
+                                if (f.exists()) { stepFiles.add(name); return name }
+                                val b = fetch(before) ?: return JSONObject.NULL
+                                try { writePng(f, b) } finally { b.recycle() }
+                                stepFiles.add(name)
+                                return name
+                            }
+                            if (given == null) return JSONObject.NULL
+                            if (!f.exists()) writePng(f, given)
+                            stepFiles.add(name)
+                            return name
+                        }
+                        tilesJson.put(JSONObject().apply {
+                            put("tx", t.tx)
+                            put("ty", t.ty)
+                            put("clip", JSONArray().put(t.clip.left).put(t.clip.top).put(t.clip.right).put(t.clip.bottom))
+                            if (t.beforeSolid >= 0L) put("bSolid", t.beforeSolid) else put("b", crop(t.before, true, "b"))
+                            if (t.afterSolid >= 0L) put("aSolid", t.afterSolid) else put("a", crop(t.after, false, "a"))
+                        })
                     }
-                    tilesJson.put(JSONObject().apply {
-                        put("tx", t.tx)
-                        put("ty", t.ty)
-                        put("clip", JSONArray().put(t.clip.left).put(t.clip.top).put(t.clip.right).put(t.clip.bottom))
-                        if (t.beforeSolid >= 0L) put("bSolid", t.beforeSolid) else put("b", crop(t.before, "b"))
-                        if (t.afterSolid >= 0L) put("aSolid", t.afterSolid) else put("a", crop(t.after, "a"))
-                    })
+                    true
+                } catch (e: Exception) {
+                    android.util.Log.w("YumeHistory", "step ${entry.actionId} could not be saved", e)
+                    false
                 }
+                if (!readable) {
+                    // This step and everything older cannot be kept (the
+                    // saved history must lead up to the current pixels): only
+                    // the newer steps are written.
+                    applied = (applied - written - 1).coerceAtLeast(0)
+                    entriesJson = JSONArray()
+                    keep.clear()
+                    records.clear()
+                    written = 0
+                    continue
+                }
+                keep.addAll(stepFiles)
                 val o = JSONObject().apply {
                     put("id", entry.actionId)
                     put("label", entry.label)

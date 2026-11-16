@@ -303,11 +303,16 @@ class EditorController(
         }
         exitSaveStarted = true
         scope.launch {
+            // The picture being written is what the exit waits for; the undo
+            // history after it (a huge stroke's crops take seconds at 12K)
+            // finishes in the background.
+            val pictureSaved = kotlinx.coroutines.CompletableDeferred<Boolean>()
             val save = SaveScope.async {
-                runCatching { saveNow(session) }.isSuccess
+                runCatching { saveNow(session, pictureSaved) }.isSuccess
+                    .also { pictureSaved.complete(it) }
             }
             exitSave = save
-            val completed = withTimeoutOrNull(EXIT_SAVE_TIMEOUT_MS) { save.await() } ?: false
+            val completed = withTimeoutOrNull(EXIT_SAVE_TIMEOUT_MS) { pictureSaved.await() } ?: false
             finalSaveDone = completed
             withContext(Dispatchers.Main) {
                 if (!completed) onWarning("Last changes may not have been saved")
@@ -316,11 +321,17 @@ class EditorController(
         }
     }
 
-    private suspend fun saveNow(session: DrawingSession) = saveMutex.withLock {
-        saveNowLocked(session)
+    private suspend fun saveNow(
+        session: DrawingSession,
+        pictureSaved: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+    ) = saveMutex.withLock {
+        saveNowLocked(session, pictureSaved)
     }
 
-    private fun saveNowLocked(session: DrawingSession) {
+    private fun saveNowLocked(
+        session: DrawingSession,
+        pictureSaved: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+    ) {
         if (com.yume.app.data.Customization.persistToolSettings) {
             runCatching { com.yume.app.data.Customization.saveToolState(session.toolStateJson()) }
         }
@@ -344,6 +355,7 @@ class EditorController(
         ) return
         val snap = snapshot ?: return
         val saved = runCatching { store.saveProject(projectId, snap) }.isSuccess
+        pictureSaved?.complete(saved && store.lastSaveComplete)
         if (saved && store.lastSaveComplete) {
             journalBroken = false
         } else {
