@@ -213,6 +213,8 @@ object YumeHarness {
                 } else if (only == "previewdraw") {
                     out.append(scorePreviewDraw(true))
                     out.append(scorePreviewDraw(false))
+                } else if (only == "materials") {
+                    out.append(scoreMaterials(app))
                 } else if (only == "manga") {
                     out.append(scoreManga())
                 } else if (only == "effects") {
@@ -4953,10 +4955,10 @@ object YumeHarness {
                 fun clean() = s.pendingAdjustForTest() == null && s.previewProxyForTest() == null &&
                     px().contentEquals(start) && s.history.appliedCount == 0
                 // 1. Cancel pressed while the preview is still being made.
-                s.previewArmedForTest = { com.yume.app.engine.OpCancel.requested = true }
+                s.armedForTest = { com.yume.app.engine.OpCancel.requested = true }
                 s.previewAdjustment(kind, 0.8f)
                 s.consumePendingPreview()
-                s.previewArmedForTest = null
+                s.armedForTest = null
                 s.runCommands()
                 val stopped = clean() && !com.yume.app.engine.OpCancel.armed
                 // 2. Cancel pressed with a preview still queued for its frame.
@@ -4996,6 +4998,165 @@ object YumeHarness {
     }
 
     /** Manga focus and speed lines, and comic frames: where ink goes and where it must not. */
+    /**
+     * Materials library: every material is byte-identical on sparse and dense
+     * layers; tones cover what their slider says; a gradation darkens along
+     * its direction; a selection keeps the material inside; undo, redo and
+     * cancel; and how long a big canvas takes.
+     */
+    private fun scoreMaterials(app: YumeApp): String {
+        val out = StringBuilder()
+        val oldS = TileStoreConfig.useSparseLayers
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        try {
+            val n = 700
+            fun doc(sparse: Boolean, size: Int = n): Pair<DrawingSession, DrawingEngine> {
+                TileStoreConfig.useSparseLayers = sparse
+                val engine = DrawingEngine(size, size)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val session = DrawingSession("mt", "MT", engine, History())
+                identityView(session, size, size)
+                session.runCommands()
+                session.chooseColor(0xFF2050C0.toInt())
+                session.runCommands()
+                return session to engine
+            }
+            fun px(l: Layer, size: Int = n): IntArray {
+                val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                l.tiles.readRectInto(Rect(0, 0, size, size), b)
+                val a = IntArray(size * size); b.getPixels(a, 0, size, 0, 0, size, size); b.recycle(); return a
+            }
+            fun meanAlpha(a: IntArray, r: Rect, size: Int = n): Float {
+                var sum = 0L
+                var c = 0
+                for (y in r.top until r.bottom) for (x in r.left until r.right) { sum += a[y * size + x] ushr 24; c++ }
+                return sum / (255f * c)
+            }
+            fun f2(v: Float) = String.format(java.util.Locale.US, "%.3f", v)
+            val all = Rect(0, 0, n, n)
+            var same = 0
+            val bad = ArrayList<String>()
+            for (kind in com.yume.app.engine.MaterialKind.entries) {
+                val pics = ArrayList<IntArray>()
+                for (sparse in listOf(true, false)) {
+                    val (s, e) = doc(sparse)
+                    s.addMaterial(kind, 14f, 30f, 0.4f, 0, 5)
+                    s.runCommands()
+                    val l = e.layers.last()
+                    pics.add(px(l))
+                    if (e.layers.size != 2 || l.name != kind.label) bad.add("${kind.name} layer")
+                }
+                val m = meanAlpha(pics[0], all)
+                if (pics[0].contentEquals(pics[1])) same++ else bad.add("${kind.name} sparse != dense")
+                if (m <= 0.01f || m >= 0.99f) bad.add("${kind.name} empty or solid (${f2(m)})")
+                // Ink in the current colour.
+                val c = pics[0].firstOrNull { it ushr 24 == 255 }
+                if (c != null && (c and 0xFFFFFF) != 0x2050C0) bad.add("${kind.name} colour ${Integer.toHexString(c)}")
+                out.append("materials: ${kind.name} covers ${f2(m)}\n")
+            }
+            // A contact sheet to look at (files/materials_sheet.png).
+            run {
+                val kinds = com.yume.app.engine.MaterialKind.entries
+                val cw = 300
+                val chh = 180
+                val sheet = Bitmap.createBitmap(cw * 6, chh * ((kinds.size + 5) / 6), Bitmap.Config.ARGB_8888)
+                val c = android.graphics.Canvas(sheet)
+                c.drawColor(0xFFFFFFFF.toInt())
+                kinds.forEachIndexed { i, k ->
+                    val m = com.yume.app.engine.Material(k, 16f, if (k == com.yume.app.engine.MaterialKind.Gradation) 90f else 30f,
+                        k.defaultDensity, Rect(0, 0, cw - 8, chh - 8), 5)
+                    val b = m.sample(cw - 8, chh - 8, 0xFF000000.toInt())
+                    c.drawBitmap(b, (i % 6) * cw + 4f, (i / 6) * chh + 4f, null)
+                    b.recycle()
+                }
+                java.io.File(app.filesDir, "materials_sheet.png").outputStream().use { sheet.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                sheet.recycle()
+            }
+            out.append("materials: ${com.yume.app.engine.MaterialKind.entries.size} materials, sparse = dense for $same: " +
+                "${pass(bad.isEmpty())}${if (bad.isEmpty()) "" else " $bad"}\n")
+
+            // Tones cover what the slider says.
+            val toneErr = ArrayList<String>()
+            for (kind in listOf(com.yume.app.engine.MaterialKind.Dots, com.yume.app.engine.MaterialKind.Lines, com.yume.app.engine.MaterialKind.Cross)) {
+                for (t in listOf(0.1f, 0.3f, 0.5f, 0.7f)) {
+                    val (s, e) = doc(true)
+                    s.addMaterial(kind, 12f, 45f, t, 1, 1)
+                    s.runCommands()
+                    val m = meanAlpha(px(e.layers.last()), all)
+                    if (kotlin.math.abs(m - t) > 0.04f) toneErr.add("${kind.name} $t -> ${f2(m)}")
+                }
+            }
+            out.append("materials: tones cover their value (within 4%): ${pass(toneErr.isEmpty())}${if (toneErr.isEmpty()) "" else " $toneErr"}\n")
+
+            run {
+                val (s, e) = doc(true)
+                s.addMaterial(com.yume.app.engine.MaterialKind.Gradation, 10f, 90f, 1f, 1, 1)
+                s.runCommands()
+                val a = px(e.layers.last())
+                val top = meanAlpha(a, Rect(0, 0, n, 70))
+                val mid = meanAlpha(a, Rect(0, 315, n, 385))
+                val bottom = meanAlpha(a, Rect(0, 630, n, n))
+                out.append("materials: gradation darkens downwards: ${pass(top < 0.1f && bottom > 0.85f && mid in 0.35f..0.65f)} " +
+                    "(${f2(top)} / ${f2(mid)} / ${f2(bottom)})\n")
+            }
+
+            run {
+                val (s, e) = doc(true)
+                val sel = Region()
+                val oval = android.graphics.Path().apply {
+                    addOval(android.graphics.RectF(100f, 150f, 500f, 450f), android.graphics.Path.Direction.CW)
+                }
+                sel.setPath(oval, Region(0, 0, n, n))
+                e.setSelection(sel)
+                s.addMaterial(com.yume.app.engine.MaterialKind.Checker, 20f, 0f, 0.5f, 1, 1)
+                s.runCommands()
+                val a = px(e.layers.last())
+                var outside = 0
+                for (y in 0 until n) for (x in 0 until n) if (!sel.contains(x, y) && (a[y * n + x] ushr 24) > 0) {
+                    // Anti-aliased rim pixels of the oval may hold a little.
+                    val rim = sel.contains(x - 1, y) || sel.contains(x + 1, y) || sel.contains(x, y - 1) || sel.contains(x, y + 1)
+                    if (!rim) outside++
+                }
+                val inside = meanAlpha(a, Rect(250, 250, 350, 350))
+                out.append("materials: stays inside the selection: ${pass(outside == 0 && inside in 0.4f..0.6f)} (outside $outside, inside ${f2(inside)})\n")
+                s.undo(); s.runCommands()
+                val undone = e.layers.size == 1
+                s.redo(); s.runCommands()
+                val redone = e.layers.size == 2 && px(e.layers.last()).contentEquals(a)
+                out.append("materials: undo ${pass(undone)}, redo ${pass(redone)}\n")
+            }
+
+            run {
+                val (s, e) = doc(true)
+                s.armedForTest = { com.yume.app.engine.OpCancel.requested = true }
+                s.addMaterial(com.yume.app.engine.MaterialKind.Paper, 20f, 0f, 0.5f, 0, 3)
+                s.runCommands()
+                s.armedForTest = null
+                val ok = e.layers.size == 1 && s.history.appliedCount == 0 && !com.yume.app.engine.OpCancel.armed
+                out.append("materials: cancel removes the half-made layer: ${pass(ok)}\n")
+            }
+
+            run {
+                val big = 8192
+                val (s, e) = doc(true, big)
+                for (kind in listOf(com.yume.app.engine.MaterialKind.Dots, com.yume.app.engine.MaterialKind.Scales, com.yume.app.engine.MaterialKind.Paper)) {
+                    val t0 = android.os.SystemClock.uptimeMillis()
+                    s.addMaterial(kind, 24f, 45f, 0.4f, 0, 1)
+                    s.runCommands()
+                    out.append("materials 8192²: ${kind.label} ${android.os.SystemClock.uptimeMillis() - t0} ms\n")
+                    s.undo(); s.runCommands()
+                }
+                if (e.layers.size != 1) out.append("materials 8192²: FAIL (undo left ${e.layers.size} layers)\n")
+            }
+        } catch (t: Throwable) {
+            out.append("materials: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e("YumeHarness", "materials", t)
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
     private fun scoreManga(): String {
         val out = StringBuilder()
         val oldS = TileStoreConfig.useSparseLayers

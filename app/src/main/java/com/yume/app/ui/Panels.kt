@@ -3066,6 +3066,19 @@ fun ActionsPanel(
     var sizeScale by remember { mutableStateOf(true) }
     var mangaDialog by remember { mutableStateOf(false) }
     var framesDialog by remember { mutableStateOf(false) }
+    var materialsDialog by remember { mutableStateOf(false) }
+    if (materialsDialog) {
+        MaterialsDialog(
+            width = state.width, height = state.height, hasSelection = state.hasSelection,
+            currentColor = state.color,
+            onDismiss = { materialsDialog = false },
+            onAdd = { kind, size, angle, density, ink, seed ->
+                materialsDialog = false
+                session.addMaterial(kind, size, angle, density, ink, seed)
+                onClose()
+            }
+        )
+    }
     if (mangaDialog) {
         MangaLinesDialog(
             width = state.width, height = state.height, hasSelection = state.hasSelection,
@@ -3165,6 +3178,7 @@ fun ActionsPanel(
         MenuRow(Glyph.Droplet, "Fill layer with colour") { session.fillLayer(state.color) }
         MenuRow(Glyph.Sparkle, "Manga lines…") { mangaDialog = true }
         MenuRow(Glyph.Grid, "Comic frames…") { framesDialog = true }
+        MenuRow(Glyph.Picture, "Materials (tones, patterns, textures)…") { materialsDialog = true }
         MenuRow(Glyph.Share, "Export…") { onExport() }
         MenuRow(Glyph.Save, "Save now") { onSave() }
         DividerLine()

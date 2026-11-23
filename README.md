@@ -71,12 +71,16 @@ glass, and every gesture, button and default can be changed in Settings.
   copied from another spot; gradient, shapes, liquify and text.
 - Adjustments: hue, saturation, brightness, blur, noise, sharpen, motion blur,
   curves, levels, colour balance, gradient map, posterize and threshold, plus
-  bloom, glitch, halftone, chromatic aberration and mosaic effects, and line
+  bloom, glow, glitch, halftone, chromatic aberration, mosaic, lens flare,
+  clouds and anime background effects, and line
   art extraction (paper to transparent), with a
   live preview on one layer or all of them.
 - Guides: grids, perspective with vanishing points, rulers, mirror and radial
   symmetry.
 - Manga focus and speed lines, and comic frames, each added as a new layer.
+- A materials library: screentones (dots, lines, cross-hatch, gradation),
+  patterns and paper, canvas, grain and wood textures, added as a new layer
+  over the whole canvas or inside the selection.
 
 ### Made for the pen
 - Two-finger tap to undo, three to redo, four to hide the interface.

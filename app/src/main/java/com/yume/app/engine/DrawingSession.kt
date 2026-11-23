@@ -3114,6 +3114,57 @@ class DrawingSession(
         requestState()
     }
 
+    /**
+     * Adds a material (tone, pattern or texture, see [Material]) as a new
+     * layer: over the selection when there is one, else the whole canvas.
+     * [ink] is 0 for the current colour, 1 black, 2 white. Can be stopped
+     * from the working card on a big canvas.
+     */
+    fun addMaterial(kind: MaterialKind, size: Float, angleDeg: Float, density: Float, ink: Int, seed: Int) = post {
+        if (!MemoryBudget.fitsDocument(engine.width, engine.height, engine.layers.size + 1)) {
+            onMessage?.invoke(MemoryBudget.documentRefusal(engine.width, engine.height, engine.layers.size + 1))
+            return@post
+        }
+        val full = Rect(0, 0, engine.width, engine.height)
+        val sel = engine.selection?.takeIf { !it.isEmpty }
+        val area = sel?.bounds?.let { Rect(it) }?.takeIf { it.intersect(full) } ?: full
+        val material = Material(kind, size, angleDeg, density, area, seed)
+        val color = when (ink) {
+            1 -> 0xFF000000.toInt()
+            2 -> 0xFFFFFFFF.toInt()
+            else -> this@DrawingSession.color or 0xFF000000.toInt()
+        }
+        val before = engine.snapshotState()
+        val layer = engine.newLayer(name = kind.label, at = engine.activeIndex + 1)
+        val done = working {
+            cancellable({ LayersAction(before, engine.snapshotState(), "", EditKind.LayerAdd).undo(engine) }) {
+                armedForTest?.invoke()
+                Kernels.generate(engine.width, engine.height, area, { chunk, out -> material.fill(chunk, color, out) }) { r, bmp ->
+                    layer.tiles.writeRect(r, bmp, Rect(0, 0, r.width(), r.height()))
+                }
+                // Only inside the selection's real shape, not just its bounds.
+                if (sel != null) {
+                    val keep = SelectionUtil.regionFillPath(sel)
+                    layer.tiles.withWriteCanvas(area) { c ->
+                        val save = c.save()
+                        c.clipOutPath(keep)
+                        c.drawColor(0, BlendMode.CLEAR)
+                        c.restoreToCount(save)
+                    }
+                }
+            }
+        }
+        if (!done) {
+            engine.markDirtyAll()
+            requestState()
+            return@post
+        }
+        layer.touch()
+        engine.markDirtyAll()
+        pushStructural(before, kind.label, EditKind.LayerAdd)
+        requestState()
+    }
+
     /** Where the text tool was tapped (document px), waiting for the text dialog. */
     val textRequest = kotlinx.coroutines.flow.MutableStateFlow<FloatArray?>(null)
 
@@ -4005,7 +4056,7 @@ class DrawingSession(
                 // panel's) stops the preview and drops the adjustment.
                 previewRunning = true
                 cancellable({ cancelAdjustmentInternal() }) {
-                    previewArmedForTest?.invoke()
+                    armedForTest?.invoke()
                     applyPreviewInternal(kind, pendingPreviewAmount)
                 }
             } else {
@@ -4021,8 +4072,8 @@ class DrawingSession(
     /** An effect preview is being made on the render thread now. */
     @Volatile private var previewRunning = false
 
-    /** Harness: runs once the effect preview can be cancelled. */
-    @Volatile var previewArmedForTest: (() -> Unit)? = null
+    /** Harness: runs once an effect preview or a material can be cancelled. */
+    @Volatile var armedForTest: (() -> Unit)? = null
 
     /** Harness: the adjustment pending now, or null. */
     fun pendingAdjustForTest(): AdjustmentKind? = adjustKind

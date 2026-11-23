@@ -83,6 +83,18 @@ object Kernels {
         var skip = false
     }
 
+    /**
+     * Makes new pixels for [bounds] chunk by chunk, in parallel: [fill] writes
+     * a chunk's premultiplied ARGB row by row (nothing is read).
+     */
+    fun generate(
+        width: Int, height: Int, bounds: Rect,
+        fill: (chunk: Rect, out: IntArray) -> Unit,
+        write: (Rect, Bitmap) -> Unit
+    ) = run(width, height, bounds, 0, NOTHING, Op { _, _, chunk, out -> fill(chunk, out) }, write, skipFlat = false)
+
+    private val NOTHING = Source { _, _ -> }
+
     /** Memory the work slots may hold at once (sources and results). */
     private const val SLOT_BUDGET = 96L * 1024L * 1024L
 

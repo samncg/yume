@@ -42,7 +42,7 @@ with those apps (November 2026). Unchecked items are not built yet.
 - [x] **Text upgrades**: vertical text, outlined text, and more fonts.
 - [x] **More filters**: pixelate, mosaic, glow, lens flare, clouds, and
       "anime background" style colour grading.
-- [ ] **Materials library**: tones, patterns and textures to drop onto the
+- [x] **Materials library**: tones, patterns and textures to drop onto the
       canvas.
 - [ ] **Optional AI tools** (on device where possible): background removal,
       upscaling, and flat-colour suggestions for line art.
