@@ -39,13 +39,21 @@ enum class ColorMode(val label: String) {
     Harmony("Harmony")
 }
 
-/** Colour harmony schemes: hue offsets (degrees) of the partner colours. */
-enum class Harmony(val label: String, val offsets: FloatArray) {
-    Complementary("Opposite", floatArrayOf(180f)),
-    Split("Split", floatArrayOf(150f, 210f)),
-    Analogous("Analog", floatArrayOf(-30f, 30f)),
-    Triadic("Triad", floatArrayOf(120f, 240f)),
-    Tetradic("Square", floatArrayOf(90f, 180f, 270f))
+/**
+ * Colour harmony schemes: the hue offsets (degrees) of every colour in the
+ * scheme, in the order the swatches show them. 0 is the colour the scheme
+ * is built around, placed in the middle where there is one, with its
+ * partners either side.
+ */
+enum class Harmony(val label: String, val order: FloatArray) {
+    Complementary("Opposite", floatArrayOf(0f, 180f)),
+    Split("Split", floatArrayOf(-150f, 0f, 150f)),
+    Analogous("Analog", floatArrayOf(-30f, 0f, 30f)),
+    Triadic("Triad", floatArrayOf(-120f, 0f, 120f)),
+    Tetradic("Square", floatArrayOf(-90f, 0f, 90f, 180f));
+
+    /** Index of the colour the scheme is built around. */
+    val centre: Int get() = order.indexOfFirst { it == 0f }
 }
 
 /** Layer compositing modes, exposed with Procreate-style labels. */

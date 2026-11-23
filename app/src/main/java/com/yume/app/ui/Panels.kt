@@ -1246,12 +1246,30 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
     var hue by remember { mutableFloatStateOf(start[0]) }
     var sat by remember { mutableFloatStateOf(start[1]) }
     var value by remember { mutableFloatStateOf(start[2]) }
+    // The last colour this panel set, to tell its own changes from ones made
+    // elsewhere (eyedropper, a swatch outside, another panel).
+    var lastSent by remember { androidx.compose.runtime.mutableIntStateOf(state.color) }
+    // Bumped when the colour changed elsewhere: the harmony scheme re-centres.
+    var outsideChange by remember { androidx.compose.runtime.mutableIntStateOf(0) }
 
     fun emit() {
         val color = android.graphics.Color.HSVToColor(
             floatArrayOf(hue.coerceIn(0f, 360f), sat.coerceIn(0f, 1f), value.coerceIn(0f, 1f))
         )
+        lastSent = color
         session.chooseColor(color)
+    }
+
+    LaunchedEffect(state.color) {
+        if (state.color != lastSent) {
+            val hsv = FloatArray(3)
+            android.graphics.Color.colorToHSV(state.color, hsv)
+            if (hsv[1] > 0.004f) hue = hsv[0]
+            sat = hsv[1]
+            value = hsv[2]
+            lastSent = state.color
+            outsideChange++
+        }
     }
 
     fun adopt(color: Int, keepHueWhenGrey: Boolean = false) {
@@ -1265,6 +1283,7 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
             sat = hsv[1]
             value = hsv[2]
         }
+        lastSent = color
         session.chooseColor(color)
     }
 
@@ -1362,9 +1381,13 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                 // The scheme stays put: its colours keep their order, and the
                 // one in use is [pick]. Choosing another only moves the pick,
                 // so you can step either way through the scheme.
-                var pick by remember(state.harmony) { androidx.compose.runtime.mutableIntStateOf(0) }
-                val all = floatArrayOf(0f) + state.harmony.offsets
-                if (pick !in all.indices) pick = 0
+                // Starts on (and returns to, when the colour changes elsewhere)
+                // the middle colour: the current one, partners either side.
+                var pick by remember(state.harmony, outsideChange) {
+                    androidx.compose.runtime.mutableIntStateOf(state.harmony.centre)
+                }
+                val all = state.harmony.order
+                if (pick !in all.indices) pick = state.harmony.centre
                 val base = hue - all[pick]
                 val others = all.indices.filter { it != pick }.map { all[it] - all[pick] }.toFloatArray()
                 Spacer(Modifier.height(10.dp))
@@ -1474,12 +1497,12 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
             )
         }
         DividerLine()
-        PaletteSection(current = current, onPick = { picked -> adopt(picked) })
+        PaletteSection(current = current, onPick = { picked -> adopt(picked); outsideChange++ })
         if (state.recentColors.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
             SectionLabel("Recent")
             Spacer(Modifier.height(8.dp))
-            SwatchGrid(state.recentColors) { picked -> adopt(picked) }
+            SwatchGrid(state.recentColors) { picked -> adopt(picked); outsideChange++ }
         }
     }
 }
