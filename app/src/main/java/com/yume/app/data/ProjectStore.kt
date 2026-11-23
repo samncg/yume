@@ -422,6 +422,9 @@ class ProjectStore(private val context: Context) {
      */
     private val savedLayers = HashMap<String, Pair<Int, Int>>()
 
+    /** Harness only: the next saves stop just before writing the manifest. */
+    @Volatile var failBeforeCommitForTest = false
+
     /**
      * Layers just loaded from disk are already saved as they are: the next
      * save skips re-encoding them until they change (an 8K layer takes
@@ -707,96 +710,119 @@ class ProjectStore(private val context: Context) {
         // Drop leftovers from a save that was interrupted before its renames.
         dir.listFiles()?.forEach { if (it.name.startsWith(TMP_PREFIX)) it.delete() }
 
-        val seen = HashSet<String>()
-        val seenMask = HashSet<String>()
-        // temp -> final, applied only after every temp has been written.
+        // Crash safety: no file the current manifest (or a journal written
+        // against it) refers to is touched until the new manifest is in place.
+        // Layers and masks that changed are written under new names (stamped
+        // with this save's number); unchanged ones keep their files. The
+        // manifest is replaced atomically, and only then do the journal and
+        // the files nothing refers to any more go. A save killed at any point
+        // leaves either the old document (plus its journal) or the new one,
+        // never a mix. Writing files in place under fixed names used to let a
+        // killed save replace layer files under the old manifest, so the next
+        // open "recovered" a stale journal onto them (a layer was lost).
+        // temp -> final, applied before the manifest is written.
         val pending = ArrayList<Pair<File, File>>()
 
         val layerNames = HashMap<Int, String>()
         val maskNames = HashMap<Int, String>()
+        // Files a live layer still reads from (lazy, not yet decoded): kept
+        // even when the new manifest no longer lists them.
+        val liveFiles = HashSet<String>()
+        // Recorded as saved only once the manifest is committed.
+        val savedNow = HashMap<String, Pair<Int, Int>>()
+        fun inDir(f: File?): String? = f?.takeIf { it.parentFile?.absolutePath == dir.absolutePath && it.exists() }?.name
         for ((index, layer) in snapshot.layers.withIndex()) {
             // Sparse layers are written as tile files; a layer still on disk
             // keeps its file's format (copied as is); dense ones stay PNG.
             val srcFile = layer.file ?: layer.sparse?.backingFile()
+            inDir(srcFile)?.let { liveFiles.add(it) }
+            inDir(layer.maskFile)?.let { liveFiles.add(it) }
+            inDir(layer.maskSparse?.backingFile())?.let { liveFiles.add(it) }
             val tiled = layer.bitmap == null && (
                 (layer.sparse != null && layer.sparse.isResident) ||
                     (srcFile != null && com.yume.app.engine.TileFile.isTileFile(srcFile))
                 )
-            val name = "layer_$index.${if (tiled) com.yume.app.engine.TileFile.EXT else "png"}"
-            layerNames[index] = name
-            val target = File(dir, name)
+            val ext = if (tiled) com.yume.app.engine.TileFile.EXT else "png"
             val key = "$id/${layer.id}"
-            val unchanged = savedLayers[key] == (index to layer.revision) && target.exists()
-            if (!unchanged) {
-                // Write to a temp file first: a swapped-out layer's source may be
-                // another layer's destination, so no final name may be touched
-                // until every source has been read.
+            val oldName = bases[baseKey(id, layer.id, false)]?.takeIf { File(dir, it).exists() }
+            val unchanged = oldName != null && savedLayers[key]?.second == layer.revision
+            val name: String
+            if (unchanged) {
+                name = oldName!!
+            } else {
+                val fresh = "layer_${index}_s$saveSeq.$ext"
                 val bmp = layer.bitmap
-                if (bmp != null) {
-                    val tmp = tempFile(dir, name)
-                    if (encodePng(tmp, bmp)) pending.add(tmp to target) else { complete = false; failedLayers.add(layer.id) }
-                } else if (layer.sparse != null && layer.sparse.isResident) {
+                val tmp = tempFile(dir, fresh)
+                val wrote = when {
+                    bmp != null -> encodePng(tmp, bmp)
                     // Stage 2: assemble a full bitmap for the PNG encoder. One
                     // layer at a time, so peak extra memory is one canvas.
-                    val tmp = tempFile(dir, name)
-                    if (encodeStorePng(tmp, layer.sparse, snapshot.onOwner)) pending.add(tmp to target) else { complete = false; failedLayers.add(layer.id) }
-                } else {
-                    val src = layer.file ?: layer.sparse?.backingFile()
-                    if (src != null && src.exists() && src.absolutePath != target.absolutePath) {
-                        val tmp = tempFile(dir, name)
-                        if (copyBytes(src, tmp)) pending.add(tmp to target) else { complete = false; failedLayers.add(layer.id) }
-                    }
-                    // When src == target the file already holds these pixels.
+                    layer.sparse != null && layer.sparse.isResident -> encodeStorePng(tmp, layer.sparse, snapshot.onOwner)
+                    else -> null
                 }
-                savedLayers[key] = index to layer.revision
+                name = when (wrote) {
+                    true -> { pending.add(tmp to File(dir, fresh)); fresh }
+                    false -> { complete = false; failedLayers.add(layer.id); oldName ?: fresh }
+                    // Still on disk, not decoded: its file is its pixels. One
+                    // in this folder is used as it is; one elsewhere (swap
+                    // cache) is copied in.
+                    null -> {
+                        val local = inDir(srcFile)
+                        when {
+                            local != null -> local
+                            srcFile != null && srcFile.exists() ->
+                                if (copyBytes(srcFile, tmp)) { pending.add(tmp to File(dir, fresh)); fresh }
+                                else { complete = false; failedLayers.add(layer.id); oldName ?: fresh }
+                            else -> oldName ?: fresh
+                        }
+                    }
+                }
+                // A layer that failed to write is written again next time.
+                if (layer.id !in failedLayers) savedNow[key] = index to layer.revision
             }
-            seen.add(name)
+            layerNames[index] = name
 
             val maskTiled = layer.mask == null && (
                 (layer.maskSparse != null && layer.maskSparse.isResident) ||
                     (layer.maskFile != null && com.yume.app.engine.TileFile.isTileFile(layer.maskFile))
                 )
-            val maskName = "mask_$index.${if (maskTiled) com.yume.app.engine.TileFile.EXT else "png"}"
-            maskNames[index] = maskName
-            val maskTarget = File(dir, maskName)
-            val mask = layer.mask
-            if (mask != null) {
-                if (!unchanged || !maskTarget.exists()) {
-                    val tmp = tempFile(dir, maskName)
-                    if (encodePng(tmp, mask)) pending.add(tmp to maskTarget) else { complete = false; failedLayers.add(layer.id) }
-                }
-                seenMask.add(maskName)
-            } else if (layer.maskSparse != null && layer.maskSparse.isResident) {
-                if (!unchanged || !maskTarget.exists()) {
-                    val tmp = tempFile(dir, maskName)
-                    if (encodeStorePng(tmp, layer.maskSparse, snapshot.onOwner)) {
-                        pending.add(tmp to maskTarget)
-                    } else {
-                        complete = false
-                        failedLayers.add(layer.id)
+            val maskExt = if (maskTiled) com.yume.app.engine.TileFile.EXT else "png"
+            val oldMask = bases[baseKey(id, layer.id, true)]?.takeIf { File(dir, it).exists() }
+            val hasMask = layer.mask != null || layer.maskFile != null || layer.maskSparse != null
+            if (hasMask) {
+                if (unchanged && oldMask != null) {
+                    maskNames[index] = oldMask
+                } else {
+                    val fresh = "mask_${index}_s$saveSeq.$maskExt"
+                    val tmp = tempFile(dir, fresh)
+                    val mask = layer.mask
+                    val wrote = when {
+                        mask != null -> encodePng(tmp, mask)
+                        layer.maskSparse != null && layer.maskSparse.isResident ->
+                            encodeStorePng(tmp, layer.maskSparse, snapshot.onOwner)
+                        else -> null
+                    }
+                    maskNames[index] = when (wrote) {
+                        true -> { pending.add(tmp to File(dir, fresh)); fresh }
+                        false -> { complete = false; failedLayers.add(layer.id); oldMask ?: fresh }
+                        null -> {
+                            val src = layer.maskFile
+                            val local = inDir(src)
+                            when {
+                                local != null -> local
+                                src != null && src.exists() ->
+                                    if (copyBytes(src, tmp)) { pending.add(tmp to File(dir, fresh)); fresh }
+                                    else { complete = false; failedLayers.add(layer.id); oldMask ?: fresh }
+                                else -> oldMask ?: fresh
+                            }
+                        }
                     }
                 }
-                seenMask.add(maskName)
-            } else if (layer.maskFile != null) {
-                if (!unchanged || !maskTarget.exists()) {
-                    val src = layer.maskFile
-                    if (src.exists() && src.absolutePath != maskTarget.absolutePath) {
-                        val tmp = tempFile(dir, maskName)
-                        if (copyBytes(src, tmp)) pending.add(tmp to maskTarget) else { complete = false; failedLayers.add(layer.id) }
-                    }
-                }
-                seenMask.add(maskName)
             }
         }
 
-        // Every source has been copied into a temp, so stale outputs are safe
-        // to delete now (a stale file may have been the source of another layer).
-        dir.listFiles()?.forEach { file ->
-            if (file.name.startsWith("layer_") && file.name !in seen) file.delete()
-            if (file.name.startsWith("mask_") && file.name !in seenMask) file.delete()
-        }
-
-        // Commit: rename every temp over its final name at the end.
+        // New names never collide with a file in use, so these renames cannot
+        // disturb the document the current manifest describes.
         for ((tmp, target) in pending) moveReplacing(tmp, target)
 
         // Layer pixels that were swapped out of memory live in cache/, keyed by
@@ -849,8 +875,12 @@ class ProjectStore(private val context: Context) {
             put("groups", groupsJson)
             put("saveSeq", saveSeq)
         }
-        File(dir, "manifest.json").writeText(manifest.toString())
-        // The journal described the previous PNG set: it is obsolete now.
+        // Harness: a save killed just before its commit.
+        if (failBeforeCommitForTest) throw java.io.IOException("save stopped before the manifest (test)")
+        // The commit: the new document exists from this rename on.
+        com.yume.app.engine.TileJournal.writeAtomically(File(dir, "manifest.json"), manifest.toString())
+        savedLayers.putAll(savedNow)
+        // The journal described the previous file set: it is obsolete now.
         resetJournal(id)
         bases.keys.removeAll { it.startsWith("$id/") }
         snapshot.layers.forEachIndexed { index, layer ->
@@ -858,6 +888,14 @@ class ProjectStore(private val context: Context) {
             bases[baseKey(id, layer.id, false)] = layerNames[index] ?: "layer_$index.png"
             val hasMask = layer.mask != null || layer.maskFile != null || layer.maskSparse != null
             if (hasMask) bases[baseKey(id, layer.id, true)] = maskNames[index] ?: "mask_$index.png"
+        }
+        // Files nothing refers to any more: older versions of changed layers,
+        // deleted layers. A file a live layer still reads stays until later.
+        val keep = HashSet<String>().apply {
+            addAll(layerNames.values); addAll(maskNames.values); addAll(liveFiles)
+        }
+        dir.listFiles()?.forEach { file ->
+            if ((file.name.startsWith("layer_") || file.name.startsWith("mask_")) && file.name !in keep) file.delete()
         }
         lastSaveComplete = complete
     }

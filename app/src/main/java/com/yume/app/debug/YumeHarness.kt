@@ -213,6 +213,8 @@ object YumeHarness {
                 } else if (only == "previewdraw") {
                     out.append(scorePreviewDraw(true))
                     out.append(scorePreviewDraw(false))
+                } else if (only == "savecrash") {
+                    out.append(scoreSaveCrash(app))
                 } else if (only == "inserts") {
                     out.append(scoreInserts(true))
                     out.append(scoreInserts(false))
@@ -8474,8 +8476,18 @@ object YumeHarness {
         return DiffStat(maxCh, diff, samples)
     }
 
-    /** The saved file for [base] ("layer_0"): tile file or PNG, whichever exists. */
+    /**
+     * The saved file for [base] ("layer_0", "mask_2"): the name the manifest
+     * gives that layer (saves write versioned names), else the old fixed names.
+     */
     private fun savedLayerFile(dir: File, base: String): File {
+        val mask = base.startsWith("mask_")
+        val index = base.substringAfter('_').toIntOrNull()
+        val named = runCatching {
+            val o = org.json.JSONObject(File(dir, "manifest.json").readText()).getJSONArray("layers").getJSONObject(index!!)
+            o.optString(if (mask) "mask" else "file", "")
+        }.getOrNull()
+        if (!named.isNullOrEmpty()) return File(dir, named)
         val t = File(dir, "$base.${com.yume.app.engine.TileFile.EXT}")
         return if (t.exists()) t else File(dir, "$base.png")
     }
@@ -8558,6 +8570,115 @@ object YumeHarness {
         }
         val verdict = if (failures == 0) "PASS" else "FAIL"
         return "sparse-persist: $verdict ($checks cases, $failures failures)\n$notes".trimEnd()
+    }
+
+    /**
+     * A save killed before its commit (the manifest) leaves the document it
+     * replaces intact, so the next open (and any journal written against it)
+     * sees consistent files; the next real save then writes the new state and
+     * drops files nothing refers to. Reordering layers still on disk keeps
+     * each layer's pixels (files are never overwritten under a live layer).
+     */
+    private fun scoreSaveCrash(app: YumeApp): String {
+        val store = app.projectStore
+        val out = StringBuilder()
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        val w = 640
+        val h = 480
+        val made = ArrayList<String>()
+        fun pattern(seed: Int): Bitmap {
+            val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val c = Canvas(b)
+            c.drawColor(0xFF000000.toInt() or ((seed * 0x2F3B17) and 0xFFFFFF))
+            c.drawRect(seed * 20f, 30f, seed * 20f + 200f, 300f, Paint().apply { color = 0xFFFFFFFF.toInt() })
+            return b
+        }
+        // The document as the editor opens it: lazy layers, bases and
+        // revisions recorded.
+        fun open(id: String): Pair<DrawingEngine, DrawingSession>? {
+            val loaded = store.loadProject(id) ?: return null
+            val e = DrawingEngine(w, h)
+            e.backgroundColor = BG
+            for (d in loaded.layers) {
+                val l = e.newLayer(name = d.name, bitmap = d.bitmap, backingFile = d.file)
+                l.adoptMask(d.mask, d.maskFile)
+                l.visible = d.visible
+            }
+            store.adoptBases(id, e.layers.map { it.id }, loaded.layers)
+            store.markLoaded(id, e.layers.map { it.id to it.revision })
+            return e to DrawingSession("crash", "C", e, History())
+        }
+        fun hashes(e: DrawingEngine) = e.layers.map { hashLayer(it) }
+        try {
+            // 1. A save stopped before its commit changes nothing on disk.
+            run {
+                val p = store.createProject("harness-crash", w, h, BG)
+                made.add(p.id)
+                val e = DrawingEngine(w, h)
+                e.backgroundColor = BG
+                e.newLayer("A", bitmap = pattern(1))
+                e.newLayer("B", bitmap = pattern(2))
+                val before = hashes(e)
+                store.saveProject(p.id, DrawingSession("crash", "C", e, History()).snapshotNow())
+                val (e2, s2) = open(p.id) ?: error("open")
+                e2.layers[0].tiles.fillRect(Rect(50, 50, 400, 200), 0xFF00FF00.toInt())
+                e2.layers[0].touch()
+                e2.newLayer("C", bitmap = pattern(3))
+                e2.moveLayer(0, 2)
+                store.failBeforeCommitForTest = true
+                val threw = runCatching { store.saveProject(p.id, s2.snapshotNow()) }.isFailure
+                store.failBeforeCommitForTest = false
+                val (e3, _) = open(p.id) ?: error("reopen")
+                val intact = threw && e3.layers.size == 2 && hashes(e3) == before
+                out.append("savecrash: a save stopped before its manifest leaves the old document ${pass(intact)}" +
+                    " (layers ${e3.layers.size})\n")
+                // 2. The next real save commits the new state and tidies up.
+                store.saveProject(p.id, s2.snapshotNow())
+                val want = hashes(e2)
+                val (e4, _) = open(p.id) ?: error("reopen 2")
+                val saved = e4.layers.size == 3 && hashes(e4) == want
+                val dir = store.projectDir(p.id)
+                val manifest = org.json.JSONObject(File(dir, "manifest.json").readText()).getJSONArray("layers")
+                val named = (0 until manifest.length()).map { manifest.getJSONObject(it).optString("file") }.toSet()
+                val files = dir.listFiles().orEmpty().map { it.name }.filter { it.startsWith("layer_") || it.startsWith("mask_") }
+                // Files the open session's layers still read (opened lazily)
+                // may stay until a later save; nothing else may.
+                val live = e2.layers.mapNotNull { it.tiles.backingFile()?.name }.toSet()
+                val tidy = files.toSet().containsAll(named) && (files.toSet() - named).all { it in live }
+                out.append("savecrash: the next save writes the new state ${pass(saved)}, leaves no stray files ${pass(tidy)}" +
+                    " (${files.size} files)\n")
+            }
+            // 3. Reordering layers still on disk keeps their pixels.
+            run {
+                val p = store.createProject("harness-crash-lazy", w, h, BG)
+                made.add(p.id)
+                val e = DrawingEngine(w, h)
+                e.backgroundColor = BG
+                e.newLayer("A", bitmap = pattern(4))
+                e.newLayer("B", bitmap = pattern(5))
+                val before = hashes(e)
+                store.saveProject(p.id, DrawingSession("crash", "C", e, History()).snapshotNow())
+                val (e2, s2) = open(p.id) ?: error("open lazy")
+                val lazy = e2.layers.none { it.isResident }
+                e2.moveLayer(0, 1)
+                store.saveProject(p.id, s2.snapshotNow())
+                val live = hashes(e2) == before.reversed()
+                val (e3, _) = open(p.id) ?: error("reopen lazy")
+                val disk = hashes(e3) == before.reversed()
+                out.append("savecrash: reordering layers on disk keeps their pixels: live ${pass(live)}, reopened ${pass(disk)}" +
+                    " (lazy before $lazy)\n")
+            }
+        } catch (t: Throwable) {
+            out.append("savecrash: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e(TAG, "savecrash", t)
+        } finally {
+            store.failBeforeCommitForTest = false
+            made.forEach { runCatching { store.deleteProject(it) } }
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
     }
 
     private fun persistOne(
