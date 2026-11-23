@@ -52,7 +52,7 @@ object SelectionUtil {
      * The scanline algorithm, the tolerance test and the resulting region are
      * the same; only the storage behind them changes.
      */
-    fun magicWandGrid(grid: WandGrid, seedX: Int, seedY: Int, tolerance: Int): Region {
+    fun magicWandGrid(grid: WandGrid, seedX: Int, seedY: Int, tolerance: Int, gap: Int = 0): Region {
         val w0 = grid.docWidth
         val h0 = grid.docHeight
         val step = grid.step
@@ -60,10 +60,32 @@ object SelectionUtil {
         val h = grid.gridH
         if (seedX !in 0 until w0 || seedY !in 0 until h0) return Region()
 
-        val seedXi = (seedX / step).coerceIn(0, w - 1)
-        val seedYi = (seedY / step).coerceIn(0, h - 1)
+        var seedXi = (seedX / step).coerceIn(0, w - 1)
+        var seedYi = (seedY / step).coerceIn(0, h - 1)
         val target = grid.colour(seedXi, seedYi)
-        grid.prepare(target, tolerance)
+        grid.prepare(target, tolerance, gap / step)
+        val r = grid.gapRadius
+        if (r > 0 && !grid.isOpen(seedXi, seedYi)) {
+            // Gap closing: a tap close to a line starts from the nearest point
+            // that is clear of every line; a tap in a space narrower than the
+            // gap fills it without closing gaps.
+            var best = -1
+            var bestD = Int.MAX_VALUE
+            for (dy in -r..r) for (dx in -r..r) {
+                val d = dx * dx + dy * dy
+                if (d >= bestD || d > r * r) continue
+                if (grid.isOpen(seedXi + dx, seedYi + dy)) {
+                    bestD = d
+                    best = (seedYi + dy) * w + seedXi + dx
+                }
+            }
+            if (best >= 0) {
+                seedXi = best % w
+                seedYi = best / w
+            } else {
+                grid.dropGap()
+            }
+        }
         var stack = wandStack
         var top = 0
         fun push(v: Int) {
@@ -99,6 +121,9 @@ object SelectionUtil {
                 }
             }
         }
+
+        // Gap closing stopped short of the lines by its radius: grow back.
+        grid.regrow()
 
         val p1 = System.nanoTime()
         // Coalesce identical spans across consecutive rows into tall rectangles,

@@ -18,6 +18,8 @@ class Layer(
     var blend: LayerBlend = LayerBlend.Normal,
     var visible: Boolean = true,
     var alphaLock: Boolean = false,
+    /** Fills follow this layer's lines (at most one layer is the reference). */
+    var reference: Boolean = false,
     /** Locked layers refuse painting, clearing, adjusting and transforming. */
     var locked: Boolean = false,
     /** Clip this layer to the alpha of the layer below it. */
@@ -73,6 +75,7 @@ class Layer(
         blend = blend,
         visible = visible,
         alphaLock = alphaLock,
+        reference = reference,
         locked = locked,
         clipping = clipping,
         maskEnabled = maskEnabled,
@@ -86,6 +89,7 @@ class Layer(
         blend = p.blend
         visible = p.visible
         alphaLock = p.alphaLock
+        reference = p.reference
         locked = p.locked
         clipping = p.clipping
         maskEnabled = p.maskEnabled
@@ -121,6 +125,7 @@ data class LayerProps(
     val blend: LayerBlend,
     val visible: Boolean,
     val alphaLock: Boolean,
+    val reference: Boolean = false,
     val locked: Boolean = false,
     val clipping: Boolean = false,
     val maskEnabled: Boolean = true,

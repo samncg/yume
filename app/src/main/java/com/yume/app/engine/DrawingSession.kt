@@ -53,6 +53,8 @@ data class LayerSnapshotData(
     val visible: Boolean,
     val alphaLock: Boolean,
     val id: Long = 0L,
+    /** Fills follow this layer's lines (Procreate's reference layer). */
+    val reference: Boolean = false,
     val revision: Int = 0,
     val locked: Boolean = false,
     val clipping: Boolean = false,
@@ -236,6 +238,8 @@ class DrawingSession(
     @Volatile var fillLayerOnly: Boolean = false
     @Volatile var fillSelection: Boolean = true
     @Volatile var fillExpand: Int = 1
+    /** Gap closing for fills, in document px (0: off). */
+    @Volatile var fillGap: Int = 0
 
     /** Direction of the motion blur adjustment, in degrees. */
     @Volatile var motionAngle: Float = 0f
@@ -1019,6 +1023,27 @@ class DrawingSession(
                             changed = true
                         }
                         picking -> sampleColor(doc[0], doc[1])
+                        tapPending && tool == Tool.Fill -> {
+                            if (abs(event.xs[i] - wandDownX) > 30f) {
+                                // Press and drag sideways: fill now, then the
+                                // drag sets the threshold (right raises it).
+                                tapPending = false
+                                fillAdjusting = true
+                                fillAdjustBase = fillTolerance
+                                dropX = tapX
+                                dropY = tapY
+                                dropFill = color
+                                dropComposite = false
+                                val before = history.version
+                                fillAtInternal(tapX, tapY, color, false)
+                                dropVersion = if (history.version != before) history.version else -1
+                                changed = true
+                            }
+                        }
+                        fillAdjusting -> {
+                            val t = (fillAdjustBase + ((event.xs[i] - wandDownX) / 3f).toInt()).coerceIn(1, TOLERANCE_MAX)
+                            if (t != fillTolerance) adjustFillTolerance(t)
+                        }
                         autoSelectPending -> {
                             // A drag is not a tap. Measure in screen pixels so the
                             // test behaves the same at any zoom level: zoomed in,
@@ -1082,6 +1107,11 @@ class DrawingSession(
             }
 
             is InputEvent.Up -> {
+                if (fillAdjusting) {
+                    fillAdjusting = false
+                    dropVersion = -1
+                    onMessage?.invoke("Fill threshold ${(fillTolerance * 100 + TOLERANCE_MAX / 2) / TOLERANCE_MAX}%")
+                }
                 if (tapPending) {
                     tapPending = false
                     if (tool == Tool.Fill) fillAtInternal(tapX, tapY, color, false)
@@ -1238,6 +1268,13 @@ class DrawingSession(
                     history.discard(action)
                 }
                 tapPending = false
+                if (fillAdjusting) {
+                    // Became a two-finger gesture: the preview fill goes.
+                    fillAdjusting = false
+                    if (dropVersion >= 0 && dropVersion == history.version) doUndo()
+                    dropVersion = -1
+                    fillTolerance = fillAdjustBase
+                }
                 gradientGuide = null
                 if (movingSelection || autoSelectCanMove) {
                     selectionMoveBase?.let { engine.setSelection(Region(it)) }
@@ -2081,6 +2118,7 @@ class DrawingSession(
         put("fillLayerOnly", fillLayerOnly)
         put("fillSelection", fillSelection)
         put("fillExpand", fillExpand)
+        put("fillGap", fillGap)
         put("wandTolerance", wandTolerance)
         put("eyedropperLayerOnly", eyedropperLayerOnly)
         put("selectionShape", selectionShape.name)
@@ -2101,6 +2139,7 @@ class DrawingSession(
         fillLayerOnly = o.optBoolean("fillLayerOnly", fillLayerOnly)
         fillSelection = o.optBoolean("fillSelection", fillSelection)
         fillExpand = o.optInt("fillExpand", fillExpand)
+        fillGap = o.optInt("fillGap", fillGap).coerceIn(0, FILL_GAP_MAX)
         wandTolerance = o.optInt("wandTolerance", wandTolerance)
         eyedropperLayerOnly = o.optBoolean("eyedropperLayerOnly", eyedropperLayerOnly)
         SelectionShape.entries.firstOrNull { it.name == o.optString("selectionShape") }?.let { selectionShape = it }
@@ -2135,6 +2174,7 @@ class DrawingSession(
         fillLayerOnly = o.optBoolean("fillLayerOnly", fillLayerOnly)
         fillSelection = o.optBoolean("fillSelection", fillSelection)
         fillExpand = o.optInt("fillExpand", fillExpand).coerceIn(0, 8)
+        fillGap = o.optInt("fillGap", fillGap).coerceIn(0, FILL_GAP_MAX)
         Gradients.Kind.entries.firstOrNull { it.name == o.optString("gradientKind") }?.let { gradientKind = it }
         ShapeKind.entries.firstOrNull { it.name == o.optString("shapeKind") }?.let { shapeKind = it }
         shapePerfect = o.optBoolean("shapePerfect", shapePerfect)
@@ -2351,6 +2391,11 @@ class DrawingSession(
         requestState()
     }
 
+    fun chooseFillGap(value: Int) {
+        fillGap = value.coerceIn(0, FILL_GAP_MAX)
+        requestState()
+    }
+
     /** Where the last paint bucket spent its time (harness timing). */
     @Volatile var lastFillProfile: String = ""
 
@@ -2374,11 +2419,15 @@ class DrawingSession(
         return (color and 0x00FFFFFF) or (a shl 24)
     }
 
-    // ColorDrop with a threshold: drop and hold, then slide to adjust.
+    // ColorDrop with a threshold: drop and hold, then slide to adjust. The
+    // paint bucket shares it: press and drag sideways.
     private var dropX = 0f
     private var dropY = 0f
     private var dropVersion = -1
     @Volatile private var dropPendingTolerance = -1
+    /** The colour and sampling of the fill being adjusted. */
+    private var dropFill = 0
+    private var dropComposite = true
 
     /** The chip was held still over the canvas: fill there and remember it. */
     fun colorDropBegin(vx: Float, vy: Float) = post {
@@ -2386,8 +2435,10 @@ class DrawingSession(
         view.toDocument(vx, vy, doc)
         dropX = doc[0]
         dropY = doc[1]
+        dropFill = dropColor()
+        dropComposite = true
         val before = history.version
-        fillAtInternal(dropX, dropY, dropColor(), true)
+        fillAtInternal(dropX, dropY, dropFill, true)
         dropVersion = if (history.version != before) history.version else -1
     }
 
@@ -2407,10 +2458,26 @@ class DrawingSession(
             if (dropVersion >= 0 && dropVersion == history.version) doUndo()
             fillTolerance = t
             val before = history.version
-            fillAtInternal(dropX, dropY, dropColor(), true)
+            fillAtInternal(dropX, dropY, dropFill, dropComposite)
             dropVersion = if (history.version != before) history.version else -1
             requestState()
         }
+    }
+
+    /** Paint bucket drag: refill the pressed spot at [tolerance] (coalesced). */
+    private var fillAdjusting = false
+    private var fillAdjustBase = 0
+
+    private fun adjustFillTolerance(tolerance: Int) = colorDropAdjust(tolerance)
+
+    /** Marks [id] as the reference layer (fills follow its lines), or clears it. */
+    fun toggleReference(id: Long) = post {
+        val layer = engine.layerById(id) ?: return@post
+        val on = !layer.reference
+        for (l in engine.layers) l.reference = false
+        layer.reference = on
+        touchProperties()
+        requestState()
     }
 
     /** The finger lifted: keep the last fill (and its tolerance for next time). */
@@ -2483,18 +2550,25 @@ class DrawingSession(
         if (fillSelection && sel != null && sel.contains(x, y)) {
             region = android.graphics.Region(sel)
         } else {
-            val grid = if (fillLayerOnly && !compositeOnly) {
-                WandGrid(
-                    engine.width, engine.height, 1,
-                    store as? SparseTileStore,
-                    if (store.isSparse) null else store.sharedBitmap(),
-                    if (store.isSparse) store.defaultPixel else 0
-                )
-            } else {
-                engine.compositeGrid(1)
+            fun storeGrid(s: TileStore) = WandGrid(
+                engine.width, engine.height, 1,
+                s as? SparseTileStore,
+                if (s.isSparse) null else s.sharedBitmap(),
+                if (s.isSparse) s.defaultPixel else 0
+            )
+            // A reference layer (its lines) decides the regions unless the
+            // fill samples the current layer only.
+            val reference = engine.layers.firstOrNull { it.reference }
+            val grid = when {
+                fillLayerOnly && !compositeOnly -> storeGrid(store)
+                reference != null -> storeGrid(reference.tiles)
+                else -> {
+                    engine.flushAll()
+                    engine.compositeGrid(1)
+                }
             }
             region = try {
-                SelectionUtil.magicWandGrid(grid, x, y, fillTolerance)
+                SelectionUtil.magicWandGrid(grid, x, y, fillTolerance, fillGap)
             } finally {
                 grid.release()
             }
@@ -4164,6 +4238,7 @@ class DrawingSession(
                 visible = it.visible,
                 alphaLock = it.alphaLock,
                 id = it.id,
+                reference = it.reference,
                 revision = it.revision,
                 locked = it.locked,
                 clipping = it.clipping,
@@ -4293,7 +4368,7 @@ class DrawingSession(
                 put("id", ls.layer.id); put("name", p.name); put("opacity", p.opacity.toDouble())
                 put("blend", p.blend.name); put("visible", p.visible); put("alphaLock", p.alphaLock)
                 put("locked", p.locked); put("clipping", p.clipping); put("maskEnabled", p.maskEnabled)
-                put("groupId", p.groupId); put("editMask", p.editMask)
+                put("groupId", p.groupId); put("editMask", p.editMask); put("reference", p.reference)
             })
         })
         put("groups", org.json.JSONArray().apply {
@@ -4323,6 +4398,7 @@ class DrawingSession(
                 blend = LayerBlend.fromName(j.optString("blend", "Normal")),
                 visible = j.optBoolean("visible", true),
                 alphaLock = j.optBoolean("alphaLock", false),
+                reference = j.optBoolean("reference", false),
                 locked = j.optBoolean("locked", false),
                 clipping = j.optBoolean("clipping", false),
                 maskEnabled = j.optBoolean("maskEnabled", true),
@@ -4728,6 +4804,8 @@ class DrawingSession(
             fillLayerOnly = fillLayerOnly,
             fillSelection = fillSelection,
             fillExpand = fillExpand,
+            fillGap = fillGap,
+            referenceLayer = engine.layers.firstOrNull { it.reference }?.name,
             gradientKind = gradientKind,
             gradientSecond = gradientSecond,
             motionAngle = motionAngle,
@@ -4770,6 +4848,7 @@ class DrawingSession(
             opacity = layer.opacity,
             blend = layer.blend,
             alphaLock = layer.alphaLock,
+            reference = layer.reference,
             thumb = thumb,
             locked = layer.locked,
             clipping = layer.clipping,
@@ -4828,6 +4907,9 @@ private const val TRANSFORM_PAN_PX = 48f
 
 /** Largest wand / paint bucket tolerance: a full channel difference. */
 const val TOLERANCE_MAX = 255
+
+/** Largest fill gap closing, document px. */
+const val FILL_GAP_MAX = 20
 
 /** A tolerance as the percentage the sliders show (100% = everything). */
 fun tolerancePercent(tolerance: Int): Int = (tolerance * 100 + TOLERANCE_MAX / 2) / TOLERANCE_MAX

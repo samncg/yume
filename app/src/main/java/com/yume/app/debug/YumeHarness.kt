@@ -210,6 +210,9 @@ object YumeHarness {
                     out.append(scoreOverlayTest())
                 } else if (only == "hoist") {
                     out.append(scoreHoist())
+                } else if (only == "fillgap") {
+                    out.append(scoreFillGap(sparse = true))
+                    out.append(scoreFillGap(sparse = false))
                 } else if (only == "psd") {
                     out.append(scorePsd(app))
                 } else if (only == "psdbig") {
@@ -4842,6 +4845,181 @@ object YumeHarness {
             Log.e("YumeHarness", "psd", t)
         } finally {
             made.forEach { store.deleteProject(it) }
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /**
+     * Smarter fill: gap closing (a ring with an 8 px gap leaks without it and
+     * holds with it, the fill still reaches the ring, and it never jumps a
+     * thin unbroken line), the reference layer, the drag-to-adjust
+     * threshold, and an 8K timing.
+     */
+    private fun scoreFillGap(sparse: Boolean): String {
+        val out = StringBuilder()
+        val tag = if (sparse) "sparse" else "dense"
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = sparse
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        try {
+            val size = 1024
+            val fillColour = 0xFF3080E0.toInt()
+            fun ringDoc(n: Int = size, radius: Float = 300f): Triple<DrawingSession, DrawingEngine, Layer> {
+                val engine = DrawingEngine(n, n)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val session = DrawingSession("fg", "FG", engine, History())
+                identityView(session, minOf(n, 2048), minOf(n, 2048))
+                session.runCommands()
+                val lines = engine.layers[0]
+                lines.name = "Lines"
+                lines.tiles.withWriteCanvas(Rect(0, 0, n, n)) { c ->
+                    val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                    p.style = Paint.Style.STROKE
+                    p.strokeWidth = 4f
+                    p.color = 0xFF000000.toInt()
+                    val cx = n / 2f
+                    // A ring open at the bottom by about 8 px.
+                    val sweep = 360f - 8f / radius * (180f / Math.PI.toFloat())
+                    c.drawArc(RectF(cx - radius, cx - radius, cx + radius, cx + radius), 90f + (360f - sweep) / 2f, sweep, false, p)
+                }
+                val fill = engine.newLayer("Fill")
+                engine.selectLayer(fill.id)
+                engine.markDirtyAll()
+                engine.compositeAll()
+                session.fillTolerance = 30
+                session.fillExpand = 0
+                return Triple(session, engine, fill)
+            }
+            fun filled(l: Layer, x: Int, y: Int) = l.tiles.getPixel(x, y) ushr 24 != 0
+
+            run {
+                val (s, _, f) = ringDoc()
+                s.fillGap = 0
+                s.fillAt(512f, 512f, fillColour)
+                s.runCommands()
+                out.append("fillgap $tag: without gap closing the ring leaks: ${pass(filled(f, 512, 512) && filled(f, 100, 100))}\n")
+            }
+            run {
+                val (s, _, f) = ringDoc()
+                s.fillGap = 6
+                val t0 = android.os.SystemClock.uptimeMillis()
+                s.fillAt(512f, 512f, fillColour)
+                s.runCommands()
+                val ms = android.os.SystemClock.uptimeMillis() - t0
+                val inside = filled(f, 512, 512)
+                val toLine = filled(f, 512 - 297, 512) && filled(f, 512, 512 - 297)
+                val outside = filled(f, 100, 100) || filled(f, 512, 830)
+                out.append("fillgap $tag: gap closing holds the fill: ${pass(inside && !outside)} (inside $inside, leaked $outside, $ms ms)\n")
+                out.append("fillgap $tag: the fill still reaches the line: ${pass(toLine)}\n")
+            }
+            run {
+                // An unbroken 2 px line: closing gaps must not jump it.
+                val engine = DrawingEngine(size, size)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val s = DrawingSession("fl", "FL", engine, History())
+                identityView(s, size, size)
+                s.runCommands()
+                engine.layers[0].tiles.withWriteCanvas(Rect(500, 0, 502, size)) { c -> c.drawColor(0xFF000000.toInt()) }
+                val f = engine.newLayer("Fill")
+                engine.selectLayer(f.id)
+                engine.markDirtyAll()
+                engine.compositeAll()
+                s.fillExpand = 0
+                s.fillGap = 12
+                s.fillAt(250f, 500f, fillColour)
+                s.runCommands()
+                val ok = filled(f, 250, 500) && filled(f, 499, 500) && filled(f, 499, 3) && !filled(f, 503, 500) && !filled(f, 520, 500)
+                out.append("fillgap $tag: never crosses a thin unbroken line: ${pass(ok)} (at 499 ${filled(f, 499, 500)}, at 503 ${filled(f, 503, 500)})\n")
+            }
+            run {
+                // Reference layer: a blob on another layer is ignored.
+                val (s, e, f) = ringDoc()
+                val blob = e.newLayer("Blob")
+                blob.tiles.withWriteCanvas(Rect(0, 0, size, size)) { c ->
+                    val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                    p.color = 0xFFE04040.toInt()
+                    c.drawCircle(420f, 420f, 90f, p)
+                }
+                e.selectLayer(f.id)
+                e.markDirtyAll()
+                e.compositeAll()
+                s.fillGap = 6
+                s.fillAt(600f, 600f, fillColour)
+                s.runCommands()
+                val withoutRef = filled(f, 420, 420)
+                s.undo()
+                s.runCommands()
+                s.toggleReference(e.layers[0].id)
+                s.runCommands()
+                s.fillAt(600f, 600f, fillColour)
+                s.runCommands()
+                val withRef = filled(f, 420, 420) && filled(f, 600, 600) && !filled(f, 100, 100)
+                out.append("fillgap $tag: reference layer decides the regions: ${pass(!withoutRef && withRef)} (blob blocks without it: ${!withoutRef})\n")
+                val snapRef = s.snapshotNow().layers.map { it.reference }
+                out.append("fillgap $tag: reference flag in the saved snapshot: ${pass(snapRef == listOf(true, false, false))} ($snapRef)\n")
+            }
+            run {
+                // Press and drag sideways: the drag sets the threshold.
+                val (s, _, f) = ringDoc()
+                s.fillGap = 6
+                s.chooseTool(Tool.Fill)
+                s.runCommands()
+                val base = s.fillTolerance
+                val steps0 = s.history.appliedCount
+                s.pushInput(InputEvent.Down(0, 512f, 512f, 1f, 0f, false, false))
+                s.runInput()
+                s.pushInput(InputEvent.Move(0, floatArrayOf(512f + 40f), floatArrayOf(512f), floatArrayOf(1f), 0f))
+                s.runInput()
+                s.runCommands()
+                s.pushInput(InputEvent.Move(0, floatArrayOf(512f + 150f), floatArrayOf(512f), floatArrayOf(1f), 0f))
+                s.runInput()
+                s.runCommands()
+                s.pushInput(InputEvent.Up(0))
+                s.runInput()
+                s.runCommands()
+                val tol = s.fillTolerance
+                val oneStep = s.history.appliedCount == steps0 + 1
+                out.append("fillgap $tag: drag sets the threshold: ${pass(tol > base && filled(f, 512, 512) && oneStep)} ($base -> $tol, one undo step $oneStep)\n")
+                // Drag, then a second finger: the preview fill goes.
+                s.undo()
+                s.runCommands()
+                s.fillTolerance = base
+                s.pushInput(InputEvent.Down(0, 512f, 512f, 1f, 0f, false, false))
+                s.runInput()
+                s.pushInput(InputEvent.Move(0, floatArrayOf(512f + 40f), floatArrayOf(512f), floatArrayOf(1f), 0f))
+                s.runInput()
+                s.runCommands()
+                s.pushInput(InputEvent.Move(0, floatArrayOf(512f + 150f), floatArrayOf(512f), floatArrayOf(1f), 0f))
+                s.runInput()
+                s.runCommands()
+                // What the canvas sends when a second finger lands.
+                s.pushInput(InputEvent.CancelStroke)
+                s.runInput()
+                s.runCommands()
+                out.append("fillgap $tag: a second finger drops the preview: ${pass(!filled(f, 512, 512) && s.fillTolerance == base)}\n")
+            }
+            if (sparse) run {
+                val n = 8192
+                val (s, _, f) = ringDoc(n, 3000f)
+                s.fillGap = 10
+                val t0 = android.os.SystemClock.uptimeMillis()
+                s.fillAt(n / 2f, n / 2f, fillColour)
+                s.runCommands()
+                val ms = android.os.SystemClock.uptimeMillis() - t0
+                s.fillGap = 0
+                s.undo()
+                s.runCommands()
+                val t1 = android.os.SystemClock.uptimeMillis()
+                s.fillAt(n / 2f, n / 2f, fillColour)
+                s.runCommands()
+                val ms0 = android.os.SystemClock.uptimeMillis() - t1
+                out.append("fillgap 8192²: gap-closed fill ${ms} ms (without closing ${ms0} ms, which leaks to the whole canvas: ${filled(f, 10, 10)})\n")
+            }
+        } catch (t: Throwable) {
+            out.append("fillgap $tag: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e("YumeHarness", "fillgap", t)
+        } finally {
             TileStoreConfig.useSparseLayers = oldS
         }
         return out.toString()

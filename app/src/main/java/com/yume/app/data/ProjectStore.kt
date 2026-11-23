@@ -605,6 +605,7 @@ class ProjectStore(private val context: Context) {
                         blend = LayerBlend.fromName(o.optString("blend", "Normal")),
                         visible = visible,
                         alphaLock = o.optBoolean("alphaLock", false),
+                        reference = o.optBoolean("reference", false),
                         locked = o.optBoolean("locked", false),
                         clipping = o.optBoolean("clipping", false),
                         mask = mask,
@@ -875,6 +876,7 @@ class ProjectStore(private val context: Context) {
         put("blend", layer.blend.name)
         put("visible", layer.visible)
         put("alphaLock", layer.alphaLock)
+        if (layer.reference) put("reference", true)
         put("locked", layer.locked)
         put("clipping", layer.clipping)
         put("maskEnabled", layer.maskEnabled)

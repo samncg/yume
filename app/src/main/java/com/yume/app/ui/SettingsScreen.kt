@@ -754,6 +754,13 @@ private fun ToolDefaults() {
         valueLabel = "${C.tdInt("fillExpand", 1)} px",
         min = 0f, max = 8f
     )
+    YumeSlider(
+        value = C.tdInt("fillGap", 0).toFloat(),
+        onChange = { C.setTd("fillGap", it.roundToInt()) },
+        label = "Close gaps",
+        valueLabel = if (C.tdInt("fillGap", 0) == 0) "Off" else "${C.tdInt("fillGap", 0)} px",
+        min = 0f, max = com.yume.app.engine.FILL_GAP_MAX.toFloat()
+    )
     DividerLine()
     SectionLabel("Gradient")
     Spacer(Modifier.height(6.dp))

@@ -10,6 +10,7 @@ data class LayerUi(
     val opacity: Float,
     val blend: LayerBlend,
     val alphaLock: Boolean,
+    val reference: Boolean = false,
     val thumb: Bitmap?,
     val isGroup: Boolean = false,
     val locked: Boolean = false,
@@ -92,6 +93,10 @@ data class EditorUiState(
     val fillSelection: Boolean = true,
     /** Paint bucket: grow the region by this many px under anti-aliased edges. */
     val fillExpand: Int = 1,
+    /** Fill gap closing, document px (0: off). */
+    val fillGap: Int = 0,
+    /** The reference layer's name (fills follow its lines), or null. */
+    val referenceLayer: String? = null,
     /** Gradient tool: linear or radial, from the current colour to [gradientSecond]. */
     val gradientKind: Gradients.Kind = Gradients.Kind.Linear,
     val gradientSecond: Int = 0x00FFFFFF,

@@ -84,6 +84,7 @@ class EditorController(
                 layer.blend = data.blend
                 layer.visible = data.visible
                 layer.alphaLock = data.alphaLock
+                layer.reference = data.reference
                 layer.locked = data.locked
                 layer.clipping = data.clipping
                 layer.adoptMask(data.mask, data.maskFile)

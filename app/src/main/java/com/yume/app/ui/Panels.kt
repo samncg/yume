@@ -169,6 +169,7 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                         active.isGroup -> "Group"
                         active.editingMask -> "Editing mask"
                         active.alphaLock -> "Alpha locked"
+                        active.reference -> "Reference for fills"
                         else -> ""
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -176,6 +177,15 @@ fun LayersPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                 )
                 Spacer(Modifier.weight(1f))
                 if (!active.isGroup) {
+                    YumeIconButton(
+                        glyph = Glyph.Bucket,
+                        onClick = { session.toggleReference(active.id) },
+                        selected = active.reference,
+                        size = 30.dp,
+                        iconSize = 16.dp,
+                        label = "Reference"
+                    )
+                    Spacer(Modifier.width(4.dp))
                     YumeIconButton(
                         glyph = Glyph.Lock,
                         onClick = { session.toggleAlphaLock(active.id) },
@@ -2107,9 +2117,18 @@ fun FillPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit
         )
         Spacer(Modifier.height(4.dp))
         YumeSlider(
+            value = state.fillGap / com.yume.app.engine.FILL_GAP_MAX.toFloat(),
+            onChange = { session.chooseFillGap((it * com.yume.app.engine.FILL_GAP_MAX).roundToInt()) },
+            label = "Close gaps",
+            valueLabel = if (state.fillGap == 0) "Off" else "${state.fillGap} px",
+            min = 0f,
+            max = 1f
+        )
+        Spacer(Modifier.height(4.dp))
+        YumeSlider(
             value = state.fillExpand / 4f,
             onChange = { session.chooseFillExpand((it * 4f).roundToInt()) },
-            label = "Close edges",
+            label = "Grow under edges",
             valueLabel = "${state.fillExpand} px",
             min = 0f,
             max = 1f
@@ -2123,13 +2142,25 @@ fun FillPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit
             onSelect = { session.chooseFillLayerOnly(it == 1) }
         )
         Spacer(Modifier.height(4.dp))
+        val ref = state.referenceLayer
+        if (ref != null && !state.fillLayerOnly) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Following the lines of the reference layer “$ref”.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YumeColors.accent
+            )
+        }
+        Spacer(Modifier.height(4.dp))
         ToggleRow(Glyph.Select, "Tap inside a selection fills it", state.fillSelection) {
             session.chooseFillSelection(it)
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "Tap to fill a region with the current colour. You can also drag the " +
-                "colour chip onto the canvas from any tool.",
+            text = "Tap to fill a region with the current colour; press and drag sideways " +
+                "to set the threshold as you watch. You can also drag the colour chip onto " +
+                "the canvas from any tool. Mark a layer as Reference (Layers panel) to fill " +
+                "between its lines while painting on another layer.",
             style = MaterialTheme.typography.bodySmall,
             color = YumeColors.textDim
         )

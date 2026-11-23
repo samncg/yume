@@ -252,10 +252,170 @@ class WandGrid(
         return abs((c and 0xFF) - (a and 0xFF)) <= t
     }
 
+    // -------------------------------------------------------- gap closing
+
+    /**
+     * Gap closing radius in grid pixels (0: off). While on, the fill runs
+     * through [closed] bits: open pixels with no wall (a pixel outside the
+     * tolerance) within this distance, so a gap narrower than twice the
+     * radius stops it. [regrow] then grows the result back to the walls.
+     */
+    private var gap = 0
+    private val closed = arrayOfNulls<LongArray>(cellsX * cellsY)
+    /** Half-widths of the disc of radius [gap], per row offset. */
+    private var disc = IntArray(0)
+
+    /** Turns gap closing off again (the seed sat too close to a line). */
+    fun dropGap() {
+        gap = 0
+        closed.fill(null)
+    }
+
+    val gapRadius: Int get() = gap
+
+    private fun simOf(cx: Int, cy: Int): LongArray? {
+        if (cx < 0 || cy < 0 || cx >= cellsX || cy >= cellsY) return ones
+        val ci = cy * cellsX + cx
+        if (!loaded[ci]) loadCell(ci)
+        return sim[ci]
+    }
+
+    /** Within tolerance at grid pixel (gx, gy); outside the grid counts as open. */
+    private fun simBit(gx: Int, gy: Int): Boolean {
+        if (gx < 0 || gy < 0 || gx >= gridW || gy >= gridH) return true
+        val s = simOf(gx ushr shift, gy ushr shift) ?: return false
+        return (s[wordIndex(gx, gy)] ushr (gx and 63)) and 1L != 0L
+    }
+
+    private fun closedOf(ci: Int): LongArray? {
+        closed[ci]?.let { return it }
+        val c = computeClosed(ci)
+        closed[ci] = c
+        return c
+    }
+
+    private fun computeClosed(ci: Int): LongArray? {
+        val cx = ci % cellsX
+        val cy = ci / cellsX
+        val s = simOf(cx, cy) ?: return null
+        if (s === zeros) return zeros
+        if (s === ones) {
+            // Open throughout, and so is everything within reach: nothing to close.
+            var all = true
+            for (dy in -1..1) for (dx in -1..1) if (simOf(cx + dx, cy + dy) !== ones) all = false
+            if (all) return ones
+        }
+        val r = gap
+        val pw = cell + 2 * r
+        val gx0 = cx * cell - r
+        val gy0 = cy * cell - r
+        // Walls per padded row, as running counts: a disc row is empty of
+        // walls when the counts at its two ends match.
+        val pre = IntArray(pw * (pw + 1))
+        for (py in 0 until pw) {
+            val base = py * (pw + 1)
+            var n = 0
+            for (px in 0 until pw) {
+                if (!simBit(gx0 + px, gy0 + py)) n++
+                pre[base + px + 1] = n
+            }
+        }
+        val bits = LongArray(words)
+        val gw = min(cell, gridW - cx * cell)
+        val gh = min(cell, gridH - cy * cell)
+        for (y in 0 until gh) {
+            for (x in 0 until gw) {
+                val i = y * cell + x
+                if ((s[i ushr 6] ushr (i and 63)) and 1L == 0L) continue
+                var clear = true
+                for (dy in -r..r) {
+                    val hw = disc[dy + r]
+                    val base = (y + r + dy) * (pw + 1)
+                    if (pre[base + x + r + hw + 1] != pre[base + x + r - hw]) { clear = false; break }
+                }
+                if (clear) bits[i ushr 6] = bits[i ushr 6] or (1L shl (i and 63))
+            }
+        }
+        return bits
+    }
+
+    /**
+     * After a gap-closed fill: grows the marked pixels back [gap] steps
+     * through open pixels only (alternating 4- and 8-neighbour steps, close
+     * to round), so the fill meets the lines again without crossing them.
+     */
+    fun regrow() {
+        val r = gap
+        if (r <= 0) return
+        val n = cellsX * cellsY
+        for (step in 0 until r) {
+            val active = HashSet<Int>()
+            for (ci in 0 until n) {
+                if (marked[ci] == null) continue
+                val cx = ci % cellsX
+                val cy = ci / cellsX
+                for (dy in -1..1) for (dx in -1..1) {
+                    val x = cx + dx
+                    val y = cy + dy
+                    if (x in 0 until cellsX && y in 0 until cellsY) active.add(y * cellsX + x)
+                }
+            }
+            val diag = step % 2 == 1
+            val next = HashMap<Int, LongArray>()
+            for (ci in active) {
+                val s = simOf(ci % cellsX, ci / cellsX) ?: continue
+                if (s === zeros) continue
+                val gx0 = (ci % cellsX) * cell
+                val gy0 = (ci / cellsX) * cell
+                val gh = min(cell, gridH - gy0)
+                val out = LongArray(words)
+                var any = false
+                for (ly in 0 until gh) {
+                    val gy = gy0 + ly
+                    for (wx in 0 until rowWords) {
+                        val gx = gx0 + wx * 64
+                        val cur = markedWordAt(gx, gy)
+                        val up = markedWordAt(gx, gy - 1)
+                        val dn = markedWordAt(gx, gy + 1)
+                        var grown = cur or up or dn or
+                            (cur shl 1) or (markedWordAt(gx - 64, gy) ushr 63) or
+                            (cur ushr 1) or (markedWordAt(gx + 64, gy) shl 63)
+                        if (diag) {
+                            for ((row, yy) in arrayOf(up to gy - 1, dn to gy + 1)) {
+                                grown = grown or (row shl 1) or (markedWordAt(gx - 64, yy) ushr 63) or
+                                    (row ushr 1) or (markedWordAt(gx + 64, yy) shl 63)
+                            }
+                        }
+                        val wi = (ly shl rowShift) + wx
+                        val v = grown and s[wi]
+                        out[wi] = v
+                        if (v != 0L) any = true
+                    }
+                }
+                if (any) next[ci] = out
+            }
+            marked.fill(null)
+            for ((ci, bits) in next) marked[ci] = bits
+        }
+    }
+
+    /** The marked word for grid x [gx] (a multiple of 64) on row [gy]; 0 outside. */
+    private fun markedWordAt(gx: Int, gy: Int): Long {
+        if (gx < 0 || gy < 0 || gx >= gridW || gy >= gridH) return 0L
+        val m = marked[cellIndex(gx, gy)] ?: return 0L
+        return m[wordIndex(gx, gy)]
+    }
+
     /** Fixes the seed colour and tolerance: cells become tolerance bits from here on. */
-    fun prepare(target: Int, tolerance: Int) {
+    fun prepare(target: Int, tolerance: Int, gapRadius: Int = 0) {
         this.target = target
         this.tolerance = tolerance
+        gap = gapRadius.coerceIn(0, cell / 2)
+        closed.fill(null)
+        if (gap > 0) disc = IntArray(2 * gap + 1) { k ->
+            val dy = k - gap
+            kotlin.math.sqrt((gap * gap - dy * dy).toDouble()).toInt()
+        }
         prepared = true
         for (ci in colours.indices) {
             if (!loaded[ci]) continue
@@ -281,7 +441,7 @@ class WandGrid(
     private fun openWord(gx: Int, gy: Int): Long {
         val ci = cellIndex(gx, gy)
         if (!loaded[ci]) loadCell(ci)
-        val s = sim[ci] ?: return 0L
+        val s = (if (gap > 0) closedOf(ci) else sim[ci]) ?: return 0L
         val wi = wordIndex(gx, gy)
         val m = marked[ci]
         return if (m == null) s[wi] else s[wi] and m[wi].inv()
@@ -383,6 +543,7 @@ class WandGrid(
         colours.fill(null)
         sim.fill(null)
         marked.fill(null)
+        closed.fill(null)
         loaded.fill(false)
         uniform.fill(false)
         spare = null

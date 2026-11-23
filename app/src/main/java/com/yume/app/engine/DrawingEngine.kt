@@ -328,6 +328,23 @@ class DrawingEngine(val width: Int, val height: Int) {
      * and keeps only the cells the flood fill reaches, so auto-select no longer
      * materialises the whole document.
      */
+    /**
+     * Composites every pending change now, waiting for evicted tiles: what a
+     * fill must sample right after an undo (the threshold drag undoes its last
+     * preview and refills at once, before any frame).
+     */
+    fun flushAll() {
+        val cache = TileCache.active
+        val old = cache?.blockingLoads
+        if (cache != null) cache.blockingLoads = true
+        try {
+            var guard = 0
+            while (hasDirty() && guard++ < 64) flush()
+        } finally {
+            if (cache != null && old != null) cache.blockingLoads = old
+        }
+    }
+
     fun compositeGrid(step: Int): WandGrid = WandGrid(
         width, height, step,
         compositeTiles,
