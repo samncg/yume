@@ -533,6 +533,8 @@ object Kernels {
                 h to h
             }
             AdjustmentKind.Mosaic -> 0 to 0
+            AdjustmentKind.Glow -> effectHalo(AdjustmentKind.Bloom, width, height, amount, floatArrayOf(p(params, 0, 0.45f), 0f))
+            AdjustmentKind.Anime -> (EffectSettings.animeRadius(p(params, 0, 0.5f), l) + 1).let { it to it }
             else -> 0 to 0
         }
     }
@@ -558,6 +560,10 @@ object Kernels {
             AdjustmentKind.Aberration -> aberration(width, height, bounds, amount, params, source, write)
             AdjustmentKind.Mosaic -> mosaic(width, height, bounds, amount, source, write)
             AdjustmentKind.LineArt -> lineArt(width, height, bounds, amount, params, source, write)
+            AdjustmentKind.Glow -> glow(width, height, bounds, amount, params, source, write)
+            AdjustmentKind.LensFlare -> lensFlare(width, height, bounds, amount, params, source, write)
+            AdjustmentKind.Clouds -> clouds(width, height, bounds, amount, params, source, write)
+            AdjustmentKind.Anime -> anime(width, height, bounds, amount, params, source, write)
             else -> Unit
         }
     }
@@ -949,6 +955,237 @@ object Kernels {
                 }
             }
         }, write, skipFlat = false)
+    }
+
+    // ------------------------------------------------- light and stylize
+
+    /** Glow: the whole picture softly blurred and screened back over it. */
+    private fun glow(
+        width: Int, height: Int, bounds: Rect, amount: Float, params: FloatArray,
+        source: Source, write: (Rect, Bitmap) -> Unit
+    ) = bloom(width, height, bounds, amount, floatArrayOf(p(params, 0, 0.45f), 0f), source, write)
+
+    private fun smooth(e0: Float, e1: Float, x: Float): Float {
+        val t = ((x - e0) / (e1 - e0)).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
+    }
+
+    /**
+     * Lens flare at a point (a share across and down the canvas): a hot core,
+     * a halo, a ring and a streak there, and coloured ghosts along the line
+     * through the canvas centre. Screened over the picture.
+     */
+    private fun lensFlare(
+        width: Int, height: Int, bounds: Rect, amount: Float, params: FloatArray,
+        source: Source, write: (Rect, Bitmap) -> Unit
+    ) {
+        val l = max(width, height)
+        val cx = p(params, 0, 0.72f) * width
+        val cy = p(params, 1, 0.28f) * height
+        val sz = EffectSettings.flareSize(p(params, 2, 0.4f), l)
+        val ghostsK = p(params, 3, 0.6f).coerceIn(0f, 1f)
+        val tint = when (p(params, 4, 0f).roundToInt()) {
+            1 -> floatArrayOf(0.7f, 0.85f, 1f)
+            2 -> floatArrayOf(1f, 1f, 1f)
+            else -> floatArrayOf(1f, 0.86f, 0.66f)
+        }
+        val k = amount.coerceIn(0f, 1f) * 2f
+        val ox = width / 2f
+        val oy = height / 2f
+        // Ghosts: position along the line (0 = flare, 1 = centre), radius, strength, colour.
+        val gT = floatArrayOf(0.45f, 0.8f, 1.25f, 1.55f, 1.9f)
+        val gR = floatArrayOf(0.12f, 0.32f, 0.18f, 0.5f, 0.08f)
+        val gI = floatArrayOf(0.22f, 0.10f, 0.18f, 0.07f, 0.28f)
+        val gC = arrayOf(
+            floatArrayOf(0.6f, 1f, 0.7f), floatArrayOf(0.5f, 0.7f, 1f), floatArrayOf(1f, 0.6f, 0.4f),
+            floatArrayOf(0.8f, 0.5f, 1f), floatArrayOf(1f, 0.9f, 0.6f)
+        )
+        run(width, height, bounds, 0, source, { src, pad, chunk, out ->
+            val pw = pad.width()
+            var o = 0
+            for (y in chunk.top until chunk.bottom) {
+                for (x in chunk.left until chunk.right) {
+                    val c = src[(y - pad.top) * pw + (x - pad.left)]
+                    val px = x + 0.5f
+                    val py = y + 0.5f
+                    val dx = px - cx
+                    val dy = py - cy
+                    val d = kotlin.math.sqrt(dx * dx + dy * dy)
+                    val core = kotlin.math.exp(-(d * d) / (2f * (0.12f * sz) * (0.12f * sz)))
+                    val halo = 0.35f * kotlin.math.exp(-(d * d) / (2f * sz * sz))
+                    val rd = (d - 1.5f * sz) / (0.08f * sz)
+                    val ring = 0.18f * kotlin.math.exp(-rd * rd)
+                    val streak = 0.55f * kotlin.math.exp(-kotlin.math.abs(dy) / (0.01f * sz + 1f)) *
+                        kotlin.math.exp(-kotlin.math.abs(dx) / (3f * sz))
+                    var lr = (core + halo + ring + streak) * tint[0]
+                    var lg = (core + halo * 0.95f + ring * 0.9f + streak) * tint[1]
+                    var lb = (core + halo * 0.9f + ring + streak) * tint[2]
+                    if (ghostsK > 0f) {
+                        for (g in gT.indices) {
+                            val gx = cx + (ox - cx) * gT[g] * 2f
+                            val gy = cy + (oy - cy) * gT[g] * 2f
+                            val r = gR[g] * sz
+                            val e = ((px - gx) * (px - gx) + (py - gy) * (py - gy)) / (r * r)
+                            if (e >= 1f) continue
+                            val v = gI[g] * ghostsK * (1f - e) * (0.6f + 0.4f * e)
+                            lr += v * gC[g][0]; lg += v * gC[g][1]; lb += v * gC[g][2]
+                        }
+                    }
+                    val ir = min(255, (lr * k * 255f).roundToInt())
+                    val ig = min(255, (lg * k * 255f).roundToInt())
+                    val ib = min(255, (lb * k * 255f).roundToInt())
+                    val il = max(ir, max(ig, ib))
+                    val a0 = c ushr 24
+                    val a = min(255, a0 + il - a0 * il / 255)
+                    fun scr(b: Int, li: Int) = min(a, b + li - b * li / 255)
+                    out[o++] = (a shl 24) or (scr((c shr 16) and 0xFF, ir) shl 16) or
+                        (scr((c shr 8) and 0xFF, ig) shl 8) or scr(c and 0xFF, ib)
+                }
+            }
+        }, write, skipFlat = false)
+    }
+
+    private fun lattice(ix: Int, iy: Int, seed: Int): Float =
+        (mix32(ix * 73856093 xor iy * 19349663 xor seed * 83492791) ushr 8) / 16777216f
+
+    private fun valueNoise(x: Float, y: Float, seed: Int): Float {
+        val ix = kotlin.math.floor(x).toInt()
+        val iy = kotlin.math.floor(y).toInt()
+        val fx = x - ix
+        val fy = y - iy
+        val sx = fx * fx * (3f - 2f * fx)
+        val sy = fy * fy * (3f - 2f * fy)
+        val a = lattice(ix, iy, seed)
+        val b = lattice(ix + 1, iy, seed)
+        val c = lattice(ix, iy + 1, seed)
+        val d = lattice(ix + 1, iy + 1, seed)
+        return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy
+    }
+
+    /**
+     * Clouds: fractal noise fixed to the canvas, thresholded by coverage with
+     * soft edges, painted over the picture in white (or storm grey).
+     */
+    private fun clouds(
+        width: Int, height: Int, bounds: Rect, amount: Float, params: FloatArray,
+        source: Source, write: (Rect, Bitmap) -> Unit
+    ) {
+        val cell = EffectSettings.cloudCell(p(params, 0, 0.4f), max(width, height))
+        val cover = p(params, 1, 0.5f).coerceIn(0f, 1f)
+        val soft = 0.02f + p(params, 2, 0.5f).coerceIn(0f, 1f) * 0.3f
+        val seed = (p(params, 3, 0f) * 1000f).roundToInt()
+        val storm = p(params, 4, 0f) >= 0.5f
+        val op = amount.coerceIn(0f, 1f)
+        val t = 1f - cover * 0.9f - 0.05f
+        run(width, height, bounds, 0, source, { src, pad, chunk, out ->
+            val pw = pad.width()
+            var o = 0
+            for (y in chunk.top until chunk.bottom) {
+                for (x in chunk.left until chunk.right) {
+                    val c = src[(y - pad.top) * pw + (x - pad.left)]
+                    var u = (x + 0.5f) / cell
+                    var v = (y + 0.5f) / cell
+                    var n = 0f
+                    var amp = 0.5f
+                    for (oct in 0 until 5) {
+                        n += amp * valueNoise(u, v, seed + oct * 101)
+                        u *= 2.03f; v *= 2.03f; amp *= 0.5f
+                    }
+                    val cov = smooth(t - soft, t + soft, n) * op
+                    val ca = (cov * 255f).roundToInt()
+                    if (ca == 0) { out[o++] = c; continue }
+                    // Shading: lighter where the cloud is thick.
+                    val shade = if (storm) 0.35f + 0.35f * n else 0.82f + 0.18f * n
+                    val cr = (255f * shade * if (storm) 0.95f else 1f).roundToInt().coerceIn(0, 255)
+                    val cg = (255f * shade * if (storm) 0.97f else 1f).roundToInt().coerceIn(0, 255)
+                    val cb = (255f * shade).roundToInt().coerceIn(0, 255)
+                    // Source-over in premultiplied colour.
+                    val inv = 255 - ca
+                    val a = ca + (c ushr 24) * inv / 255
+                    val r = cr * ca / 255 + ((c shr 16) and 0xFF) * inv / 255
+                    val g = cg * ca / 255 + ((c shr 8) and 0xFF) * inv / 255
+                    val b = cb * ca / 255 + (c and 0xFF) * inv / 255
+                    out[o++] = (a shl 24) or (min(a, r) shl 16) or (min(a, g) shl 8) or min(a, b)
+                }
+            }
+        }, write, skipFlat = false)
+    }
+
+    /**
+     * Anime background: a Kuwahara filter (each pixel takes the mean of its
+     * calmest quarter, so areas flatten into clean patches and edges stay
+     * sharp), then more vivid colour, mixed in by [amount]. Quarter sums come
+     * from integral images, so large radii stay quick; all integers except the
+     * variance comparison (same doubles everywhere).
+     */
+    private fun anime(
+        width: Int, height: Int, bounds: Rect, amount: Float, params: FloatArray,
+        source: Source, write: (Rect, Bitmap) -> Unit
+    ) {
+        val r = EffectSettings.animeRadius(p(params, 0, 0.5f), max(width, height))
+        val viv256 = (256f + p(params, 1, 0.5f).coerceIn(0f, 1f) * 200f).roundToInt()
+        val k256 = (amount.coerceIn(0f, 1f) * 256f).roundToInt()
+        val halo = r + 1
+        val chunk = chunkFor(halo)
+        run(width, height, bounds, halo, source, { src, pad, ck, out ->
+            val pw = pad.width()
+            val ph = pad.height()
+            val s1 = pw + 1
+            val ia = LongArray(s1 * (ph + 1)); val ir = LongArray(s1 * (ph + 1))
+            val ig = LongArray(s1 * (ph + 1)); val ib = LongArray(s1 * (ph + 1))
+            val il = LongArray(s1 * (ph + 1)); val il2 = LongArray(s1 * (ph + 1))
+            for (y in 0 until ph) {
+                var ra = 0L; var rr = 0L; var rg = 0L; var rb = 0L; var rl = 0L; var rl2 = 0L
+                for (x in 0 until pw) {
+                    val c = src[y * pw + x]
+                    val lum = luma(c).toLong()
+                    ra += c ushr 24; rr += (c shr 16) and 0xFF; rg += (c shr 8) and 0xFF; rb += c and 0xFF
+                    rl += lum; rl2 += lum * lum
+                    val i = (y + 1) * s1 + x + 1
+                    val u = y * s1 + x + 1
+                    ia[i] = ia[u] + ra; ir[i] = ir[u] + rr; ig[i] = ig[u] + rg; ib[i] = ib[u] + rb
+                    il[i] = il[u] + rl; il2[i] = il2[u] + rl2
+                }
+            }
+            fun sum(t: LongArray, x0: Int, y0: Int, x1: Int, y1: Int): Long =
+                t[y1 * s1 + x1] - t[y0 * s1 + x1] - t[y1 * s1 + x0] + t[y0 * s1 + x0]
+            var o = 0
+            for (y in ck.top until ck.bottom) {
+                for (x in ck.left until ck.right) {
+                    val px = x - pad.left
+                    val py = y - pad.top
+                    var bestVar = Double.MAX_VALUE
+                    var bx0 = 0; var by0 = 0; var bx1 = 0; var by1 = 0
+                    for (q in 0 until 4) {
+                        // Quarters, clipped to the canvas (the pad reaches it there).
+                        val x0 = if (q % 2 == 0) max(0, px - r) else px
+                        val x1 = if (q % 2 == 0) px + 1 else min(pw, px + r + 1)
+                        val y0 = if (q < 2) max(0, py - r) else py
+                        val y1 = if (q < 2) py + 1 else min(ph, py + r + 1)
+                        val n = ((x1 - x0) * (y1 - y0)).toDouble()
+                        val sl = sum(il, x0, y0, x1, y1).toDouble()
+                        val sl2 = sum(il2, x0, y0, x1, y1).toDouble()
+                        val v = sl2 / n - (sl / n) * (sl / n)
+                        if (v < bestVar) { bestVar = v; bx0 = x0; by0 = y0; bx1 = x1; by1 = y1 }
+                    }
+                    val n = ((bx1 - bx0) * (by1 - by0)).toLong()
+                    val a = (sum(ia, bx0, by0, bx1, by1) / n).toInt()
+                    var cr = (sum(ir, bx0, by0, bx1, by1) / n).toInt()
+                    var cg = (sum(ig, bx0, by0, bx1, by1) / n).toInt()
+                    var cb = (sum(ib, bx0, by0, bx1, by1) / n).toInt()
+                    // More vivid: push each channel away from the grey (premultiplied).
+                    val g0 = (cr * 54 + cg * 183 + cb * 19) shr 8
+                    cr = (g0 + ((cr - g0) * viv256 shr 8)).coerceIn(0, a)
+                    cg = (g0 + ((cg - g0) * viv256 shr 8)).coerceIn(0, a)
+                    cb = (g0 + ((cb - g0) * viv256 shr 8)).coerceIn(0, a)
+                    val c = src[py * pw + px]
+                    fun mixc(o0: Int, n0: Int) = o0 + ((n0 - o0) * k256 shr 8)
+                    val oa = mixc(c ushr 24, a)
+                    out[o++] = (oa shl 24) or (min(oa, mixc((c shr 16) and 0xFF, cr)) shl 16) or
+                        (min(oa, mixc((c shr 8) and 0xFF, cg)) shl 8) or min(oa, mixc(c and 0xFF, cb))
+                }
+            }
+        }, write, skipFlat = false, chunkW = chunk, chunkH = chunk)
     }
 
     fun bitmapSource(bmp: Bitmap) = Source { rect, out ->

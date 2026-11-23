@@ -122,6 +122,18 @@ object AdjustSamples {
             AdjustmentKind.Mosaic -> kernel(base) { s, w ->
                 Kernels.effect(k, W, H, all, 0.6f, FloatArray(0), s, w)
             }
+            AdjustmentKind.Glow -> kernel(base) { s, w ->
+                Kernels.effect(k, W, H, all, 0.8f, floatArrayOf(1f), s, w)
+            }
+            AdjustmentKind.LensFlare -> kernel(base) { s, w ->
+                Kernels.effect(k, W, H, all, 0.8f, floatArrayOf(0.7f, 0.35f, 0.75f, 1f, 0f), s, w)
+            }
+            AdjustmentKind.Clouds -> kernel(base) { s, w ->
+                Kernels.effect(k, W, H, all, 0.9f, floatArrayOf(0.55f, 0.55f, 0.5f, 0f, 0f), s, w)
+            }
+            AdjustmentKind.Anime -> kernel(base) { s, w ->
+                Kernels.effect(k, W, H, all, 1f, floatArrayOf(1f, 0.8f), s, w)
+            }
             AdjustmentKind.LineArt -> kernel(base) { s, w ->
                 Kernels.effect(k, W, H, all, 0.2f, floatArrayOf(0.3f, 1f), s, w)
             }.also { composeOnWhite(it) }

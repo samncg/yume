@@ -43,11 +43,15 @@ enum class AdjustmentKind(val label: String) {
     Halftone("Halftone"),
     Aberration("Chromatic aberration"),
     Mosaic("Mosaic"),
-    LineArt("Extract line art");
+    LineArt("Extract line art"),
+    Glow("Glow"),
+    LensFlare("Lens flare"),
+    Clouds("Clouds"),
+    Anime("Anime background");
 
     /** Effects run by the exact chunked kernels (preview and Apply alike). */
     val isEffect: Boolean get() = this == Bloom || this == Glitch || this == Halftone || this == Aberration ||
-        this == Mosaic || this == LineArt
+        this == Mosaic || this == LineArt || this == Glow || this == LensFlare || this == Clouds || this == Anime
 
     /** Driven by a lookup table built from the panel's editor, not the amount. */
     val isTone: Boolean get() = this == Curves || this == Levels || this == ColorBalance || this == GradientMap ||
@@ -278,7 +282,7 @@ class DrawingSession(
         // Effects: the widest any of their settings can reach on this canvas
         // (the settings may change while the preview runs).
         AdjustmentKind.Bloom, AdjustmentKind.Glitch, AdjustmentKind.Halftone,
-        AdjustmentKind.Aberration, AdjustmentKind.Mosaic ->
+        AdjustmentKind.Aberration, AdjustmentKind.Mosaic, AdjustmentKind.Glow, AdjustmentKind.Anime ->
             Kernels.maxEffectHalo(kind, engine.width, engine.height)
         else -> 0
     }
@@ -523,6 +527,10 @@ class DrawingSession(
         AdjustmentKind.Glitch -> 0.03f
         AdjustmentKind.Mosaic -> 0.04f
         AdjustmentKind.LineArt -> 0.03f
+        AdjustmentKind.Glow -> 0.1f
+        AdjustmentKind.LensFlare -> 0.05f
+        AdjustmentKind.Clouds -> 0.08f
+        AdjustmentKind.Anime -> 0.15f
         else -> 0.03f
     }
     private var adjustKind: AdjustmentKind? = null
@@ -1592,7 +1600,7 @@ class DrawingSession(
         val layer = engine.activeLayer ?: return
         if (!layer.visible) return
         if (!editable(layer)) return
-        if (adjusting) commitAdjustmentInternal()
+        if (blockedByPreview()) return
 
         var brush = activePreset
         if (eraserButton && brush.category != BrushCategory.Eraser) {
@@ -1804,7 +1812,7 @@ class DrawingSession(
     private fun beginLiquify(x: Float, y: Float) {
         val layer = engine.activeLayer ?: return
         if (!layer.visible || !editable(layer)) return
-        if (adjusting) commitAdjustmentInternal()
+        if (blockedByPreview()) return
         liquify.begin(layer)
         liquifyLastX = x
         liquifyLastY = y
@@ -1859,7 +1867,7 @@ class DrawingSession(
     private fun beginShape(x: Float, y: Float, pressure: Float) {
         val layer = engine.activeLayer ?: return
         if (!layer.visible || !editable(layer)) return
-        if (adjusting) commitAdjustmentInternal()
+        if (blockedByPreview()) return
         val brush = presets.firstOrNull { it.id == activePresetId && it.category == BrushCategory.Brush }
             ?: presets.firstOrNull { it.category == BrushCategory.Brush } ?: return
         strokeLayer = layer
@@ -2128,7 +2136,7 @@ class DrawingSession(
         val layer = engine.activeLayer ?: return
         if (!editable(layer)) return
         if (transform != null) return
-        cancelAdjustmentInternal()
+        if (blockedByPreview()) return
         transform = TransformSession(engine, layer, engine.selection).also { it.mode = transformMode }
         engine.markDirtyAll()
         requestState()
@@ -2281,9 +2289,8 @@ class DrawingSession(
         if (tool == Tool.Transform && transform != null) {
             post { commitTransformInternal() }
         }
-        if (adjusting) {
-            post { commitAdjustmentInternal() }
-        }
+        // A pending adjustment preview stays pending across tool changes
+        // (drawing waits for Apply / Cancel).
         if (tool == Tool.Liquify && newTool != Tool.Liquify) post { liquify.releaseBase() }
         rememberActivePreset()
         tool = newTool
@@ -2663,7 +2670,7 @@ class DrawingSession(
     private fun fillAtWork(fx: Float, fy: Float, fillColor: Int, compositeOnly: Boolean, onCapture: (TileCapture) -> Unit) {
         val layer = engine.activeLayer ?: return
         if (!editable(layer)) return
-        if (adjusting) commitAdjustmentInternal()
+        if (blockedByPreview()) return
         val x = fx.toInt()
         val y = fy.toInt()
         if (x !in 0 until engine.width || y !in 0 until engine.height) return
@@ -2835,7 +2842,7 @@ class DrawingSession(
     private fun applyGradientInternal(x0: Float, y0: Float, x1: Float, y1: Float) {
         val layer = engine.activeLayer ?: return
         if (!editable(layer)) return
-        if (adjusting) commitAdjustmentInternal()
+        if (blockedByPreview()) return
         val store = layer.paintStore
         val mask = layer.editMask && layer.hasMask
         val sel = engine.selection
@@ -4000,8 +4007,20 @@ class DrawingSession(
         return true
     }
 
+    /** The layer a pending preview belongs to (not whatever is active later). */
+    private var adjustLayer: Layer? = null
+
+    /** Blocks drawing tools while a preview is pending; true when blocked. */
+    private fun blockedByPreview(): Boolean {
+        if (!adjusting) return false
+        onMessage?.invoke("Apply or cancel the adjustment preview first (Adjustments).")
+        return true
+    }
+
     private fun applyPreviewInternal(kind: AdjustmentKind, amount: Float) {
-        val layer = engine.activeLayer ?: return
+        val layer = (if (adjusting) adjustLayer?.takeIf { engine.layers.contains(it) } else null)
+            ?: engine.activeLayer ?: return
+        if (!adjusting) adjustLayer = layer
         if (!editable(layer)) return
         val store = layer.paintStore
         if (!adjusting) {
@@ -4081,7 +4100,11 @@ class DrawingSession(
             AdjustmentKind.Halftone,
             AdjustmentKind.Aberration,
             AdjustmentKind.Mosaic,
-            AdjustmentKind.LineArt ->
+            AdjustmentKind.LineArt,
+            AdjustmentKind.Glow,
+            AdjustmentKind.LensFlare,
+            AdjustmentKind.Clouds,
+            AdjustmentKind.Anime ->
                 effectPreview(store, snapshot, kind, amount)?.let { proxy ->
                     adjustProxy = proxy
                     LayerPreview(layer.id, null, proxy)
@@ -4296,7 +4319,8 @@ class DrawingSession(
     private fun commitAdjustmentInternal() = working { commitAdjustmentInternalWork() }
 
     private fun commitAdjustmentInternalWork() {
-        val layer = engine.activeLayer
+        val layer = adjustLayer?.takeIf { engine.layers.contains(it) } ?: engine.activeLayer
+        adjustLayer = null
         val dense = adjustSnapshot
         val eager = adjustCapture
         val bounds = Rect(adjustBounds)
@@ -4449,7 +4473,11 @@ class DrawingSession(
                 AdjustmentKind.Halftone,
                 AdjustmentKind.Aberration,
                 AdjustmentKind.Mosaic,
-                AdjustmentKind.LineArt -> runEffect(
+                AdjustmentKind.LineArt,
+                AdjustmentKind.Glow,
+                AdjustmentKind.LensFlare,
+                AdjustmentKind.Clouds,
+                AdjustmentKind.Anime -> runEffect(
                     kind, engine.width, engine.height, work, amount,
                     Kernels.captureSource(capture, lazy = true)
                 ) { r, bmp ->
@@ -4503,7 +4531,11 @@ class DrawingSession(
                 AdjustmentKind.Halftone,
                 AdjustmentKind.Aberration,
                 AdjustmentKind.Mosaic,
-                AdjustmentKind.LineArt -> runEffect(
+                AdjustmentKind.LineArt,
+                AdjustmentKind.Glow,
+                AdjustmentKind.LensFlare,
+                AdjustmentKind.Clouds,
+                AdjustmentKind.Anime -> runEffect(
                     kind, engine.width, engine.height, Rect(0, 0, engine.width, engine.height), amount,
                     Kernels.bitmapSource(snapshot)
                 ) { r, bmp ->
@@ -4530,7 +4562,8 @@ class DrawingSession(
         adjustBase?.recycle()
         adjustBase = null
         adjustBaseKind = null
-        val layer = engine.activeLayer
+        val layer = adjustLayer?.takeIf { engine.layers.contains(it) } ?: engine.activeLayer
+        adjustLayer = null
         val capture = adjustCapture
         val snapshot = adjustSnapshot
         if (layer != null && capture != null) {

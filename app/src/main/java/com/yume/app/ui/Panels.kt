@@ -16,6 +16,10 @@ import androidx.compose.material.icons.rounded.Texture
 import androidx.compose.material.icons.rounded.Lens
 import androidx.compose.material.icons.rounded.GridOn
 import androidx.compose.material.icons.rounded.Draw
+import androidx.compose.material.icons.rounded.BlurCircular
+import androidx.compose.material.icons.rounded.Flare
+import androidx.compose.material.icons.rounded.Cloud
+import androidx.compose.material.icons.rounded.Landscape
 import androidx.compose.material.icons.rounded.Gradient
 import androidx.compose.material.icons.rounded.Filter
 import androidx.compose.material.icons.rounded.Contrast
@@ -1944,9 +1948,14 @@ private val ADJUST_GROUPS: List<Pair<String, List<AdjustmentKind>>> = listOf(
     "Blur and sharpen" to listOf(
         AdjustmentKind.Blur, AdjustmentKind.MotionBlur, AdjustmentKind.Sharpen, AdjustmentKind.Noise
     ),
+    "Light" to listOf(
+        AdjustmentKind.Bloom, AdjustmentKind.Glow, AdjustmentKind.LensFlare
+    ),
     "Effects" to listOf(
-        AdjustmentKind.Bloom, AdjustmentKind.Glitch, AdjustmentKind.Halftone,
-        AdjustmentKind.Aberration, AdjustmentKind.Mosaic, AdjustmentKind.LineArt
+        AdjustmentKind.Glitch, AdjustmentKind.Halftone, AdjustmentKind.Aberration, AdjustmentKind.Mosaic
+    ),
+    "Stylize" to listOf(
+        AdjustmentKind.Anime, AdjustmentKind.Clouds, AdjustmentKind.LineArt
     )
 )
 
@@ -3215,5 +3224,9 @@ private fun adjustIcon(k: AdjustmentKind): androidx.compose.ui.graphics.vector.I
         AdjustmentKind.Aberration -> i.Lens
         AdjustmentKind.Mosaic -> i.GridOn
         AdjustmentKind.LineArt -> i.Draw
+        AdjustmentKind.Glow -> i.BlurCircular
+        AdjustmentKind.LensFlare -> i.Flare
+        AdjustmentKind.Clouds -> i.Cloud
+        AdjustmentKind.Anime -> i.Landscape
     }
 }

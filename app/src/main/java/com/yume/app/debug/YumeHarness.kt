@@ -210,6 +210,9 @@ object YumeHarness {
                     out.append(scoreOverlayTest())
                 } else if (only == "hoist") {
                     out.append(scoreHoist())
+                } else if (only == "previewdraw") {
+                    out.append(scorePreviewDraw(true))
+                    out.append(scorePreviewDraw(false))
                 } else if (only == "manga") {
                     out.append(scoreManga())
                 } else if (only == "effects") {
@@ -4857,6 +4860,84 @@ object YumeHarness {
         return out.toString()
     }
 
+    /**
+     * Drawing while an adjustment preview is pending, then cancelling it:
+     * the picture and the undo history must stay consistent (undo all gets
+     * back the start, redo all the end).
+     */
+    private fun scorePreviewDraw(sparse: Boolean): String {
+        val out = StringBuilder()
+        val tag = if (sparse) "sparse" else "dense"
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = sparse
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        try {
+            for (kind in listOf(AdjustmentKind.Glitch, AdjustmentKind.Hue, AdjustmentKind.Blur)) {
+                val n = 800
+                val engine = DrawingEngine(n, n)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val s = DrawingSession("pd", "PD", engine, History())
+                identityView(s, n, n)
+                s.presets = com.yume.app.engine.BrushLibrary.defaults
+                s.assist = 0f
+                s.quickShapeEnabled = false
+                val pen = s.presets.first { it.id == "technical-pen" }
+                pick(s, pen, pen.category)
+                s.runCommands()
+                s.setBrushSize(30f)
+                s.runCommands()
+                val l = engine.layers[0]
+                l.tiles.withWriteCanvas(Rect(0, 0, n, n)) { c ->
+                    val p = Paint()
+                    p.shader = android.graphics.LinearGradient(0f, 0f, n.toFloat(), n.toFloat(), 0xFF2060A0.toInt(), 0xFFE0A040.toInt(), android.graphics.Shader.TileMode.CLAMP)
+                    c.drawRect(100f, 100f, 700f, 700f, p)
+                }
+                engine.markDirtyAll()
+                fun px(layer: Layer = l): IntArray {
+                    val b = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888)
+                    layer.tiles.readRectInto(Rect(0, 0, n, n), b)
+                    val a = IntArray(n * n); b.getPixels(a, 0, n, 0, 0, n, n); b.recycle(); return a
+                }
+                val start = px()
+                val amount = if (kind == AdjustmentKind.Hue) 90f else 0.6f
+                s.previewAdjustment(kind, amount)
+                s.consumePendingPreview()
+                s.runCommands()
+                // A stroke while the preview is pending: refused.
+                s.pushInput(InputEvent.Down(0, 200f, 400f, 1f, 0f, false, false))
+                for (i in 1..20) s.pushInput(InputEvent.Move(0, floatArrayOf(200f + i * 20f), floatArrayOf(400f), floatArrayOf(1f), 0f))
+                s.pushInput(InputEvent.Up(0))
+                s.runInput()
+                s.runCommands()
+                val blocked = px().contentEquals(start) && s.history.appliedCount == 0
+                // Panning still works.
+                val scale0 = s.view.scale
+                s.pushInput(InputEvent.Gesture(400f, 400f, 1.3f, 0f, 30f, 0f, first = true))
+                s.runInput()
+                s.runCommands()
+                val panned = s.view.scale != scale0
+                // A layer added meanwhile: Apply still goes to the previewed layer.
+                s.addLayer()
+                s.runCommands()
+                val added = engine.layers.last()
+                s.commitAdjustment()
+                s.runCommands()
+                val applied = !px().contentEquals(start)
+                val addedEmpty = px(added).all { it == 0 }
+                s.undo(); s.runCommands()
+                s.undo(); s.runCommands()
+                val undone = px().contentEquals(start) && engine.layers.size == 1
+                out.append("previewdraw $tag ${kind.name}: drawing blocked ${pass(blocked)}, zoom works ${pass(panned)}, apply goes to the previewed layer ${pass(applied && addedEmpty)}, undo ${pass(undone)}\n")
+            }
+        } catch (t: Throwable) {
+            out.append("previewdraw $tag: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e("YumeHarness", "previewdraw", t)
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
     /** Manga focus and speed lines, and comic frames: where ink goes and where it must not. */
     private fun scoreManga(): String {
         val out = StringBuilder()
@@ -5024,7 +5105,9 @@ object YumeHarness {
             for ((kind, amount) in listOf(
                 AdjustmentKind.Bloom to 0.8f, AdjustmentKind.Glitch to 0.7f,
                 AdjustmentKind.Halftone to 0.4f, AdjustmentKind.Aberration to 0.9f,
-                AdjustmentKind.Mosaic to 0.3f, AdjustmentKind.LineArt to 0.6f
+                AdjustmentKind.Mosaic to 0.3f, AdjustmentKind.LineArt to 0.6f,
+                AdjustmentKind.Glow to 0.8f, AdjustmentKind.LensFlare to 0.8f,
+                AdjustmentKind.Clouds to 0.9f, AdjustmentKind.Anime to 1f
             )) {
                 val t0 = android.os.SystemClock.uptimeMillis()
                 val s = runEffect(true, kind, amount)
@@ -5085,6 +5168,33 @@ object YumeHarness {
                     }
                     // Paper (the white circle) goes, dark lines stay.
                     AdjustmentKind.LineArt -> (at(760, 200) ushr 24) == 0 && (at(60, 60) ushr 24) > 200
+                    // Light spills past the white circle onto transparent pixels.
+                    AdjustmentKind.Glow -> (at(760, 200 - 74) ushr 24) > 0 && (s.before[(200 - 74) * w + 760] ushr 24) == 0
+                    // The flare's centre (72% across, 28% down) is lit, on transparency too.
+                    AdjustmentKind.LensFlare -> {
+                        val fx = (0.72f * w).toInt()
+                        val fy = (0.28f * h).toInt()
+                        (at(fx, fy) ushr 24) > 200 && (s.before[fy * w + fx] ushr 24) == 0
+                    }
+                    // Clouds cover part of the empty area, not all of it.
+                    AdjustmentKind.Clouds -> {
+                        var covered = 0
+                        var clear = 0
+                        for (y in 0 until h step 7) for (x in 640 until w step 7) {
+                            if (s.before[y * w + x] ushr 24 != 0) continue
+                            if (at(x, y) ushr 24 > 20) covered++ else clear++
+                        }
+                        covered > 20 && clear > 20
+                    }
+                    // Flattened: the gradient has far fewer distinct colours.
+                    AdjustmentKind.Anime -> {
+                        val before = HashSet<Int>()
+                        val after = HashSet<Int>()
+                        for (y in 60 until 400 step 2) for (x in 60 until 400 step 2) {
+                            before.add(s.before[y * w + x]); after.add(at(x, y))
+                        }
+                        after.size < before.size
+                    }
                     else -> true
                 }
                 out.append("effects ${kind.name}: same start ${pass(sameStart)}, sparse = dense ${pass(diff == 0)} (off $diff), changes ${pass(changed > 500)} ($changed px), behaves ${pass(specific)}, undo ${pass(undoOk)}, ${ms} ms\n")

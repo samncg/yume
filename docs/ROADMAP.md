@@ -40,7 +40,7 @@ with those apps (November 2026). Unchecked items are not built yet.
 - [x] **Frame divider**: split the canvas into comic panels with even gutters
       (overlaps with comic tools above).
 - [x] **Text upgrades**: vertical text, outlined text, and more fonts.
-- [ ] **More filters**: ~~pixelate, mosaic~~ (done), glow, lens flare, clouds, and
+- [x] **More filters**: pixelate, mosaic, glow, lens flare, clouds, and
       "anime background" style colour grading.
 - [ ] **Materials library**: tones, patterns and textures to drop onto the
       canvas.

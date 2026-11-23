@@ -31,6 +31,10 @@ object EffectSettings {
         AdjustmentKind.Aberration -> "Shift"
         AdjustmentKind.Mosaic -> "Block size"
         AdjustmentKind.LineArt -> "Strength"
+        AdjustmentKind.Glow -> "Strength"
+        AdjustmentKind.LensFlare -> "Brightness"
+        AdjustmentKind.Clouds -> "Opacity"
+        AdjustmentKind.Anime -> "Strength"
         else -> kind.label
     }
 
@@ -65,6 +69,27 @@ object EffectSettings {
             EffectSetting("Softness", 0f, 1f, 0.35f),
             EffectSetting("Colour", 0f, 1f, 0f, choices = listOf("Keep", "Black"))
         )
+        AdjustmentKind.Glow -> listOf(
+            EffectSetting("Size", 0f, 1f, 0.45f) { v, l -> "${bloomRadius(v, l)} px" }
+        )
+        AdjustmentKind.LensFlare -> listOf(
+            EffectSetting("Across", 0f, 1f, 0.72f),
+            EffectSetting("Down", 0f, 1f, 0.28f),
+            EffectSetting("Size", 0f, 1f, 0.4f) { v, l -> "${flareSize(v, l).roundToInt()} px" },
+            EffectSetting("Ghosts", 0f, 1f, 0.6f),
+            EffectSetting("Colour", 0f, 2f, 0f, choices = listOf("Warm", "Cool", "White"))
+        )
+        AdjustmentKind.Clouds -> listOf(
+            EffectSetting("Scale", 0f, 1f, 0.4f) { v, l -> "${cloudCell(v, l).roundToInt()} px" },
+            EffectSetting("Coverage", 0f, 1f, 0.5f),
+            EffectSetting("Softness", 0f, 1f, 0.5f),
+            EffectSetting("Variation", 0f, 1f, 0f),
+            EffectSetting("Colour", 0f, 1f, 0f, choices = listOf("White", "Storm"))
+        )
+        AdjustmentKind.Anime -> listOf(
+            EffectSetting("Smoothing", 0f, 1f, 0.5f) { v, l -> "${animeRadius(v, l)} px" },
+            EffectSetting("Vividness", 0f, 1f, 0.5f)
+        )
         else -> emptyList()
     }
 
@@ -84,4 +109,7 @@ object EffectSettings {
     fun halftoneCell(amount: Float, longEdge: Int): Float = 3f + sq(amount) * 0.03f * longEdge
     fun aberrationShift(amount: Float, longEdge: Int): Float = amount.coerceIn(0f, 1f) * 0.015f * longEdge
     fun mosaicBlock(amount: Float, longEdge: Int): Int = (2f + sq(amount) * 0.04f * longEdge).roundToInt().coerceAtLeast(2)
+    fun flareSize(size: Float, longEdge: Int): Float = (0.03f + sq(size) * 0.3f) * longEdge
+    fun cloudCell(scale: Float, longEdge: Int): Float = (0.02f + sq(scale) * 0.5f) * longEdge
+    fun animeRadius(smoothing: Float, longEdge: Int): Int = (1f + sq(smoothing) * 0.004f * longEdge).roundToInt().coerceAtLeast(1)
 }
