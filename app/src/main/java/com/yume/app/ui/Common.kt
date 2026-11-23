@@ -227,6 +227,10 @@ fun YumeSlider(
     knobColor: Color? = null
 ) {
     val finished = rememberUpdatedState(onChangeFinished)
+    // The gesture handler outlives recompositions: it must call the latest
+    // onChange, not the one from when it started (that one can write to
+    // state the caller has since replaced, and the slider seems stuck).
+    val change = rememberUpdatedState(onChange)
     Column(modifier.fillMaxWidth()) {
         if (label != null || valueLabel != null) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -255,7 +259,7 @@ fun YumeSlider(
                     fun update(px: Float) {
                         val track = (size.width - pad * 2f).coerceAtLeast(1f)
                         val frac = ((px - pad) / track).coerceIn(0f, 1f)
-                        onChange(min + frac * (max - min))
+                        change.value(min + frac * (max - min))
                     }
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
@@ -475,6 +479,7 @@ fun YumeVerticalSlider(
     max: Float = 1f,
     accent: Color = YumeColors.accent
 ) {
+    val change = rememberUpdatedState(onChange)
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally
@@ -495,7 +500,7 @@ fun YumeVerticalSlider(
                     fun update(py: Float) {
                         val track = (size.height - pad * 2f).coerceAtLeast(1f)
                         val frac = 1f - ((py - pad) / track).coerceIn(0f, 1f)
-                        onChange(min + frac * (max - min))
+                        change.value(min + frac * (max - min))
                     }
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)

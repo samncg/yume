@@ -1249,6 +1249,15 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
     // The last colour this panel set, to tell its own changes from ones made
     // elsewhere (eyedropper, a swatch outside, another panel).
     var lastSent by remember { androidx.compose.runtime.mutableIntStateOf(state.color) }
+    // Every colour this panel sent recently: during a fast drag the editor's
+    // colour lags a few steps behind, and those late echoes are not changes
+    // made elsewhere.
+    val recentSent = remember { ArrayDeque<Int>() }
+    fun noteSent(c: Int) {
+        lastSent = c
+        recentSent.addLast(c)
+        while (recentSent.size > 64) recentSent.removeFirst()
+    }
     // Bumped when the colour changed elsewhere: the harmony scheme re-centres.
     var outsideChange by remember { androidx.compose.runtime.mutableIntStateOf(0) }
 
@@ -1256,12 +1265,12 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
         val color = android.graphics.Color.HSVToColor(
             floatArrayOf(hue.coerceIn(0f, 360f), sat.coerceIn(0f, 1f), value.coerceIn(0f, 1f))
         )
-        lastSent = color
+        noteSent(color)
         session.chooseColor(color)
     }
 
     LaunchedEffect(state.color) {
-        if (state.color != lastSent) {
+        if (state.color != lastSent && state.color !in recentSent) {
             val hsv = FloatArray(3)
             android.graphics.Color.colorToHSV(state.color, hsv)
             if (hsv[1] > 0.004f) hue = hsv[0]
@@ -1283,7 +1292,7 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
             sat = hsv[1]
             value = hsv[2]
         }
-        lastSent = color
+        noteSent(color)
         session.chooseColor(color)
     }
 
