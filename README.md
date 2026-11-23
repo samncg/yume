@@ -71,7 +71,8 @@ glass, and every gesture, button and default can be changed in Settings.
   copied from another spot; gradient, shapes, liquify and text.
 - Adjustments: hue, saturation, brightness, blur, noise, sharpen, motion blur,
   curves, levels, colour balance, gradient map, posterize and threshold, plus
-  bloom, glitch, halftone and chromatic aberration effects, with a
+  bloom, glitch, halftone, chromatic aberration and mosaic effects, and line
+  art extraction (paper to transparent), with a
   live preview on one layer or all of them.
 - Guides: grids, perspective with vanishing points, rulers, mirror and radial
   symmetry.

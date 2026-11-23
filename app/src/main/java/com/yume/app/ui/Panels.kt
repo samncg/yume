@@ -14,6 +14,8 @@ import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.Texture
 import androidx.compose.material.icons.rounded.Lens
+import androidx.compose.material.icons.rounded.GridOn
+import androidx.compose.material.icons.rounded.Draw
 import androidx.compose.material.icons.rounded.Gradient
 import androidx.compose.material.icons.rounded.Filter
 import androidx.compose.material.icons.rounded.Contrast
@@ -2092,6 +2094,8 @@ private fun adjustValueLabel(kind: AdjustmentKind, amount: Float): String = when
     AdjustmentKind.MotionBlur -> "${(amount * 96).roundToInt()} px"
     AdjustmentKind.Bloom, AdjustmentKind.Glitch, AdjustmentKind.Aberration -> "${(amount * 100).roundToInt()}%"
     AdjustmentKind.Halftone -> "${(4f + 36f * amount).roundToInt()} px dots"
+    AdjustmentKind.Mosaic -> "${(2f + 62f * amount).roundToInt()} px blocks"
+    AdjustmentKind.LineArt -> "${(amount * 100).roundToInt()}%"
     else -> ""
 }
 
@@ -2924,5 +2928,7 @@ private fun adjustIcon(k: AdjustmentKind): androidx.compose.ui.graphics.vector.I
         AdjustmentKind.Glitch -> i.BrokenImage
         AdjustmentKind.Halftone -> i.Texture
         AdjustmentKind.Aberration -> i.Lens
+        AdjustmentKind.Mosaic -> i.GridOn
+        AdjustmentKind.LineArt -> i.Draw
     }
 }

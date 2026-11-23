@@ -780,6 +780,99 @@ object Kernels {
         }, write, skipFlat = true)
     }
 
+    /**
+     * Line art extraction: paper (light pixels) turns transparent and the
+     * lines stay, with their darkness as their opacity, in their own colour.
+     * [amount] widens what counts as line (0: only the darkest strokes).
+     */
+    fun lineArt(
+        width: Int, height: Int, bounds: Rect, amount: Float, unit: Float,
+        source: Source, write: (Rect, Bitmap) -> Unit
+    ) {
+        if (amount <= 0.001f) return
+        val lo = (12f + (1f - amount.coerceIn(0f, 1f)) * 110f).roundToInt()
+        val span = 90
+        run(width, height, bounds, 0, source, { src, pad, chunk, out ->
+            val pw = pad.width()
+            var o = 0
+            for (y in chunk.top until chunk.bottom) {
+                for (x in chunk.left until chunk.right) {
+                    val c = src[(y - pad.top) * pw + (x - pad.left)]
+                    val a = c ushr 24
+                    if (a == 0) {
+                        out[o++] = 0
+                        continue
+                    }
+                    // Lightness of the colour itself (premultiplied -> straight).
+                    val l = min(255, luma(c) * 255 / a)
+                    val dark = 255 - l
+                    val k = ((dark - lo) * 255 / span).coerceIn(0, 255)
+                    val na = a * k / 255
+                    if (na == 0) {
+                        out[o++] = 0
+                        continue
+                    }
+                    // Keep the line's colour: scale the premultiplied channels.
+                    val r = ((c shr 16) and 0xFF) * na / a
+                    val g = ((c shr 8) and 0xFF) * na / a
+                    val b = (c and 0xFF) * na / a
+                    out[o++] = (na shl 24) or (r shl 16) or (g shl 8) or b
+                }
+            }
+        }, write, skipFlat = false)
+    }
+
+    private fun mosaicCell(amount: Float, unit: Float): Int =
+        max(2, ((2f + 62f * amount.coerceIn(0f, 1f)) * unit).roundToInt())
+
+    /** Halo [mosaic] needs at [amount]. */
+    fun mosaicHalo(amount: Float, unit: Float = 1f): Int = mosaicCell(amount, unit) + 1
+
+    /**
+     * Mosaic: square blocks on a grid fixed to the canvas, each the average of
+     * the pixels it covers (premultiplied, so transparent edges stay clean).
+     */
+    fun mosaic(
+        width: Int, height: Int, bounds: Rect, amount: Float, unit: Float,
+        source: Source, write: (Rect, Bitmap) -> Unit
+    ) {
+        if (amount <= 0.001f) return
+        val cell = mosaicCell(amount, unit)
+        run(width, height, bounds, mosaicHalo(amount, unit), source, { src, pad, chunk, out ->
+            val pw = pad.width()
+            var o = 0
+            var lastKey = Long.MIN_VALUE
+            var avg = 0
+            for (y in chunk.top until chunk.bottom) {
+                val by = y / cell
+                for (x in chunk.left until chunk.right) {
+                    val bx = x / cell
+                    val key = (bx.toLong() shl 32) or (by.toLong() and 0xFFFFFFFFL)
+                    if (key != lastKey) {
+                        lastKey = key
+                        val x0 = bx * cell
+                        val y0 = by * cell
+                        val x1 = min(width, x0 + cell)
+                        val y1 = min(height, y0 + cell)
+                        var sa = 0L; var sr = 0L; var sg = 0L; var sb = 0L
+                        var n = 0
+                        for (yy in y0 until y1) {
+                            val row = (yy - pad.top) * pw
+                            for (xx in x0 until x1) {
+                                val c = src[row + (xx - pad.left)]
+                                sa += c ushr 24; sr += (c shr 16) and 0xFF; sg += (c shr 8) and 0xFF; sb += c and 0xFF
+                                n++
+                            }
+                        }
+                        avg = if (n == 0) 0 else
+                            ((sa / n).toInt() shl 24) or ((sr / n).toInt() shl 16) or ((sg / n).toInt() shl 8) or (sb / n).toInt()
+                    }
+                    out[o++] = avg
+                }
+            }
+        }, write, skipFlat = true)
+    }
+
     fun bitmapSource(bmp: Bitmap) = Source { rect, out ->
         bmp.getPixels(out, 0, rect.width(), rect.left, rect.top, rect.width(), rect.height())
     }

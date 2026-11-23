@@ -4918,7 +4918,8 @@ object YumeHarness {
         try {
             for ((kind, amount) in listOf(
                 AdjustmentKind.Bloom to 0.8f, AdjustmentKind.Glitch to 0.7f,
-                AdjustmentKind.Halftone to 0.4f, AdjustmentKind.Aberration to 0.9f
+                AdjustmentKind.Halftone to 0.4f, AdjustmentKind.Aberration to 0.9f,
+                AdjustmentKind.Mosaic to 0.3f, AdjustmentKind.LineArt to 0.6f
             )) {
                 val t0 = android.os.SystemClock.uptimeMillis()
                 val s = runEffect(true, kind, amount)
@@ -4967,6 +4968,18 @@ object YumeHarness {
                         }
                         at(cx, cy) == s.before[cy * w + cx] && split > 0
                     }
+                    // Every block one colour (blocks on a canvas-fixed grid).
+                    AdjustmentKind.Mosaic -> {
+                        val cell = kotlin.math.round(2f + 62f * 0.3f).toInt()
+                        var uneven = 0
+                        for (by in 2 until 10) for (bx in 2 until 10) {
+                            val v = at(bx * cell, by * cell)
+                            for (k in 1 until cell step 3) if (at(bx * cell + k, by * cell + k) != v) uneven++
+                        }
+                        uneven == 0
+                    }
+                    // Paper (the white circle) goes, dark lines stay.
+                    AdjustmentKind.LineArt -> (at(760, 200) ushr 24) == 0 && (at(60, 60) ushr 24) > 200
                     else -> true
                 }
                 out.append("effects ${kind.name}: same start ${pass(sameStart)}, sparse = dense ${pass(diff == 0)} (off $diff), changes ${pass(changed > 500)} ($changed px), behaves ${pass(specific)}, undo ${pass(undoOk)}, ${ms} ms\n")

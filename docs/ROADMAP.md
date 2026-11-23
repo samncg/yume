@@ -33,14 +33,14 @@ with those apps (November 2026). Unchecked items are not built yet.
 
 ## From ibisPaint
 
-- [ ] **Line-art extraction**: turn a sketch or photo into clean lines on a
+- [x] **Line-art extraction**: turn a sketch or photo into clean lines on a
       transparent layer.
 - [ ] **Speed lines and focus lines**: a ruler or filter that draws manga
       radial and parallel lines toward a chosen point.
 - [ ] **Frame divider**: split the canvas into comic panels with even gutters
       (overlaps with comic tools above).
 - [ ] **Text upgrades**: vertical text, outlined text, and more fonts.
-- [ ] **More filters**: pixelate, mosaic, glow, lens flare, clouds, and
+- [ ] **More filters**: ~~pixelate, mosaic~~ (done), glow, lens flare, clouds, and
       "anime background" style colour grading.
 - [ ] **Materials library**: tones, patterns and textures to drop onto the
       canvas.

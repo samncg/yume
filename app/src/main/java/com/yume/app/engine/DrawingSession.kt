@@ -41,10 +41,13 @@ enum class AdjustmentKind(val label: String) {
     Bloom("Bloom"),
     Glitch("Glitch"),
     Halftone("Halftone"),
-    Aberration("Chromatic aberration");
+    Aberration("Chromatic aberration"),
+    Mosaic("Mosaic"),
+    LineArt("Extract line art");
 
-    /** Procreate-style effects, run by the exact chunked kernels. */
-    val isEffect: Boolean get() = this == Bloom || this == Glitch || this == Halftone || this == Aberration
+    /** Effects run by the exact chunked kernels (preview and Apply alike). */
+    val isEffect: Boolean get() = this == Bloom || this == Glitch || this == Halftone || this == Aberration ||
+        this == Mosaic || this == LineArt
 
     /** Driven by a lookup table built from the panel's editor, not the amount. */
     val isTone: Boolean get() = this == Curves || this == Levels || this == ColorBalance || this == GradientMap ||
@@ -276,6 +279,7 @@ class DrawingSession(
         AdjustmentKind.Glitch -> Kernels.glitchHalo(1f)
         AdjustmentKind.Halftone -> Kernels.halftoneHalo(1f)
         AdjustmentKind.Aberration -> Kernels.aberrationHalo(1f)
+        AdjustmentKind.Mosaic -> Kernels.mosaicHalo(1f)
         else -> 0
     }
 
@@ -517,6 +521,8 @@ class DrawingSession(
         AdjustmentKind.Halftone -> 0.065f
         AdjustmentKind.Aberration -> 0.06f
         AdjustmentKind.Glitch -> 0.03f
+        AdjustmentKind.Mosaic -> 0.04f
+        AdjustmentKind.LineArt -> 0.03f
         else -> 0.03f
     }
     private var adjustKind: AdjustmentKind? = null
@@ -3867,7 +3873,9 @@ class DrawingSession(
             AdjustmentKind.Bloom,
             AdjustmentKind.Glitch,
             AdjustmentKind.Halftone,
-            AdjustmentKind.Aberration ->
+            AdjustmentKind.Aberration,
+            AdjustmentKind.Mosaic,
+            AdjustmentKind.LineArt ->
                 effectPreview(store, snapshot, kind, amount)?.let { proxy ->
                     adjustProxy = proxy
                     LayerPreview(layer.id, null, proxy)
@@ -4018,6 +4026,8 @@ class DrawingSession(
             AdjustmentKind.Glitch -> Kernels.glitch(w, h, bounds, amount, unit, source, write)
             AdjustmentKind.Halftone -> Kernels.halftone(w, h, bounds, amount, unit, source, write)
             AdjustmentKind.Aberration -> Kernels.aberration(w, h, bounds, amount, unit, source, write)
+            AdjustmentKind.Mosaic -> Kernels.mosaic(w, h, bounds, amount, unit, source, write)
+            AdjustmentKind.LineArt -> Kernels.lineArt(w, h, bounds, amount, unit, source, write)
             else -> Unit
         }
     }
@@ -4227,7 +4237,9 @@ class DrawingSession(
                 AdjustmentKind.Bloom,
                 AdjustmentKind.Glitch,
                 AdjustmentKind.Halftone,
-                AdjustmentKind.Aberration -> runEffect(
+                AdjustmentKind.Aberration,
+                AdjustmentKind.Mosaic,
+                AdjustmentKind.LineArt -> runEffect(
                     kind, engine.width, engine.height, work, amount, 1f,
                     Kernels.captureSource(capture, lazy = true)
                 ) { r, bmp ->
@@ -4279,7 +4291,9 @@ class DrawingSession(
                 AdjustmentKind.Bloom,
                 AdjustmentKind.Glitch,
                 AdjustmentKind.Halftone,
-                AdjustmentKind.Aberration -> runEffect(
+                AdjustmentKind.Aberration,
+                AdjustmentKind.Mosaic,
+                AdjustmentKind.LineArt -> runEffect(
                     kind, engine.width, engine.height, Rect(0, 0, engine.width, engine.height), amount, 1f,
                     Kernels.bitmapSource(snapshot)
                 ) { r, bmp ->
