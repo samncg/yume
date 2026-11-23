@@ -1359,9 +1359,17 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                     selectedIndex = state.harmony.ordinal,
                     onSelect = { session.chooseHarmony(com.yume.app.engine.Harmony.entries[it]) }
                 )
+                // The scheme stays put: its colours keep their order, and the
+                // one in use is [pick]. Choosing another only moves the pick,
+                // so you can step either way through the scheme.
+                var pick by remember(state.harmony) { androidx.compose.runtime.mutableIntStateOf(0) }
+                val all = floatArrayOf(0f) + state.harmony.offsets
+                if (pick !in all.indices) pick = 0
+                val base = hue - all[pick]
+                val others = all.indices.filter { it != pick }.map { all[it] - all[pick] }.toFloatArray()
                 Spacer(Modifier.height(10.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                    HarmonyDisc(hue, sat, value, state.harmony.offsets, 200.dp) { h, s ->
+                    HarmonyDisc(hue, sat, value, others, 200.dp) { h, s ->
                         hue = h
                         sat = s
                         emit()
@@ -1378,18 +1386,17 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                     valueLabel = "${(value * 100).roundToInt()}%"
                 )
                 Spacer(Modifier.height(6.dp))
-                // The scheme as swatches: the current colour, then its partners.
-                // Tapping a partner makes it the colour (the scheme turns with it).
+                // The scheme as swatches, always in the same order; the one in
+                // use is outlined. Tapping another makes it the colour.
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    val partners = state.harmony.offsets.map { off ->
-                        android.graphics.Color.HSVToColor(
-                            floatArrayOf(((hue + off) % 360f + 360f) % 360f, sat.coerceIn(0f, 1f), value.coerceIn(0f, 1f))
+                    for ((i, off) in all.withIndex()) {
+                        val h = ((base + off) % 360f + 360f) % 360f
+                        val c = android.graphics.Color.HSVToColor(
+                            floatArrayOf(h, sat.coerceIn(0f, 1f), value.coerceIn(0f, 1f))
                         )
-                    }
-                    for ((i, c) in (listOf(current) + partners).withIndex()) {
                         Box(
                             Modifier
                                 .weight(1f)
@@ -1397,8 +1404,14 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(Color(c))
                                 .then(
-                                    if (i == 0) Modifier.border(2.dp, YumeColors.accent, RoundedCornerShape(10.dp))
-                                    else Modifier.clickable { adopt(c) }
+                                    if (i == pick) Modifier.border(2.dp, YumeColors.accent, RoundedCornerShape(10.dp))
+                                    else Modifier.clickable {
+                                        // Set the hue directly: a grey colour
+                                        // has no hue to read back.
+                                        pick = i
+                                        hue = h
+                                        emit()
+                                    }
                                 )
                         )
                     }
