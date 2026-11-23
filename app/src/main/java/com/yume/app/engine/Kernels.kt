@@ -173,6 +173,8 @@ object Kernels {
                 for (j in jobs) j.cancel(false)
                 throw e.cause ?: e
             }
+            // One batch can be the whole job (a preview): look again before writing.
+            OpCancel.check()
             for (k in 0 until used) {
                 val s = slots[k]
                 if (s.skip) continue

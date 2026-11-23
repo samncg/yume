@@ -4000,12 +4000,32 @@ class DrawingSession(
         // the working card like any other slow step.
         workSince = android.os.SystemClock.uptimeMillis()
         try {
-            applyPreviewInternal(kind, pendingPreviewAmount)
+            if (kind.isEffect) {
+                // Effects can take a while: the working card's Cancel (and the
+                // panel's) stops the preview and drops the adjustment.
+                previewRunning = true
+                cancellable({ cancelAdjustmentInternal() }) {
+                    previewArmedForTest?.invoke()
+                    applyPreviewInternal(kind, pendingPreviewAmount)
+                }
+            } else {
+                applyPreviewInternal(kind, pendingPreviewAmount)
+            }
         } finally {
+            previewRunning = false
             workSince = 0L
         }
         return true
     }
+
+    /** An effect preview is being made on the render thread now. */
+    @Volatile private var previewRunning = false
+
+    /** Harness: runs once the effect preview can be cancelled. */
+    @Volatile var previewArmedForTest: (() -> Unit)? = null
+
+    /** Harness: the adjustment pending now, or null. */
+    fun pendingAdjustForTest(): AdjustmentKind? = adjustKind
 
     /** The layer a pending preview belongs to (not whatever is active later). */
     private var adjustLayer: Layer? = null
@@ -4020,7 +4040,10 @@ class DrawingSession(
     private fun applyPreviewInternal(kind: AdjustmentKind, amount: Float) {
         val layer = (if (adjusting) adjustLayer?.takeIf { engine.layers.contains(it) } else null)
             ?: engine.activeLayer ?: return
-        if (!adjusting) adjustLayer = layer
+        if (!adjusting) {
+            adjustLayer = layer
+            dropEffectBase()
+        }
         if (!editable(layer)) return
         val store = layer.paintStore
         if (!adjusting) {
@@ -4208,6 +4231,9 @@ class DrawingSession(
     /** Small unfiltered copy of the layer the effect previews run on (at most 1024 px). */
     private var effectBase: Bitmap? = null
 
+    /** Harness: the current preview picture (effects), or null. */
+    fun previewProxyForTest(): Bitmap? = adjustProxy
+
     /**
      * An effect's preview: the same kernel as Apply, on a copy of the layer
      * at most 1024 px across, with its distances scaled to match.
@@ -4239,8 +4265,13 @@ class DrawingSession(
         val pc = Canvas(proxy)
         val src = Paint().apply { blendMode = BlendMode.SRC }
         pc.drawBitmap(base, 0f, 0f, src)
-        runEffect(kind, w, h, Rect(0, 0, w, h), amount, Kernels.bitmapSource(base)) { r, bmp ->
-            pc.drawBitmap(bmp, r.left.toFloat(), r.top.toFloat(), src)
+        try {
+            runEffect(kind, w, h, Rect(0, 0, w, h), amount, Kernels.bitmapSource(base)) { r, bmp ->
+                pc.drawBitmap(bmp, r.left.toFloat(), r.top.toFloat(), src)
+            }
+        } catch (t: Throwable) {
+            if (proxy !== reuse) proxy.recycle()
+            throw t
         }
         return proxy
     }
@@ -4319,6 +4350,8 @@ class DrawingSession(
     private fun commitAdjustmentInternal() = working { commitAdjustmentInternalWork() }
 
     private fun commitAdjustmentInternalWork() {
+        hasPendingPreview = false
+        dropEffectBase()
         val layer = adjustLayer?.takeIf { engine.layers.contains(it) } ?: engine.activeLayer
         adjustLayer = null
         val dense = adjustSnapshot
@@ -4556,6 +4589,8 @@ class DrawingSession(
     }
 
     private fun cancelAdjustmentInternal() {
+        hasPendingPreview = false
+        dropEffectBase()
         engine.applyPreview(null)
         adjustProxy?.recycle()
         adjustProxy = null
@@ -4584,9 +4619,27 @@ class DrawingSession(
         requestState()
     }
 
-    fun commitAdjustment() = post { commitAdjustmentInternal() }
+    /**
+     * Apply / Cancel drop any preview still waiting for its frame first: a slow
+     * effect's queued preview ran after a Cancel and brought the effect back.
+     */
+    fun commitAdjustment() {
+        hasPendingPreview = false
+        post { commitAdjustmentInternal() }
+    }
 
-    fun cancelAdjustment() = post { cancelAdjustmentInternal() }
+    fun cancelAdjustment() {
+        hasPendingPreview = false
+        // An effect preview still being made stops now instead of finishing first.
+        if (previewRunning) OpCancel.requested = true
+        post { cancelAdjustmentInternal() }
+    }
+
+    /** Drops the small copy effect previews run on (it shows the layer as it was). */
+    private fun dropEffectBase() {
+        effectBase?.recycle()
+        effectBase = null
+    }
 
     private fun blitFull(layer: Layer, source: Bitmap) {
         layer.tiles.writeRect(Rect(0, 0, engine.width, engine.height), source)

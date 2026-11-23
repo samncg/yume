@@ -4929,6 +4929,63 @@ object YumeHarness {
                 val undone = px().contentEquals(start) && engine.layers.size == 1
                 out.append("previewdraw $tag ${kind.name}: drawing blocked ${pass(blocked)}, zoom works ${pass(panned)}, apply goes to the previewed layer ${pass(applied && addedEmpty)}, undo ${pass(undone)}\n")
             }
+            // Slow effects: Cancel must stick, and every preview must show the
+            // layer as it is now.
+            for (kind in listOf(AdjustmentKind.Clouds, AdjustmentKind.Anime)) {
+                val n = 800
+                val engine = DrawingEngine(n, n)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val s = DrawingSession("pc", "PC", engine, History())
+                identityView(s, n, n)
+                val l = engine.layers[0]
+                l.tiles.withWriteCanvas(Rect(0, 0, n, n)) { c ->
+                    val p = Paint()
+                    p.shader = android.graphics.LinearGradient(0f, 0f, n.toFloat(), n.toFloat(), 0xFF2060A0.toInt(), 0xFFE0A040.toInt(), android.graphics.Shader.TileMode.CLAMP)
+                    c.drawRect(100f, 100f, 700f, 700f, p)
+                }
+                engine.markDirtyAll()
+                fun px(): IntArray {
+                    val b = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888)
+                    l.tiles.readRectInto(Rect(0, 0, n, n), b)
+                    val a = IntArray(n * n); b.getPixels(a, 0, n, 0, 0, n, n); b.recycle(); return a
+                }
+                val start = px()
+                fun clean() = s.pendingAdjustForTest() == null && s.previewProxyForTest() == null &&
+                    px().contentEquals(start) && s.history.appliedCount == 0
+                // 1. Cancel pressed while the preview is still being made.
+                s.previewArmedForTest = { com.yume.app.engine.OpCancel.requested = true }
+                s.previewAdjustment(kind, 0.8f)
+                s.consumePendingPreview()
+                s.previewArmedForTest = null
+                s.runCommands()
+                val stopped = clean() && !com.yume.app.engine.OpCancel.armed
+                // 2. Cancel pressed with a preview still queued for its frame.
+                s.previewAdjustment(kind, 0.8f)
+                s.consumePendingPreview()
+                s.previewAdjustment(kind, 0.9f)
+                s.cancelAdjustment()
+                s.runCommands()
+                s.consumePendingPreview()
+                s.runCommands()
+                val stays = clean()
+                // 3. The layer changes; the next preview shows the change.
+                l.tiles.withWriteCanvas(Rect(0, 0, n, n)) { c ->
+                    c.drawRect(250f, 250f, 550f, 550f, Paint().apply { color = 0xFFFF0000.toInt() })
+                }
+                engine.markDirtyAll()
+                // (Faint clouds, so the red underneath shows through.)
+                s.previewAdjustment(kind, if (kind == AdjustmentKind.Clouds) 0.1f else 0.8f)
+                s.consumePendingPreview()
+                s.runCommands()
+                val proxy = s.previewProxyForTest()
+                val fresh = proxy != null && run {
+                    val c = proxy.getPixel(proxy.width / 2, proxy.height / 2)
+                    ((c shr 16) and 0xFF) > 180 && ((c shr 8) and 0xFF) < 120 && (c and 0xFF) < 120
+                }
+                s.cancelAdjustment()
+                s.runCommands()
+                out.append("previewdraw $tag ${kind.name}: cancel while previewing ${pass(stopped)}, cancel sticks ${pass(stays)}, preview uses the current layer ${pass(fresh)}\n")
+            }
         } catch (t: Throwable) {
             out.append("previewdraw $tag: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
             Log.e("YumeHarness", "previewdraw", t)
