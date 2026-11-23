@@ -2940,6 +2940,156 @@ class DrawingSession(
         pushStructural(before, "Import image", EditKind.Import)
     }
 
+    // ---------------------------------------------------------- manga tools
+
+    /**
+     * Adds manga focus lines (wedges pointing at a centre) or speed lines
+     * (parallel streaks) as a new layer in the current colour.
+     *
+     * Focus lines leave a clear area: the selection's bounds when there is a
+     * selection, else an ellipse [clear] of the canvas across around its
+     * centre. Speed lines run at [angleDeg] and leave a band [clear] of the
+     * canvas wide through the centre. [thickness] is the widest end, in
+     * document px; [variation] scatters lengths and widths; [seed] makes
+     * the scatter repeatable.
+     */
+    fun addMangaLines(
+        speed: Boolean, count: Int, thickness: Float, clear: Float,
+        variation: Float, angleDeg: Float, seed: Long
+    ) = post {
+        if (!MemoryBudget.fitsDocument(engine.width, engine.height, engine.layers.size + 1)) {
+            onMessage?.invoke(MemoryBudget.documentRefusal(engine.width, engine.height, engine.layers.size + 1))
+            return@post
+        }
+        val w = engine.width.toFloat()
+        val h = engine.height.toFloat()
+        val rnd = java.util.Random(seed)
+        val v = variation.coerceIn(0f, 1f)
+        val path = Path()
+        if (!speed) {
+            val sel = engine.selection?.takeIf { !it.isEmpty }?.bounds
+            val cx = sel?.exactCenterX() ?: (w / 2f)
+            val cy = sel?.exactCenterY() ?: (h / 2f)
+            val rx = sel?.let { it.width() / 2f } ?: (w / 2f * clear.coerceIn(0f, 0.95f))
+            val ry = sel?.let { it.height() / 2f } ?: (h / 2f * clear.coerceIn(0f, 0.95f))
+            val far = hypot(w, h)
+            for (i in 0 until count) {
+                val a = (2.0 * Math.PI * (i + rnd.nextFloat() * 0.85f) / count).toFloat()
+                val ca = kotlin.math.cos(a)
+                val sa = kotlin.math.sin(a)
+                // Starts just outside the clear area, some further out.
+                val start = 1f + v * rnd.nextFloat() * 0.9f
+                val sx = cx + ca * rx * start
+                val sy = cy + sa * ry * start
+                val ex = cx + ca * far
+                val ey = cy + sa * far
+                val half = thickness * (1f - v * 0.7f + v * 0.7f * rnd.nextFloat() * 2f).coerceAtLeast(0.15f) / 2f
+                // Wedge: a point at the inner end, [half] either side at the outer.
+                val px = -sa
+                val py = ca
+                path.moveTo(sx, sy)
+                path.lineTo(ex + px * half, ey + py * half)
+                path.lineTo(ex - px * half, ey - py * half)
+                path.close()
+            }
+        } else {
+            val rad = Math.toRadians(angleDeg.toDouble())
+            val dx = kotlin.math.cos(rad).toFloat()
+            val dy = kotlin.math.sin(rad).toFloat()
+            val px = -dy
+            val py = dx
+            val span = abs(w * px) + abs(h * py)
+            val len = abs(w * dx) + abs(h * dy)
+            val band = span * clear.coerceIn(0f, 0.9f) / 2f
+            var made = 0
+            var tries = 0
+            while (made < count && tries < count * 20) {
+                tries++
+                val t = (rnd.nextFloat() - 0.5f) * span
+                if (abs(t) < band) continue
+                val along = (rnd.nextFloat() - 0.5f) * len * 0.8f
+                val l = len * (0.9f - v * 0.6f * rnd.nextFloat()) / 2f
+                val half = thickness * (1f - v * 0.7f + v * 0.7f * rnd.nextFloat() * 2f).coerceAtLeast(0.15f) / 2f
+                val mx = w / 2f + px * t + dx * along
+                val my = h / 2f + py * t + dy * along
+                // A long, thin lens: pointed at both ends.
+                path.moveTo(mx - dx * l, my - dy * l)
+                path.lineTo(mx + px * half, my + py * half)
+                path.lineTo(mx + dx * l, my + dy * l)
+                path.lineTo(mx - px * half, my - py * half)
+                path.close()
+                made++
+            }
+        }
+        val before = engine.snapshotState()
+        val layer = engine.newLayer(name = if (speed) "Speed lines" else "Focus lines", at = engine.activeIndex + 1)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = this@DrawingSession.color or 0xFF000000.toInt() }
+        // Focus lines never enter the selection (its real shape, not only
+        // the ellipse they are aimed along).
+        val keepOut = if (!speed) engine.selection?.takeIf { !it.isEmpty }?.let { SelectionUtil.regionFillPath(it) } else null
+        layer.tiles.withWriteCanvas(Rect(0, 0, engine.width, engine.height)) { c ->
+            val save = c.save()
+            if (keepOut != null) c.clipOutPath(keepOut)
+            c.drawPath(path, paint)
+            c.restoreToCount(save)
+        }
+        layer.touch()
+        engine.markDirtyAll()
+        pushStructural(before, if (speed) "Speed lines" else "Focus lines", EditKind.LayerAdd)
+        requestState()
+    }
+
+    /**
+     * Adds comic frames as a new layer: [rows] x [cols] panels inside a
+     * [margin] (fraction of the shorter side), [gutter] apart, with white
+     * gutters and margins and [border] px black borders; panel insides stay
+     * clear for drawing under.
+     */
+    fun addComicFrames(rows: Int, cols: Int, gutter: Float, margin: Float, border: Float) = post {
+        if (!MemoryBudget.fitsDocument(engine.width, engine.height, engine.layers.size + 1)) {
+            onMessage?.invoke(MemoryBudget.documentRefusal(engine.width, engine.height, engine.layers.size + 1))
+            return@post
+        }
+        val w = engine.width.toFloat()
+        val h = engine.height.toFloat()
+        val unit = min(w, h)
+        val m = unit * margin.coerceIn(0f, 0.3f)
+        val g = unit * gutter.coerceIn(0f, 0.2f)
+        val r = rows.coerceIn(1, 12)
+        val k = cols.coerceIn(1, 12)
+        val pw = (w - 2f * m - (k - 1) * g) / k
+        val ph = (h - 2f * m - (r - 1) * g) / r
+        if (pw < 4f || ph < 4f) {
+            onMessage?.invoke("Those frames do not fit: use fewer panels or smaller gutters.")
+            return@post
+        }
+        val panels = ArrayList<RectF>()
+        for (j in 0 until r) for (i in 0 until k) {
+            val l = m + i * (pw + g)
+            val t = m + j * (ph + g)
+            panels.add(RectF(l, t, l + pw, t + ph))
+        }
+        val before = engine.snapshotState()
+        val layer = engine.newLayer(name = "Frames", at = engine.activeIndex + 1)
+        val white = Paint().apply { color = 0xFFFFFFFF.toInt() }
+        val clearP = Paint().apply { blendMode = BlendMode.CLEAR }
+        val line = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = border.coerceAtLeast(0.5f)
+            color = 0xFF000000.toInt()
+            strokeJoin = Paint.Join.MITER
+        }
+        layer.tiles.withWriteCanvas(Rect(0, 0, engine.width, engine.height)) { c ->
+            c.drawRect(0f, 0f, w, h, white)
+            for (p in panels) c.drawRect(p, clearP)
+            for (p in panels) c.drawRect(p, line)
+        }
+        layer.touch()
+        engine.markDirtyAll()
+        pushStructural(before, "Comic frames", EditKind.LayerAdd)
+        requestState()
+    }
+
     /** Where the text tool was tapped (document px), waiting for the text dialog. */
     val textRequest = kotlinx.coroutines.flow.MutableStateFlow<FloatArray?>(null)
 

@@ -76,6 +76,7 @@ glass, and every gesture, button and default can be changed in Settings.
   live preview on one layer or all of them.
 - Guides: grids, perspective with vanishing points, rulers, mirror and radial
   symmetry.
+- Manga focus and speed lines, and comic frames, each added as a new layer.
 
 ### Made for the pen
 - Two-finger tap to undo, three to redo, four to hide the interface.

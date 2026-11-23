@@ -210,6 +210,8 @@ object YumeHarness {
                     out.append(scoreOverlayTest())
                 } else if (only == "hoist") {
                     out.append(scoreHoist())
+                } else if (only == "manga") {
+                    out.append(scoreManga())
                 } else if (only == "effects") {
                     out.append(scoreEffects())
                 } else if (only == "clone") {
@@ -4850,6 +4852,79 @@ object YumeHarness {
             Log.e("YumeHarness", "psd", t)
         } finally {
             made.forEach { store.deleteProject(it) }
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /** Manga focus and speed lines, and comic frames: where ink goes and where it must not. */
+    private fun scoreManga(): String {
+        val out = StringBuilder()
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        try {
+            val n = 1024
+            fun doc(): Pair<DrawingSession, DrawingEngine> {
+                val engine = DrawingEngine(n, n)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val session = DrawingSession("mg", "MG", engine, History())
+                identityView(session, n, n)
+                session.runCommands()
+                session.chooseColor(0xFF101010.toInt())
+                session.runCommands()
+                return session to engine
+            }
+            fun alpha(l: Layer, x: Int, y: Int) = l.tiles.getPixel(x, y) ushr 24
+            fun inked(l: Layer, r: Rect, step: Int = 4): Int {
+                var c = 0
+                for (y in r.top until r.bottom step step) for (x in r.left until r.right step step) if (alpha(l, x, y) > 0) c++
+                return c
+            }
+            run {
+                val (s, e) = doc()
+                s.addMangaLines(false, 160, 6f, 0.5f, 0.5f, 0f, 42L)
+                s.runCommands()
+                val l = e.layers.last()
+                val centre = inked(l, Rect(400, 400, 624, 624))
+                val edge = inked(l, Rect(0, 0, n, 60))
+                out.append("manga: focus lines leave the centre clear: ${pass(e.layers.size == 2 && l.name == "Focus lines" && centre == 0 && edge > 50)} (centre $centre, edge $edge)\n")
+                s.undo(); s.runCommands()
+                out.append("manga: undo removes the lines: ${pass(e.layers.size == 1)}\n")
+                // With a selection: the lines stop at it.
+                e.setSelection(Region(100, 600, 400, 900))
+                s.addMangaLines(false, 160, 6f, 0.5f, 0.5f, 0f, 7L)
+                s.runCommands()
+                val l2 = e.layers.last()
+                val inSel = inked(l2, Rect(110, 610, 390, 890))
+                out.append("manga: focus lines stop at the selection: ${pass(inSel == 0 && inked(l2, Rect(600, 0, n, 300)) > 50)} (inside $inSel)\n")
+            }
+            run {
+                val (s, e) = doc()
+                s.addMangaLines(true, 200, 4f, 0.3f, 0.5f, 0f, 3L)
+                s.runCommands()
+                val l = e.layers.last()
+                val band = inked(l, Rect(0, 512 - 140, n, 512 + 140), 3)
+                val rest = inked(l, Rect(0, 0, n, 300), 3)
+                out.append("manga: speed lines leave a clear band: ${pass(l.name == "Speed lines" && band == 0 && rest > 50)} (band $band, rest $rest)\n")
+            }
+            run {
+                val (s, e) = doc()
+                s.addComicFrames(2, 2, 0.04f, 0.05f, 6f)
+                s.runCommands()
+                val l = e.layers.last()
+                val gutter = l.tiles.getPixel(n / 2, n / 2)
+                val inside = alpha(l, 250, 250)
+                // The left border of the top-left panel sits at the margin (51 px).
+                val m = (n * 0.05f).toInt()
+                val borderPx = l.tiles.getPixel(m + 1, 250)
+                val ok = gutter == 0xFFFFFFFF.toInt() && inside == 0 && (borderPx ushr 24) > 200 && (borderPx and 0xFFFFFF) < 0x303030
+                out.append("manga: comic frames (white gutters, clear panels, black borders): ${pass(l.name == "Frames" && ok)} (gutter ${Integer.toHexString(gutter)}, inside $inside, border ${Integer.toHexString(borderPx)})\n")
+            }
+        } catch (t: Throwable) {
+            out.append("manga: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e("YumeHarness", "manga", t)
+        } finally {
             TileStoreConfig.useSparseLayers = oldS
         }
         return out.toString()
