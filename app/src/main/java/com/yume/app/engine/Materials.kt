@@ -101,9 +101,10 @@ class Material(
     }
 
     /** Ink coverage 0..1 at pixel ([x], [y]) (its centre is sampled). */
-    fun coverage(x: Int, y: Int): Float {
-        val px = x + 0.5f
-        val py = y + 0.5f
+    fun coverage(x: Int, y: Int): Float = coverageAt(x + 0.5f, y + 0.5f)
+
+    /** Ink coverage 0..1 at document point ([px], [py]) (previews sample between pixels). */
+    fun coverageAt(px: Float, py: Float): Float {
         val u = px * ca + py * sa
         val v = -px * sa + py * ca
         return when (kind) {
@@ -183,7 +184,7 @@ class Material(
             }
             MaterialKind.Speckle -> {
                 val n = fbm(px / s, py / s, 3)
-                val dots = if (hash(x, y) > 1f - 0.04f * t) 1f else 0f
+                val dots = if (hash(fastFloor(px), fastFloor(py)) > 1f - 0.04f * t) 1f else 0f
                 max(((n - (0.78f - 0.3f * t)) * 10f).coerceIn(0f, 1f), dots)
             }
             MaterialKind.Wood -> {

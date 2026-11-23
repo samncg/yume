@@ -76,6 +76,11 @@ data class EditorUiState(
     /** The adjustment being previewed and not yet applied, and its amount. */
     val pendingAdjust: AdjustmentKind? = null,
     val pendingAdjustAmount: Float = 0f,
+    /** Manga lines, comic frames or a material previewed and not yet added. */
+    val pendingInsert: InsertKind? = null,
+    val manga: MangaParams = MangaParams(),
+    val material: MaterialParams = MaterialParams(),
+    val frames: FramesLayout = FramesLayout(),
     val colorMode: ColorMode = ColorMode.Wheel,
     val harmony: Harmony = Harmony.Complementary,
     /** Bumped whenever the document changes; drives debounced autosave. */

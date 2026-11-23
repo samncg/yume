@@ -214,6 +214,17 @@ class DrawingSession(
      * entry when persisting a sparse edit (before + after). */
     private val PERSIST_PATCH_BUDGET = 64L * 1024L * 1024L
 
+    // The settings of each Effects-panel insert (manga lines, materials,
+    // frames), kept while the session lasts; the panel shows them again when
+    // it reopens. Declared before anything builds the UI state.
+    @Volatile private var mangaParams = MangaParams()
+    @Volatile private var materialParams = MaterialParams()
+    @Volatile private var framesLayout = FramesLayout.presets[0].second
+
+    /** What the panel wants previewed (null: nothing); taken up once per frame. */
+    @Volatile private var insertRequested: InsertKind? = null
+    @Volatile private var insertDirty = false
+
     private val _uiState = MutableStateFlow(EditorUiState(loaded = true, title = title))
     val uiState: StateFlow<EditorUiState> = _uiState.asStateFlow()
 
@@ -1027,6 +1038,9 @@ class DrawingSession(
                 wandDownX = event.x
                 wandDownY = event.y
                 when {
+                    // A previewed insert takes one-finger touches (frames are
+                    // laid out, focus lines aimed); two fingers still pan.
+                    inserting -> insertDown(event.x, event.y, doc[0], doc[1])
                     tryHandleDrag(doc[0], doc[1]) -> Unit
                     tryGuideDrag(doc[0], doc[1]) -> Unit
                     tool == Tool.Selection -> beginSelectionOrMove(doc[0], doc[1])
@@ -1055,6 +1069,14 @@ class DrawingSession(
                 for (i in event.xs.indices) {
                     view.toDocument(event.xs[i], event.ys[i], doc)
                     when {
+                        centerDragging -> {
+                            moveCenter(doc[0], doc[1])
+                            changed = true
+                        }
+                        framesDrag != 0 -> {
+                            framesMove(doc[0], doc[1])
+                            changed = true
+                        }
                         draggingHandle != NO_HANDLE -> {
                             moveHandle(doc[0], doc[1])
                             changed = true
@@ -1171,6 +1193,8 @@ class DrawingSession(
                     }
                 }
                 when {
+                    centerDragging -> centerDragging = false
+                    framesDrag != 0 -> framesUp()
                     draggingHandle != NO_HANDLE -> {
                         draggingHandle = NO_HANDLE
                         touchProperties()
@@ -1297,6 +1321,10 @@ class DrawingSession(
             }
 
             InputEvent.CancelStroke -> {
+                // A touch that became a pan: an insert edit it began is dropped.
+                centerDragging = false
+                framesDrag = 0
+                framesGhost = null
                 if (painter.isActive) {
                     painter.cancel()
                     painter.releaseTileCapture()
@@ -2964,205 +2992,512 @@ class DrawingSession(
         pushStructural(before, "Import image", EditKind.Import)
     }
 
-    // ---------------------------------------------------------- manga tools
+    // ------------------------------------------------- manga, frames, materials
 
     /**
-     * Adds manga focus lines (wedges pointing at a centre) or speed lines
-     * (parallel streaks) as a new layer in the current colour.
-     *
-     * Focus lines leave a clear area: the selection's bounds when there is a
-     * selection, else an ellipse [clear] of the canvas across around its
-     * centre. Speed lines run at [angleDeg] and leave a band [clear] of the
-     * canvas wide through the centre. [thickness] is the widest end, in
-     * document px; [variation] scatters lengths and widths; [seed] makes
-     * the scatter repeatable.
+     * Adds manga focus lines or speed lines as a new layer in the current
+     * colour at once (no preview; see [previewManga]). [thickness] is the
+     * widest end in document px.
      */
     fun addMangaLines(
         speed: Boolean, count: Int, thickness: Float, clear: Float,
         variation: Float, angleDeg: Float, seed: Long
     ) = post {
-        if (!MemoryBudget.fitsDocument(engine.width, engine.height, engine.layers.size + 1)) {
-            onMessage?.invoke(MemoryBudget.documentRefusal(engine.width, engine.height, engine.layers.size + 1))
-            return@post
-        }
-        val w = engine.width.toFloat()
-        val h = engine.height.toFloat()
-        val rnd = java.util.Random(seed)
-        val v = variation.coerceIn(0f, 1f)
-        val path = Path()
-        if (!speed) {
-            val sel = engine.selection?.takeIf { !it.isEmpty }?.bounds
-            val cx = sel?.exactCenterX() ?: (w / 2f)
-            val cy = sel?.exactCenterY() ?: (h / 2f)
-            val rx = sel?.let { it.width() / 2f } ?: (w / 2f * clear.coerceIn(0f, 0.95f))
-            val ry = sel?.let { it.height() / 2f } ?: (h / 2f * clear.coerceIn(0f, 0.95f))
-            val far = hypot(w, h)
-            for (i in 0 until count) {
-                val a = (2.0 * Math.PI * (i + rnd.nextFloat() * 0.85f) / count).toFloat()
-                val ca = kotlin.math.cos(a)
-                val sa = kotlin.math.sin(a)
-                // Starts just outside the clear area, some further out.
-                val start = 1f + v * rnd.nextFloat() * 0.9f
-                val sx = cx + ca * rx * start
-                val sy = cy + sa * ry * start
-                val ex = cx + ca * far
-                val ey = cy + sa * far
-                val half = thickness * (1f - v * 0.7f + v * 0.7f * rnd.nextFloat() * 2f).coerceAtLeast(0.15f) / 2f
-                // Wedge: a point at the inner end, [half] either side at the outer.
-                val px = -sa
-                val py = ca
-                path.moveTo(sx, sy)
-                path.lineTo(ex + px * half, ey + py * half)
-                path.lineTo(ex - px * half, ey - py * half)
-                path.close()
-            }
-        } else {
-            val rad = Math.toRadians(angleDeg.toDouble())
-            val dx = kotlin.math.cos(rad).toFloat()
-            val dy = kotlin.math.sin(rad).toFloat()
-            val px = -dy
-            val py = dx
-            val span = abs(w * px) + abs(h * py)
-            val len = abs(w * dx) + abs(h * dy)
-            val band = span * clear.coerceIn(0f, 0.9f) / 2f
-            var made = 0
-            var tries = 0
-            while (made < count && tries < count * 20) {
-                tries++
-                val t = (rnd.nextFloat() - 0.5f) * span
-                if (abs(t) < band) continue
-                val along = (rnd.nextFloat() - 0.5f) * len * 0.8f
-                val l = len * (0.9f - v * 0.6f * rnd.nextFloat()) / 2f
-                val half = thickness * (1f - v * 0.7f + v * 0.7f * rnd.nextFloat() * 2f).coerceAtLeast(0.15f) / 2f
-                val mx = w / 2f + px * t + dx * along
-                val my = h / 2f + py * t + dy * along
-                // A long, thin lens: pointed at both ends.
-                path.moveTo(mx - dx * l, my - dy * l)
-                path.lineTo(mx + px * half, my + py * half)
-                path.lineTo(mx + dx * l, my + dy * l)
-                path.lineTo(mx - px * half, my - py * half)
-                path.close()
-                made++
-            }
-        }
-        val before = engine.snapshotState()
-        val layer = engine.newLayer(name = if (speed) "Speed lines" else "Focus lines", at = engine.activeIndex + 1)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = this@DrawingSession.color or 0xFF000000.toInt() }
-        // Focus lines never enter the selection (its real shape, not only
-        // the ellipse they are aimed along).
-        val keepOut = if (!speed) engine.selection?.takeIf { !it.isEmpty }?.let { SelectionUtil.regionFillPath(it) } else null
-        layer.tiles.withWriteCanvas(Rect(0, 0, engine.width, engine.height)) { c ->
-            val save = c.save()
-            if (keepOut != null) c.clipOutPath(keepOut)
-            c.drawPath(path, paint)
-            c.restoreToCount(save)
-        }
-        layer.touch()
-        engine.markDirtyAll()
-        pushStructural(before, if (speed) "Speed lines" else "Focus lines", EditKind.LayerAdd)
-        requestState()
+        val p = MangaParams(speed, count, thickness, clear, variation, angleDeg, seed)
+        bakeInsert(MangaArt.build(p, engine.width, engine.height, engine.selection, color))
     }
 
-    /**
-     * Adds comic frames as a new layer: [rows] x [cols] panels inside a
-     * [margin] (fraction of the shorter side), [gutter] apart, with white
-     * gutters and margins and [border] px black borders; panel insides stay
-     * clear for drawing under.
-     */
+    /** Adds a [rows] x [cols] grid of comic panels as a new layer at once. */
     fun addComicFrames(rows: Int, cols: Int, gutter: Float, margin: Float, border: Float) = post {
-        if (!MemoryBudget.fitsDocument(engine.width, engine.height, engine.layers.size + 1)) {
-            onMessage?.invoke(MemoryBudget.documentRefusal(engine.width, engine.height, engine.layers.size + 1))
-            return@post
-        }
-        val w = engine.width.toFloat()
-        val h = engine.height.toFloat()
-        val unit = min(w, h)
-        val m = unit * margin.coerceIn(0f, 0.3f)
-        val g = unit * gutter.coerceIn(0f, 0.2f)
-        val r = rows.coerceIn(1, 12)
-        val k = cols.coerceIn(1, 12)
-        val pw = (w - 2f * m - (k - 1) * g) / k
-        val ph = (h - 2f * m - (r - 1) * g) / r
-        if (pw < 4f || ph < 4f) {
+        val layout = FramesLayout(cols.coerceIn(1, 12), rows.coerceIn(1, 12), gutter, margin, border).fillEmpty()
+        if (!layout.fits(engine.width, engine.height)) {
             onMessage?.invoke("Those frames do not fit: use fewer panels or smaller gutters.")
             return@post
         }
-        val panels = ArrayList<RectF>()
-        for (j in 0 until r) for (i in 0 until k) {
-            val l = m + i * (pw + g)
-            val t = m + j * (ph + g)
-            panels.add(RectF(l, t, l + pw, t + ph))
-        }
-        val before = engine.snapshotState()
-        val layer = engine.newLayer(name = "Frames", at = engine.activeIndex + 1)
-        val white = Paint().apply { color = 0xFFFFFFFF.toInt() }
-        val clearP = Paint().apply { blendMode = BlendMode.CLEAR }
-        val line = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = border.coerceAtLeast(0.5f)
-            color = 0xFF000000.toInt()
-            strokeJoin = Paint.Join.MITER
-        }
-        layer.tiles.withWriteCanvas(Rect(0, 0, engine.width, engine.height)) { c ->
-            c.drawRect(0f, 0f, w, h, white)
-            for (p in panels) c.drawRect(p, clearP)
-            for (p in panels) c.drawRect(p, line)
-        }
-        layer.touch()
-        engine.markDirtyAll()
-        pushStructural(before, "Comic frames", EditKind.LayerAdd)
-        requestState()
+        bakeInsert(FramesArt.build(layout, engine.width, engine.height))
     }
 
     /**
      * Adds a material (tone, pattern or texture, see [Material]) as a new
-     * layer: over the selection when there is one, else the whole canvas.
-     * [ink] is 0 for the current colour, 1 black, 2 white. Can be stopped
-     * from the working card on a big canvas.
+     * layer at once: over the selection when there is one, else the whole
+     * canvas. [ink] is 0 for the current colour, 1 black, 2 white.
      */
     fun addMaterial(kind: MaterialKind, size: Float, angleDeg: Float, density: Float, ink: Int, seed: Int) = post {
+        val p = MaterialParams(kind, size, angleDeg, density, ink, seed)
+        bakeInsert(MaterialArt.build(p, engine.width, engine.height, engine.selection, color))
+    }
+
+    /**
+     * Paints [art] into a new layer above the active one, as one undo step.
+     * It can be stopped from the working card (the half-made layer goes).
+     */
+    private fun bakeInsert(art: InsertArt) {
         if (!MemoryBudget.fitsDocument(engine.width, engine.height, engine.layers.size + 1)) {
             onMessage?.invoke(MemoryBudget.documentRefusal(engine.width, engine.height, engine.layers.size + 1))
-            return@post
-        }
-        val full = Rect(0, 0, engine.width, engine.height)
-        val sel = engine.selection?.takeIf { !it.isEmpty }
-        val area = sel?.bounds?.let { Rect(it) }?.takeIf { it.intersect(full) } ?: full
-        val material = Material(kind, size, angleDeg, density, area, seed)
-        val color = when (ink) {
-            1 -> 0xFF000000.toInt()
-            2 -> 0xFFFFFFFF.toInt()
-            else -> this@DrawingSession.color or 0xFF000000.toInt()
+            return
         }
         val before = engine.snapshotState()
-        val layer = engine.newLayer(name = kind.label, at = engine.activeIndex + 1)
+        val layer = engine.newLayer(name = art.label, at = engine.activeIndex + 1)
         val done = working {
             cancellable({ LayersAction(before, engine.snapshotState(), "", EditKind.LayerAdd).undo(engine) }) {
                 armedForTest?.invoke()
-                Kernels.generate(engine.width, engine.height, area, { chunk, out -> material.fill(chunk, color, out) }) { r, bmp ->
-                    layer.tiles.writeRect(r, bmp, Rect(0, 0, r.width(), r.height()))
-                }
-                // Only inside the selection's real shape, not just its bounds.
-                if (sel != null) {
-                    val keep = SelectionUtil.regionFillPath(sel)
-                    layer.tiles.withWriteCanvas(area) { c ->
-                        val save = c.save()
-                        c.clipOutPath(keep)
-                        c.drawColor(0, BlendMode.CLEAR)
-                        c.restoreToCount(save)
-                    }
-                }
+                art.bake(layer)
             }
         }
         if (!done) {
             engine.markDirtyAll()
             requestState()
-            return@post
+            return
         }
         layer.touch()
         engine.markDirtyAll()
-        pushStructural(before, kind.label, EditKind.LayerAdd)
+        pushStructural(before, art.label, EditKind.LayerAdd)
         requestState()
+    }
+
+
+    /** What is previewed now (render thread). */
+    private var insertKind: InsertKind? = null
+    private var insertArt: InsertArt? = null
+    private var insertColor = 0
+    private var insertOverview: Bitmap? = null
+    private var insertOverviewScale = 1f
+    private var insertPatch: Bitmap? = null
+    private var insertPatchRect: RectF? = null
+    private var insertAbove = 0L
+    private val insertGen = java.util.concurrent.atomic.AtomicInteger()
+    private var patchKey: String? = null
+    private var patchViewKey: String? = null
+    private var patchViewSince = 0L
+    private val patchExecutor by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "yume-insert-patch").apply { isDaemon = true } }
+    }
+
+    /** Previews manga lines with [p] (focus or speed lines by [MangaParams.speed]). */
+    fun previewManga(p: MangaParams) {
+        mangaParams = p
+        requestInsert(if (p.speed) InsertKind.SpeedLines else InsertKind.FocusLines)
+    }
+
+    fun previewMaterial(p: MaterialParams) {
+        materialParams = p
+        requestInsert(InsertKind.Material)
+    }
+
+    /** Previews comic frames laid out as [layout] (also changed by dragging on the canvas). */
+    fun previewFrames(layout: FramesLayout) {
+        framesLayout = layout
+        requestInsert(InsertKind.Frames)
+    }
+
+    private fun requestInsert(kind: InsertKind) {
+        insertRequested = kind
+        insertDirty = true
+        wakeListener?.invoke()
+    }
+
+    /** Adds the previewed insert as a new layer. */
+    fun applyInsert() {
+        insertDirty = false
+        post { applyInsertInternal() }
+    }
+
+    fun cancelInsert() {
+        insertDirty = false
+        insertRequested = null
+        post { cancelInsertInternal() }
+    }
+
+    fun mangaParamsNow(): MangaParams = mangaParams
+    fun materialParamsNow(): MaterialParams = materialParams
+    fun framesLayoutNow(): FramesLayout = framesLayout
+
+    /** Harness: what is previewed now. */
+    fun insertKindForTest(): InsertKind? = insertKind
+
+    private fun buildInsertArt(kind: InsertKind): InsertArt? = when (kind) {
+        InsertKind.FocusLines, InsertKind.SpeedLines ->
+            MangaArt.build(mangaParams, engine.width, engine.height, engine.selection, color)
+        InsertKind.Material ->
+            MaterialArt.build(materialParams, engine.width, engine.height, engine.selection, color)
+        InsertKind.Frames -> {
+            val l = framesLayout
+            if (!l.fits(engine.width, engine.height)) {
+                onMessage?.invoke("Those frames do not fit: use fewer rows or columns, or smaller gutters.")
+                null
+            } else FramesArt.build(l, engine.width, engine.height)
+        }
+    }
+
+    /** Uses the current colour (so a colour change redraws the preview). */
+    private fun usesColor(kind: InsertKind): Boolean = when (kind) {
+        InsertKind.FocusLines, InsertKind.SpeedLines -> true
+        InsertKind.Material -> materialParams.ink == 0
+        InsertKind.Frames -> false
+    }
+
+    /** Render thread, once per frame: brings the insert preview up to date. True while it is busy. */
+    private fun tickInsert(): Boolean {
+        if (insertDirty) {
+            insertDirty = false
+            val k = insertRequested
+            if (k == null) {
+                if (insertKind != null) cancelInsertInternal()
+                return false
+            }
+            showInsert(k)
+            return true
+        }
+        val k = insertKind ?: return false
+        if (usesColor(k) && insertColor != color) {
+            showInsert(k)
+            return true
+        }
+        // The new layer goes above the active one: follow it.
+        val above = engine.activeLayer?.id ?: 0L
+        if (above != insertAbove) applyInsertPreview()
+        return updatePatch()
+    }
+
+    private fun showInsert(kind: InsertKind) {
+        // One preview at a time: a pending adjustment goes, as when another
+        // adjustment is chosen.
+        if (adjusting) cancelAdjustmentInternal()
+        val art = buildInsertArt(kind) ?: run {
+            // Nothing to show (frames that do not fit): nothing is pending
+            // either, unless an earlier preview is still up.
+            if (insertKind == null) {
+                insertRequested = null
+                requestState()
+            }
+            return
+        }
+        insertKind = kind
+        insertArt = art
+        insertColor = color
+        val limit = if (kind == InsertKind.Material) 1024f else 2048f
+        val scale = minOf(1f, limit / maxOf(engine.width, engine.height))
+        val w = max(1, (engine.width * scale).toInt())
+        val h = max(1, (engine.height * scale).toInt())
+        val reuse = insertOverview
+        val bmp = if (reuse != null && !reuse.isRecycled && reuse.width == w && reuse.height == h) reuse
+        else Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        workSince = android.os.SystemClock.uptimeMillis()
+        try {
+            art.render(bmp, 0f, 0f, w.toFloat() / engine.width)
+        } finally {
+            workSince = 0L
+        }
+        if (bmp !== reuse) reuse?.recycle()
+        insertOverview = bmp
+        insertOverviewScale = w.toFloat() / engine.width
+        // The sharp patch belonged to the old art.
+        insertGen.incrementAndGet()
+        val oldPatch = insertPatch
+        insertPatch = null
+        insertPatchRect = null
+        patchKey = null
+        applyInsertPreview()
+        oldPatch?.recycle()
+        requestState()
+    }
+
+    private fun applyInsertPreview() {
+        val overview = insertOverview ?: return
+        insertAbove = engine.activeLayer?.id ?: 0L
+        engine.applyPreview(
+            LayerPreview(LayerPreview.NO_LAYER, null, null, InsertImage(insertAbove, overview, insertPatch, insertPatchRect))
+        )
+    }
+
+    /**
+     * Zoomed in past the overview's detail, a sharp copy of what is on
+     * screen is drawn in the background once the view stops moving.
+     */
+    private fun updatePatch(): Boolean {
+        val art = insertArt ?: return false
+        val scale = minOf(1f, view.scale)
+        if (scale <= insertOverviewScale * 1.25f) {
+            if (insertPatch != null) {
+                insertGen.incrementAndGet()
+                val old = insertPatch
+                insertPatch = null
+                insertPatchRect = null
+                patchKey = null
+                applyInsertPreview()
+                old?.recycle()
+            }
+            return false
+        }
+        val pts = floatArrayOf(0f, 0f, view.viewWidth.toFloat(), 0f, view.viewWidth.toFloat(), view.viewHeight.toFloat(), 0f, view.viewHeight.toFloat())
+        val d = FloatArray(2)
+        var l = Float.MAX_VALUE; var t = Float.MAX_VALUE; var r = -Float.MAX_VALUE; var b = -Float.MAX_VALUE
+        for (i in 0 until 4) {
+            view.toDocument(pts[i * 2], pts[i * 2 + 1], d)
+            l = min(l, d[0]); t = min(t, d[1]); r = max(r, d[0]); b = max(b, d[1])
+        }
+        val padX = (r - l) * 0.1f
+        val padY = (b - t) * 0.1f
+        val rect = Rect(
+            max(0, (l - padX).toInt()), max(0, (t - padY).toInt()),
+            min(engine.width, (r + padX).toInt() + 1), min(engine.height, (b + padY).toInt() + 1)
+        )
+        if (rect.isEmpty) return false
+        var s = scale
+        // At most about 8 megapixels.
+        val px = rect.width().toFloat() * rect.height() * s * s
+        if (px > 8e6f) s *= kotlin.math.sqrt(8e6f / px)
+        val key = "${rect.left},${rect.top},${rect.right},${rect.bottom},${(s * 1000).toInt()}"
+        if (key == patchKey) return false
+        val now = android.os.SystemClock.uptimeMillis()
+        if (key != patchViewKey) {
+            patchViewKey = key
+            patchViewSince = now
+            return true
+        }
+        if (now - patchViewSince < 120L) return true
+        patchKey = key
+        val gen = insertGen.get()
+        val w = max(1, (rect.width() * s).toInt())
+        val h = max(1, (rect.height() * s).toInt())
+        val drawScale = w.toFloat() / rect.width()
+        val left = rect.left.toFloat()
+        val top = rect.top.toFloat()
+        val target = RectF(rect)
+        patchExecutor.execute {
+            val bmp = try {
+                Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { art.render(it, left, top, drawScale) }
+            } catch (t: Throwable) {
+                android.util.Log.w("Yume", "insert preview patch failed", t)
+                null
+            } ?: return@execute
+            post {
+                if (gen == insertGen.get() && insertKind != null) {
+                    val old = insertPatch
+                    insertPatch = bmp
+                    insertPatchRect = target
+                    applyInsertPreview()
+                    old?.recycle()
+                } else bmp.recycle()
+            }
+        }
+        return false
+    }
+
+    private fun clearInsertPreview() {
+        insertGen.incrementAndGet()
+        if (insertKind != null && engine.preview?.insert != null) engine.applyPreview(null)
+        insertKind = null
+        insertArt = null
+        insertOverview?.recycle()
+        insertOverview = null
+        insertPatch?.recycle()
+        insertPatch = null
+        insertPatchRect = null
+        patchKey = null
+        framesDrag = 0
+        framesGhost = null
+        centerDragging = false
+    }
+
+    private fun applyInsertInternal() {
+        val k = insertRequested ?: insertKind
+        insertRequested = null
+        insertDirty = false
+        if (k == null) return
+        val art = buildInsertArt(k)
+        clearInsertPreview()
+        if (art != null) bakeInsert(art) else requestState()
+    }
+
+    private fun cancelInsertInternal() {
+        insertRequested = null
+        insertDirty = false
+        clearInsertPreview()
+        requestState()
+    }
+
+    /** An insert preview is waiting for Apply or Cancel. */
+    private val inserting: Boolean get() = insertKind != null || insertRequested != null
+
+    // ------------------------------------------- editing on the canvas
+
+    /** Focus lines: the centre being dragged. */
+    private var centerDragging = false
+
+    // Frames: 1 = drawing a new panel, 2 = moving one, 3 = resizing one.
+    private var framesDrag = 0
+    private var framesIndex = -1
+    private var framesStart = IntArray(2)
+    private var framesGrab = IntArray(2)
+    private var framesGhost: FramePanel? = null
+    private var framesGhostValid = true
+    private var framesMoved = false
+    private var framesWasSelected = false
+
+    /** How near (screen px) a touch must land to grab a handle. */
+    private val HANDLE_HIT = 46f
+
+    private fun nearOnScreen(dx: Float, dy: Float, sx: Float, sy: Float): Boolean {
+        val p = FloatArray(2)
+        view.toScreen(dx, dy, p)
+        return hypot(p[0] - sx, p[1] - sy) <= HANDLE_HIT
+    }
+
+    /** A touch while an insert is previewed: edits it, or is refused. */
+    private fun insertDown(sx: Float, sy: Float, x: Float, y: Float) {
+        when (insertKind) {
+            InsertKind.Frames -> framesDown(sx, sy, x, y)
+            InsertKind.FocusLines -> if (engine.selection?.isEmpty == false) {
+                onMessage?.invoke("Focus lines aim at the selection. Clear it to aim them anywhere.")
+            } else {
+                centerDragging = true
+                moveCenter(x, y)
+            }
+            else -> blockedByPreview()
+        }
+    }
+
+    private fun moveCenter(x: Float, y: Float) {
+        mangaParams = mangaParams.copy(
+            centerX = x.coerceIn(0f, engine.width.toFloat()),
+            centerY = y.coerceIn(0f, engine.height.toFloat())
+        )
+        insertDirty = true
+        requestState()
+    }
+
+    private fun framesDown(sx: Float, sy: Float, x: Float, y: Float) {
+        val l = framesLayout
+        val geo = l.geometry(engine.width, engine.height)
+        framesMoved = false
+        // The selected panel's delete button.
+        if (l.selected in l.panels.indices) {
+            val r = l.rectOf(l.panels[l.selected], geo)
+            if (nearOnScreen(r.right, r.top, sx, sy)) {
+                setFrames(l.copy(panels = l.panels.filterIndexed { i, _ -> i != l.selected }, selected = -1))
+                return
+            }
+        }
+        // A corner handle: resize.
+        for ((i, p) in l.panels.withIndex()) {
+            val r = l.rectOf(p, geo)
+            if (nearOnScreen(r.right, r.bottom, sx, sy)) {
+                framesDrag = 3
+                framesIndex = i
+                framesGhost = p
+                framesGhostValid = true
+                framesWasSelected = l.selected == i
+                framesLayout = l.copy(selected = i)
+                requestState()
+                return
+            }
+        }
+        val cell = l.cellAt(x, y, geo)
+        for ((i, p) in l.panels.withIndex()) {
+            if (l.rectOf(p, geo).contains(x, y)) {
+                framesDrag = 2
+                framesIndex = i
+                framesGrab = intArrayOf(cell[0] - p.col, cell[1] - p.row)
+                framesGhost = p
+                framesGhostValid = true
+                framesWasSelected = l.selected == i
+                framesLayout = l.copy(selected = i)
+                requestState()
+                return
+            }
+        }
+        framesDrag = 1
+        framesIndex = -1
+        framesStart = cell
+        val p = FramePanel(cell[0], cell[1], 1, 1)
+        framesGhost = p
+        framesGhostValid = l.valid(p)
+    }
+
+    private fun framesMove(x: Float, y: Float) {
+        val l = framesLayout
+        val geo = l.geometry(engine.width, engine.height)
+        val cell = l.cellAt(x, y, geo)
+        val old = framesGhost ?: return
+        val next = when (framesDrag) {
+            1 -> FramePanel(
+                min(framesStart[0], cell[0]), min(framesStart[1], cell[1]),
+                abs(cell[0] - framesStart[0]) + 1, abs(cell[1] - framesStart[1]) + 1
+            )
+            2 -> {
+                val p = l.panels.getOrNull(framesIndex) ?: return
+                p.copy(
+                    col = (cell[0] - framesGrab[0]).coerceIn(0, l.cols - p.w),
+                    row = (cell[1] - framesGrab[1]).coerceIn(0, l.rows - p.h)
+                )
+            }
+            3 -> {
+                val p = l.panels.getOrNull(framesIndex) ?: return
+                p.copy(w = (cell[0] - p.col + 1).coerceIn(1, l.cols - p.col), h = (cell[1] - p.row + 1).coerceIn(1, l.rows - p.row))
+            }
+            else -> return
+        }
+        if (next != old) {
+            framesMoved = true
+            framesGhost = next
+            framesGhostValid = l.valid(next, framesIndex)
+        }
+    }
+
+    private fun framesUp() {
+        val l = framesLayout
+        val ghost = framesGhost
+        val mode = framesDrag
+        framesDrag = 0
+        framesGhost = null
+        if (ghost == null) return
+        when {
+            // A tap on the selected panel lets go of it.
+            mode == 2 && !framesMoved -> if (framesWasSelected) {
+                framesLayout = l.copy(selected = -1)
+                requestState()
+            }
+            mode == 3 && !framesMoved -> Unit
+            !framesGhostValid -> onMessage?.invoke("Panels can't overlap.")
+            mode == 1 -> setFrames(l.copy(panels = l.panels + ghost, selected = l.panels.size))
+            else -> setFrames(l.copy(panels = l.panels.mapIndexed { i, p -> if (i == framesIndex) ghost else p }))
+        }
+    }
+
+    private fun setFrames(layout: FramesLayout) {
+        framesLayout = layout
+        insertDirty = true
+        requestState()
+    }
+
+    /** What the renderer draws over a frames preview (document px), or null. */
+    class FramesOverlay(
+        val cells: List<RectF>,
+        val panels: List<RectF>,
+        val selected: Int,
+        val ghost: RectF?,
+        val ghostValid: Boolean
+    )
+
+    fun framesOverlay(): FramesOverlay? {
+        if (insertKind != InsertKind.Frames) return null
+        val l = framesLayout
+        val geo = l.geometry(engine.width, engine.height)
+        val cells = ArrayList<RectF>()
+        for (r in 0 until l.rows) for (c in 0 until l.cols) cells.add(l.rectOf(FramePanel(c, r, 1, 1), geo))
+        return FramesOverlay(
+            cells, l.panels.map { l.rectOf(it, geo) }, l.selected,
+            framesGhost?.let { l.rectOf(it, geo) }, framesGhostValid
+        )
+    }
+
+    /** Where focus lines point, while they are previewed and can be dragged (document px). */
+    fun focusCenterMarker(): FloatArray? {
+        if (insertKind != InsertKind.FocusLines || engine.selection?.isEmpty == false) return null
+        val p = mangaParams
+        if (!p.centerX.isNaN()) return floatArrayOf(p.centerX, p.centerY)
+        return MangaArt.defaultCenter(engine.width, engine.height, null)
     }
 
     /** Where the text tool was tapped (document px), waiting for the text dialog. */
@@ -3856,6 +4191,10 @@ class DrawingSession(
 
     private fun doUndoWork() {
         if (dropLiveStroke()) return
+        if (inserting) {
+            cancelInsertInternal()
+            return
+        }
         if (transform != null) cancelTransformInternal()
         cancelAdjustmentInternal()
         val action = history.peekUndo() ?: return
@@ -3889,6 +4228,10 @@ class DrawingSession(
     private fun doRedoWork() {
         // Redoing under a half-painted stroke would mix the two.
         if (painter.isActive) return
+        if (inserting) {
+            cancelInsertInternal()
+            return
+        }
         val action = history.peekRedo() ?: return
         if (!ensureHistoryBudget(action, undo = false)) return
         if (history.redo(engine)) {
@@ -4044,7 +4387,8 @@ class DrawingSession(
 
     /** Called on the render thread once per frame. */
     fun consumePendingPreview(): Boolean {
-        if (!hasPendingPreview) return false
+        val insertBusy = tickInsert()
+        if (!hasPendingPreview) return insertBusy
         hasPendingPreview = false
         val kind = pendingPreviewKind ?: return false
         // The first preview of a big layer builds its small copy: that shows
@@ -4083,12 +4427,18 @@ class DrawingSession(
 
     /** Blocks drawing tools while a preview is pending; true when blocked. */
     private fun blockedByPreview(): Boolean {
-        if (!adjusting) return false
-        onMessage?.invoke("Apply or cancel the adjustment preview first (Adjustments).")
+        if (adjusting) {
+            onMessage?.invoke("Apply or cancel the adjustment preview first (Effects).")
+            return true
+        }
+        val k = insertKind ?: insertRequested ?: return false
+        onMessage?.invoke("Apply or cancel the ${k.label.lowercase()} preview first (Effects).")
         return true
     }
 
     private fun applyPreviewInternal(kind: AdjustmentKind, amount: Float) {
+        // One preview at a time: a pending insert goes.
+        if (inserting) cancelInsertInternal()
         val layer = (if (adjusting) adjustLayer?.takeIf { engine.layers.contains(it) } else null)
             ?: engine.activeLayer ?: return
         if (!adjusting) {
@@ -5347,6 +5697,10 @@ class DrawingSession(
             adjusting = adjusting,
             pendingAdjust = adjustKind,
             pendingAdjustAmount = adjustAmount,
+            pendingInsert = insertKind ?: insertRequested,
+            manga = mangaParams,
+            material = materialParams,
+            frames = framesLayout,
             colorMode = colorMode,
             harmony = harmony,
             eyedropperLayerOnly = eyedropperLayerOnly,

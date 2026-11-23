@@ -213,6 +213,9 @@ object YumeHarness {
                 } else if (only == "previewdraw") {
                     out.append(scorePreviewDraw(true))
                     out.append(scorePreviewDraw(false))
+                } else if (only == "inserts") {
+                    out.append(scoreInserts(true))
+                    out.append(scoreInserts(false))
                 } else if (only == "materials") {
                     out.append(scoreMaterials(app))
                 } else if (only == "manga") {
@@ -5151,6 +5154,218 @@ object YumeHarness {
         } catch (t: Throwable) {
             out.append("materials: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
             Log.e("YumeHarness", "materials", t)
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /**
+     * Effects panel inserts (manga lines, comic frames, materials) preview
+     * live above the active layer, add a layer only on Apply (the same
+     * pixels as adding at once), go on Cancel or undo, block drawing but not
+     * panning, and take one-finger touches to edit: focus lines aim at the
+     * touch; frame panels are drawn, moved, resized and deleted on the grid
+     * and never overlap.
+     */
+    private fun scoreInserts(sparse: Boolean): String {
+        val out = StringBuilder()
+        val tag = if (sparse) "sparse" else "dense"
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = sparse
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        try {
+            val n = 800
+            fun doc(size: Int = n, view: Int = size): Pair<DrawingSession, DrawingEngine> {
+                val engine = DrawingEngine(size, size)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val s = DrawingSession("in", "IN", engine, History())
+                identityView(s, view, view)
+                s.presets = com.yume.app.engine.BrushLibrary.defaults
+                s.assist = 0f
+                s.quickShapeEnabled = false
+                val pen = s.presets.first { it.id == "technical-pen" }
+                pick(s, pen, pen.category)
+                s.runCommands()
+                s.chooseColor(0xFF1030A0.toInt())
+                s.runCommands()
+                return s to engine
+            }
+            fun px(l: Layer, size: Int = n): IntArray {
+                val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                l.tiles.readRectInto(Rect(0, 0, size, size), b)
+                val a = IntArray(size * size); b.getPixels(a, 0, size, 0, 0, size, size); b.recycle(); return a
+            }
+            fun frame(s: DrawingSession) { s.consumePendingPreview(); s.runCommands() }
+            fun stroke(s: DrawingSession, x0: Float, y0: Float, x1: Float, y1: Float) {
+                s.pushInput(InputEvent.Down(0, x0, y0, 1f, 0f, false, false))
+                for (i in 1..10) s.pushInput(InputEvent.Move(0, floatArrayOf(x0 + (x1 - x0) * i / 10f), floatArrayOf(y0 + (y1 - y0) * i / 10f), floatArrayOf(1f), 0f))
+                s.pushInput(InputEvent.Up(0))
+                s.runInput()
+                s.runCommands()
+            }
+
+            // Speed lines: preview, blocked drawing, pan, apply == add at once.
+            run {
+                val (s, e) = doc()
+                val start = px(e.layers[0])
+                val p = com.yume.app.engine.MangaParams(speed = true, count = 120, thickness = 5f, clear = 0.3f, variation = 0.5f, angle = 20f, seed = 9L)
+                s.previewManga(p)
+                frame(s)
+                val previewing = s.insertKindForTest() == com.yume.app.engine.InsertKind.SpeedLines &&
+                    e.layers.size == 1 && e.preview?.insert != null
+                stroke(s, 100f, 100f, 600f, 500f)
+                val blocked = px(e.layers[0]).contentEquals(start) && s.history.appliedCount == 0
+                val scale0 = s.view.scale
+                s.pushInput(InputEvent.Gesture(400f, 400f, 1.3f, 0f, 30f, 0f, first = true))
+                s.runInput(); s.runCommands()
+                val panned = s.view.scale != scale0 && s.insertKindForTest() != null
+                identityView(s, n, n)
+                s.applyInsert()
+                s.runCommands()
+                val applied = e.layers.size == 2 && e.preview == null && s.insertKindForTest() == null
+                val a = px(e.layers.last())
+                s.undo(); s.runCommands()
+                s.addMangaLines(true, 120, 5f, 0.3f, 0.5f, 20f, 9L)
+                s.runCommands()
+                val same = e.layers.size == 2 && px(e.layers.last()).contentEquals(a) && a.any { it != 0 }
+                out.append("inserts $tag speed lines: preview without a layer ${pass(previewing)}, drawing blocked ${pass(blocked)}, " +
+                    "pan works ${pass(panned)}, apply adds the layer ${pass(applied)}, same as adding at once ${pass(same)}\n")
+            }
+
+            // Focus lines: a touch aims them; cancel and undo drop the preview only.
+            run {
+                val (s, e) = doc()
+                stroke(s, 50f, 700f, 300f, 760f)
+                val history0 = s.history.appliedCount
+                val start = px(e.layers[0])
+                s.previewManga(com.yume.app.engine.MangaParams(count = 100, thickness = 6f, seed = 4L))
+                frame(s)
+                s.pushInput(InputEvent.Down(0, 600f, 250f, 1f, 0f, false, false))
+                s.pushInput(InputEvent.Move(0, floatArrayOf(620f), floatArrayOf(240f), floatArrayOf(1f), 0f))
+                s.pushInput(InputEvent.Up(0))
+                s.runInput(); s.runCommands()
+                frame(s)
+                val m = s.mangaParamsNow()
+                val aimed = kotlin.math.abs(m.centerX - 620f) < 1f && kotlin.math.abs(m.centerY - 240f) < 1f &&
+                    px(e.layers[0]).contentEquals(start)
+                s.cancelInsert(); s.runCommands(); frame(s)
+                val cancelled = s.insertKindForTest() == null && e.preview == null && e.layers.size == 1
+                s.previewManga(m)
+                frame(s)
+                s.undo(); s.runCommands(); frame(s)
+                val undoDrops = s.insertKindForTest() == null && e.preview == null && s.history.appliedCount == history0 &&
+                    px(e.layers[0]).contentEquals(start)
+                out.append("inserts $tag focus lines: a touch aims them ${pass(aimed)}, cancel ${pass(cancelled)}, undo drops only the preview ${pass(undoDrops)}\n")
+            }
+
+            // One preview at a time.
+            run {
+                val (s, e) = doc()
+                e.layers[0].tiles.withWriteCanvas(Rect(0, 0, n, n)) { c -> c.drawRect(100f, 100f, 700f, 700f, Paint().apply { color = 0xFF808080.toInt() }) }
+                e.markDirtyAll()
+                s.previewAdjustment(AdjustmentKind.Hue, 90f)
+                frame(s)
+                s.previewMaterial(com.yume.app.engine.MaterialParams(com.yume.app.engine.MaterialKind.Dots, 8f, 45f, 0.3f, 1, 1))
+                frame(s)
+                val a = s.pendingAdjustForTest() == null && s.insertKindForTest() == com.yume.app.engine.InsertKind.Material
+                s.previewAdjustment(AdjustmentKind.Hue, 90f)
+                frame(s)
+                val b = s.pendingAdjustForTest() == AdjustmentKind.Hue && s.insertKindForTest() == null
+                s.cancelAdjustment(); s.runCommands()
+                out.append("inserts $tag: one preview at a time ${pass(a && b)}\n")
+            }
+
+            // Frames on the grid.
+            run {
+                val (s, e) = doc()
+                val base = com.yume.app.engine.FramesLayout(cols = 3, rows = 4, gutter = 0.025f, margin = 0.05f, border = 4f)
+                s.previewFrames(base)
+                frame(s)
+                val geo = base.geometry(n, n)
+                fun centre(c: Int, r: Int): FloatArray {
+                    val rr = base.rectOf(com.yume.app.engine.FramePanel(c, r, 1, 1), geo)
+                    return floatArrayOf(rr.centerX(), rr.centerY())
+                }
+                fun drag(from: FloatArray, to: FloatArray, cancel: Boolean = false) {
+                    s.pushInput(InputEvent.Down(0, from[0], from[1], 1f, 0f, false, false))
+                    for (i in 1..6) s.pushInput(InputEvent.Move(0, floatArrayOf(from[0] + (to[0] - from[0]) * i / 6f), floatArrayOf(from[1] + (to[1] - from[1]) * i / 6f), floatArrayOf(1f), 0f))
+                    if (cancel) s.pushInput(InputEvent.CancelStroke)
+                    s.pushInput(InputEvent.Up(0))
+                    s.runInput(); s.runCommands()
+                    frame(s)
+                }
+                fun panels() = s.framesLayoutNow().panels
+                val P = { c: Int, r: Int, w: Int, h: Int -> com.yume.app.engine.FramePanel(c, r, w, h) }
+                drag(centre(0, 0), centre(1, 0))
+                val made = panels() == listOf(P(0, 0, 2, 1))
+                drag(centre(0, 2), centre(0, 2))
+                val tapped = panels() == listOf(P(0, 0, 2, 1), P(0, 2, 1, 1))
+                drag(centre(2, 0), centre(1, 1))
+                val noOverlap = panels().size == 2
+                drag(centre(0, 0), centre(1, 1))
+                val moved = panels() == listOf(P(1, 1, 2, 1), P(0, 2, 1, 1))
+                val bRect = base.rectOf(P(0, 2, 1, 1), geo)
+                drag(floatArrayOf(bRect.right, bRect.bottom), centre(1, 3))
+                val resized = panels() == listOf(P(1, 1, 2, 1), P(0, 2, 2, 2)) && s.framesLayoutNow().selected == 1
+                drag(centre(2, 3), centre(2, 3), cancel = true)
+                val panDrops = panels().size == 2
+                val b2 = base.rectOf(P(0, 2, 2, 2), geo)
+                drag(floatArrayOf(b2.right, b2.top), floatArrayOf(b2.right, b2.top))
+                val deleted = panels() == listOf(P(1, 1, 2, 1)) && e.layers.size == 1
+                s.applyInsert(); s.runCommands()
+                val l = e.layers.last()
+                val a = base.rectOf(P(1, 1, 2, 1), geo)
+                val inside = l.tiles.getPixel(a.centerX().toInt(), a.centerY().toInt())
+                val page = l.tiles.getPixel(centre(0, 3)[0].toInt(), centre(0, 3)[1].toInt())
+                val border = l.tiles.getPixel(a.left.toInt() + 1, a.centerY().toInt())
+                val baked = e.layers.size == 2 && (inside ushr 24) == 0 && page == 0xFFFFFFFF.toInt() &&
+                    (border ushr 24) > 200 && (border and 0xFFFFFF) < 0x303030
+                out.append("inserts $tag frames: draw ${pass(made)}, tap adds a cell ${pass(tapped)}, no overlap ${pass(noOverlap)}, " +
+                    "move ${pass(moved)}, resize ${pass(resized)}, pan drops the drag ${pass(panDrops)}, delete ${pass(deleted)}, apply ${pass(baked)}\n")
+            }
+
+            // Materials: zoomed in, a sharp patch matches the applied pixels.
+            run {
+                val big = 3000
+                val (s, e) = doc(big, 1000)
+                val mp = com.yume.app.engine.MaterialParams(com.yume.app.engine.MaterialKind.Dots, 7f, 45f, 0.35f, 1, 1)
+                s.previewMaterial(mp)
+                frame(s)
+                var ins = e.preview?.insert
+                val t0 = android.os.SystemClock.uptimeMillis()
+                while ((ins?.patch == null) && android.os.SystemClock.uptimeMillis() - t0 < 5000) {
+                    Thread.sleep(30)
+                    frame(s)
+                    ins = e.preview?.insert
+                }
+                val patch = ins?.patch
+                val pr = ins?.patchRect
+                var sharp = false
+                if (patch != null && pr != null && kotlin.math.abs(patch.width - pr.width()) < 1f) {
+                    // Apply frees the preview: keep a copy to compare.
+                    val shown = patch.copy(Bitmap.Config.ARGB_8888, false)
+                    s.applyInsert(); s.runCommands()
+                    val l = e.layers.last()
+                    var diff = 0
+                    val x0 = pr.left.toInt() + 10
+                    val y0 = pr.top.toInt() + 10
+                    val x1 = minOf(pr.right.toInt() - 1, x0 + 300)
+                    val y1 = minOf(pr.bottom.toInt() - 1, y0 + 300)
+                    for (y in y0 until y1 step 3) for (x in x0 until x1 step 3) {
+                        val pa = shown.getPixel(x - pr.left.toInt(), y - pr.top.toInt()) ushr 24
+                        val la = l.tiles.getPixel(x, y) ushr 24
+                        if (kotlin.math.abs(pa - la) > 2) diff++
+                    }
+                    sharp = diff == 0
+                    out.append("inserts $tag material: zoomed-in preview is sharp and exact ${pass(sharp)} (patch ${shown.width}x${shown.height} at ${pr.left.toInt()},${pr.top.toInt()}, $diff differ)\n")
+                } else {
+                    out.append("inserts $tag material: zoomed-in preview is sharp and exact FAIL (no patch: ${patch?.width} ${pr})\n")
+                }
+            }
+        } catch (t: Throwable) {
+            out.append("inserts $tag: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e("YumeHarness", "inserts", t)
         } finally {
             TileStoreConfig.useSparseLayers = oldS
         }

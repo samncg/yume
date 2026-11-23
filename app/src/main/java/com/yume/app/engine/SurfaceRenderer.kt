@@ -421,6 +421,7 @@ class SurfaceRenderer(
             drawSelection(canvas, matrix)
             drawTransform(canvas, matrix)
             drawCloneSource(canvas, matrix)
+            drawInsertEditor(canvas, matrix)
             drawGradientGuide(canvas, matrix)
             drawPendingInk(canvas, matrix)
             drawPrediction(canvas, matrix)
@@ -586,6 +587,87 @@ class SurfaceRenderer(
         canvas.drawCircle(p[0], p[1], r, xformLine)
         canvas.drawLine(p[0] - 6f * density, p[1], p[0] + 6f * density, p[1], xformLine)
         canvas.drawLine(p[0], p[1] - 6f * density, p[0], p[1] + 6f * density, xformLine)
+    }
+
+    private val framePath = android.graphics.Path()
+    private val frameRect = android.graphics.Path()
+
+    private fun mappedRect(r: android.graphics.RectF, matrix: Matrix): android.graphics.Path {
+        frameRect.reset()
+        frameRect.addRect(r, android.graphics.Path.Direction.CW)
+        frameRect.transform(matrix)
+        return frameRect
+    }
+
+    /**
+     * Editing a previewed insert: the frames grid (cells dashed, panels with
+     * a resize dot, the selected one with a delete button, the panel being
+     * dragged as a green or red ghost), or the focus lines' centre.
+     */
+    private fun drawInsertEditor(canvas: Canvas, matrix: Matrix) {
+        session.focusCenterMarker()?.let { at ->
+            val p = floatArrayOf(at[0], at[1])
+            matrix.mapPoints(p)
+            val r = 14f * density
+            for (pass in 0..1) {
+                xformLine.strokeWidth = if (pass == 0) 3.5f * density else 1.6f * density
+                xformLine.color = if (pass == 0) 0x77000000 else 0xF2FFFFFF.toInt()
+                canvas.drawCircle(p[0], p[1], r, xformLine)
+                canvas.drawLine(p[0] - r * 1.6f, p[1], p[0] + r * 1.6f, p[1], xformLine)
+                canvas.drawLine(p[0], p[1] - r * 1.6f, p[0], p[1] + r * 1.6f, xformLine)
+            }
+        }
+        val f = session.framesOverlay() ?: return
+        // Empty cells: dashed.
+        framePath.reset()
+        for (c in f.cells) framePath.addRect(c, android.graphics.Path.Direction.CW)
+        framePath.transform(matrix)
+        overlay.style = Paint.Style.STROKE
+        overlay.strokeWidth = 1f * density
+        overlay.pathEffect = DashPathEffect(floatArrayOf(5f * density, 5f * density), 0f)
+        overlay.color = 0x66E9A13B
+        canvas.drawPath(framePath, overlay)
+        overlay.pathEffect = null
+        // Panels.
+        for ((i, r) in f.panels.withIndex()) {
+            val sel = i == f.selected
+            overlay.style = Paint.Style.STROKE
+            overlay.strokeWidth = (if (sel) 3f else 1.6f) * density
+            overlay.color = if (sel) 0xFFE9A13B.toInt() else 0xCCE9A13B.toInt()
+            canvas.drawPath(mappedRect(r, matrix), overlay)
+            val corner = floatArrayOf(r.right, r.bottom, r.right, r.top)
+            matrix.mapPoints(corner)
+            handlePaint.style = Paint.Style.FILL
+            handlePaint.color = 0xF2FFFFFF.toInt()
+            canvas.drawCircle(corner[0], corner[1], 7f * density, handlePaint)
+            handlePaint.style = Paint.Style.STROKE
+            handlePaint.strokeWidth = 2.5f * density
+            handlePaint.color = 0xFFE9A13B.toInt()
+            canvas.drawCircle(corner[0], corner[1], 7f * density, handlePaint)
+            if (sel) {
+                val x = corner[2]
+                val y = corner[3]
+                val rr = 11f * density
+                handlePaint.style = Paint.Style.FILL
+                handlePaint.color = 0xFFD9534F.toInt()
+                canvas.drawCircle(x, y, rr, handlePaint)
+                xformLine.strokeWidth = 2f * density
+                xformLine.color = 0xFFFFFFFF.toInt()
+                val k = rr * 0.45f
+                canvas.drawLine(x - k, y - k, x + k, y + k, xformLine)
+                canvas.drawLine(x - k, y + k, x + k, y - k, xformLine)
+            }
+        }
+        f.ghost?.let { g ->
+            val path = mappedRect(g, matrix)
+            overlay.style = Paint.Style.FILL
+            overlay.color = if (f.ghostValid) 0x3348C774 else 0x44E04848
+            canvas.drawPath(path, overlay)
+            overlay.style = Paint.Style.STROKE
+            overlay.strokeWidth = 2.5f * density
+            overlay.color = if (f.ghostValid) 0xFF48C774.toInt() else 0xFFE04848.toInt()
+            canvas.drawPath(path, overlay)
+        }
     }
 
     /** The transform's outline, warp grid and draggable handles, in screen space. */

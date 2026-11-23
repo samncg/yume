@@ -77,10 +77,15 @@ glass, and every gesture, button and default can be changed in Settings.
   live preview on one layer or all of them.
 - Guides: grids, perspective with vanishing points, rulers, mirror and radial
   symmetry.
-- Manga focus and speed lines, and comic frames, each added as a new layer.
+- One **Effects** panel with tabs: Adjust, Effects, Manga, Frames and
+  Materials. Everything previews live on the canvas (pan and zoom freely)
+  until you apply or cancel.
+- Manga focus lines (touch to aim them) and speed lines.
+- Comic frames laid out on a grid: drag panels of any size into place, move
+  and resize them; they snap and never overlap.
 - A materials library: screentones (dots, lines, cross-hatch, gradation),
-  patterns and paper, canvas, grain and wood textures, added as a new layer
-  over the whole canvas or inside the selection.
+  patterns and paper, canvas, grain and wood textures, over the whole canvas
+  or inside the selection.
 
 ### Made for the pen
 - Two-finger tap to undo, three to redo, four to hide the interface.

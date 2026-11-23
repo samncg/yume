@@ -132,7 +132,7 @@ import kotlin.math.roundToInt
 
 enum class PanelId { Layers, Brush, Color, Adjust, Selection, Actions, History, Fill, Gradient, Shape, Liquify, Guides, Clone }
 
-private const val PANEL_WIDTH = 348
+internal const val PANEL_WIDTH = 348
 
 /** Approximate row height, used to turn a drag distance into whole rows. */
 private val LAYER_ROW_HEIGHT = 48.dp
@@ -1937,7 +1937,7 @@ internal fun HueBar(hue: Float, onChange: (Float) -> Unit) {
 // ================================================================ adjustments
 
 /** The adjustments panel's groups, in order. */
-private val ADJUST_GROUPS: List<Pair<String, List<AdjustmentKind>>> = listOf(
+internal val ADJUST_GROUPS: List<Pair<String, List<AdjustmentKind>>> = listOf(
     "Colour" to listOf(
         AdjustmentKind.Hue, AdjustmentKind.Saturation, AdjustmentKind.Brightness,
         AdjustmentKind.ColorBalance, AdjustmentKind.GradientMap
@@ -1960,16 +1960,22 @@ private val ADJUST_GROUPS: List<Pair<String, List<AdjustmentKind>>> = listOf(
 )
 
 /**
- * Adjustments: a gallery of large sample buttons in groups; choosing one opens
- * its controls. A preview that was not applied stays pending when the panel
- * closes, and reopening the panel goes straight back to it (Apply / Cancel).
+ * The Adjust and Effects tabs (see [EffectsPanel]): a gallery of large sample
+ * buttons in [groups]; choosing one opens its controls. A preview that was not
+ * applied stays pending when the panel closes, and reopening the panel goes
+ * straight back to it (Apply / Cancel).
  */
 @Composable
-fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {
+internal fun AdjustContent(
+    state: EditorUiState,
+    session: DrawingSession,
+    groups: List<Pair<String, List<AdjustmentKind>>>
+) {
     // Reopened over a preview that was not applied: carry on with it.
-    var kind by remember { mutableStateOf(state.pendingAdjust ?: AdjustmentKind.Hue) }
-    var amount by remember { mutableFloatStateOf(if (state.pendingAdjust != null) state.pendingAdjustAmount else 0f) }
-    var editing by remember { mutableStateOf(state.pendingAdjust != null) }
+    val mine = state.pendingAdjust?.takeIf { k -> groups.any { k in it.second } }
+    var kind by remember { mutableStateOf(mine ?: groups.first().second.first()) }
+    var amount by remember { mutableFloatStateOf(if (mine != null) state.pendingAdjustAmount else 0f) }
+    var editing by remember { mutableStateOf(mine != null) }
     var samplesReady by remember { mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { AdjustSamples.build() }
@@ -1991,13 +1997,12 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
         }
     }
 
-    PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
+    Column {
         if (!editing) {
-            PanelHeader("Adjustments", onClose)
-            if (state.pendingAdjust != null) {
-                PendingNote(state.pendingAdjust) { editing = true; kind = state.pendingAdjust }
+            if (mine != null) {
+                PendingNote(mine) { editing = true; kind = mine }
             }
-            for ((group, kinds) in ADJUST_GROUPS) {
+            for ((group, kinds) in groups) {
                 SectionLabel(group)
                 Spacer(Modifier.height(6.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2012,12 +2017,14 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                 }
                 Spacer(Modifier.height(12.dp))
             }
-            DividerLine()
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SmallButton("Invert colours") { session.invertColors() }
-                SmallButton("Grayscale") { session.grayscale() }
+            if (groups.any { AdjustmentKind.Hue in it.second }) {
+                DividerLine()
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SmallButton("Invert colours") { session.invertColors() }
+                    SmallButton("Grayscale") { session.grayscale() }
+                }
             }
-            return@PanelCard
+            return@Column
         }
 
         // ------------------------------------------------------------ editing
@@ -2025,7 +2032,6 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
             YumeIconButton(Glyph.ChevronDown, { editing = false }, size = 32.dp, iconSize = 18.dp, label = "All adjustments")
             Spacer(Modifier.width(6.dp))
             Text(kind.label, style = MaterialTheme.typography.titleMedium, color = YumeColors.text, modifier = Modifier.weight(1f))
-            YumeIconButton(Glyph.Close, onClose, size = 32.dp, iconSize = 16.dp, label = "Close")
         }
         Spacer(Modifier.height(6.dp))
         Text(
@@ -2265,114 +2271,6 @@ private fun adjustValueLabel(kind: AdjustmentKind, amount: Float): String = when
  * Crop or resize the canvas. The result is a new document (the original and
  * its undo history stay as they are), opened as soon as it is written.
  */
-/** Manga focus or speed lines, added as a new layer in the current colour. */
-@Composable
-fun MangaLinesDialog(
-    width: Int,
-    height: Int,
-    hasSelection: Boolean,
-    onDismiss: () -> Unit,
-    onAdd: (speed: Boolean, count: Int, thickness: Float, clear: Float, variation: Float, angle: Float) -> Unit
-) {
-    var speed by remember { mutableStateOf(false) }
-    var count by remember { mutableFloatStateOf(160f) }
-    // Thickness as a share of the canvas, so it looks alike at any size.
-    var thick by remember { mutableFloatStateOf(0.5f) }
-    var clear by remember { mutableFloatStateOf(0.45f) }
-    var variation by remember { mutableFloatStateOf(0.6f) }
-    var angle by remember { mutableFloatStateOf(0f) }
-    val px = thick / 100f * maxOf(width, height)
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        PanelCard(Modifier.width(360.dp)) {
-            PanelHeader("Manga lines", onClose = onDismiss)
-            SegmentedRow(
-                options = listOf("Focus lines", "Speed lines"),
-                selectedIndex = if (speed) 1 else 0,
-                onSelect = { speed = it == 1 }
-            )
-            Spacer(Modifier.height(10.dp))
-            YumeSlider(value = count, onChange = { count = it }, label = "Lines",
-                valueLabel = "${count.roundToInt()}", min = 30f, max = 500f)
-            YumeSlider(value = thick, onChange = { thick = it }, label = "Thickness",
-                valueLabel = "${px.roundToInt().coerceAtLeast(1)} px", min = 0.05f, max = 3f)
-            if (!speed && hasSelection) {
-                Text(
-                    "The lines stop at the selection.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = YumeColors.textDim
-                )
-            } else {
-                YumeSlider(value = clear, onChange = { clear = it },
-                    label = if (speed) "Clear band" else "Clear area",
-                    valueLabel = "${(clear * 100).roundToInt()}%", min = 0f, max = 0.9f)
-            }
-            YumeSlider(value = variation, onChange = { variation = it }, label = "Variation",
-                valueLabel = "${(variation * 100).roundToInt()}%", min = 0f, max = 1f)
-            if (speed) {
-                YumeSlider(value = angle, onChange = { angle = it }, label = "Direction",
-                    valueLabel = "${angle.roundToInt()}°", min = 0f, max = 180f)
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = if (speed) "Streaks across the canvas, in the current colour."
-                else "Lines aimed at the centre (or the selection), in the current colour.",
-                style = MaterialTheme.typography.bodySmall,
-                color = YumeColors.textDim
-            )
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SmallButton("Add as a new layer") {
-                    onAdd(speed, count.roundToInt(), px.coerceAtLeast(1f), clear, variation, angle)
-                }
-            }
-        }
-    }
-}
-
-/** Comic panels on a grid, added as a new layer (white gutters, black borders). */
-@Composable
-fun ComicFramesDialog(
-    width: Int,
-    height: Int,
-    onDismiss: () -> Unit,
-    onAdd: (rows: Int, cols: Int, gutter: Float, margin: Float, border: Float) -> Unit
-) {
-    var rows by remember { mutableFloatStateOf(3f) }
-    var cols by remember { mutableFloatStateOf(2f) }
-    var gutter by remember { mutableFloatStateOf(0.025f) }
-    var margin by remember { mutableFloatStateOf(0.05f) }
-    var border by remember { mutableFloatStateOf(0.35f) }
-    val unit = minOf(width, height)
-    val borderPx = (border / 100f * unit).coerceAtLeast(1f)
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        PanelCard(Modifier.width(360.dp)) {
-            PanelHeader("Comic frames", onClose = onDismiss)
-            YumeSlider(value = rows, onChange = { rows = it }, label = "Rows",
-                valueLabel = "${rows.roundToInt()}", min = 1f, max = 6f)
-            YumeSlider(value = cols, onChange = { cols = it }, label = "Columns",
-                valueLabel = "${cols.roundToInt()}", min = 1f, max = 4f)
-            YumeSlider(value = gutter, onChange = { gutter = it }, label = "Gutter",
-                valueLabel = "${(gutter * unit).roundToInt()} px", min = 0f, max = 0.08f)
-            YumeSlider(value = margin, onChange = { margin = it }, label = "Margin",
-                valueLabel = "${(margin * unit).roundToInt()} px", min = 0f, max = 0.15f)
-            YumeSlider(value = border, onChange = { border = it }, label = "Border",
-                valueLabel = "${borderPx.roundToInt()} px", min = 0.05f, max = 1.5f)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "Draw in the clear panels on the layers below; the frames layer keeps the borders on top.",
-                style = MaterialTheme.typography.bodySmall,
-                color = YumeColors.textDim
-            )
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SmallButton("Add as a new layer") {
-                    onAdd(rows.roundToInt(), cols.roundToInt(), gutter, margin, borderPx)
-                }
-            }
-        }
-    }
-}
-
 @Composable
 fun CanvasSizeDialog(
     width: Int,
@@ -3064,43 +2962,6 @@ fun ActionsPanel(
 ) {
     var sizeDialog by remember { mutableStateOf(false) }
     var sizeScale by remember { mutableStateOf(true) }
-    var mangaDialog by remember { mutableStateOf(false) }
-    var framesDialog by remember { mutableStateOf(false) }
-    var materialsDialog by remember { mutableStateOf(false) }
-    if (materialsDialog) {
-        MaterialsDialog(
-            width = state.width, height = state.height, hasSelection = state.hasSelection,
-            currentColor = state.color,
-            onDismiss = { materialsDialog = false },
-            onAdd = { kind, size, angle, density, ink, seed ->
-                materialsDialog = false
-                session.addMaterial(kind, size, angle, density, ink, seed)
-                onClose()
-            }
-        )
-    }
-    if (mangaDialog) {
-        MangaLinesDialog(
-            width = state.width, height = state.height, hasSelection = state.hasSelection,
-            onDismiss = { mangaDialog = false },
-            onAdd = { speed, count, thickness, clear, variation, angle ->
-                mangaDialog = false
-                session.addMangaLines(speed, count, thickness, clear, variation, angle, System.nanoTime())
-                onClose()
-            }
-        )
-    }
-    if (framesDialog) {
-        ComicFramesDialog(
-            width = state.width, height = state.height,
-            onDismiss = { framesDialog = false },
-            onAdd = { rows, cols, gutter, margin, border ->
-                framesDialog = false
-                session.addComicFrames(rows, cols, gutter, margin, border)
-                onClose()
-            }
-        )
-    }
     if (sizeDialog) {
         CanvasSizeDialog(
             width = state.width,
@@ -3176,9 +3037,6 @@ fun ActionsPanel(
         MenuRow(Glyph.Transform, "Resize image…") { sizeScale = true; sizeDialog = true }
         MenuRow(Glyph.Select, "Canvas size (crop / extend)…") { sizeScale = false; sizeDialog = true }
         MenuRow(Glyph.Droplet, "Fill layer with colour") { session.fillLayer(state.color) }
-        MenuRow(Glyph.Sparkle, "Manga lines…") { mangaDialog = true }
-        MenuRow(Glyph.Grid, "Comic frames…") { framesDialog = true }
-        MenuRow(Glyph.Picture, "Materials (tones, patterns, textures)…") { materialsDialog = true }
         MenuRow(Glyph.Share, "Export…") { onExport() }
         MenuRow(Glyph.Save, "Save now") { onSave() }
         DividerLine()

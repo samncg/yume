@@ -157,7 +157,7 @@ private val TUTORIAL = listOf(
         Glyph.Gallery, "2 · The editor at a glance",
         listOf(
             "Top left: the gallery button and the artwork's name, then History, Actions and Guides.",
-            "Top right: the tools (select, transform, paint, smudge, erase, fill, gradient, shape, liquify, text), then Adjustments, Layers and the colour chip.",
+            "Top right: the tools (select, transform, paint, smudge, erase, fill, gradient, shape, liquify, text), then Effects, Layers and the colour chip.",
             "On the side: the size and opacity sliders, undo and redo. Drag the rail by its handle to move it; the lock keeps it in place."
         )
     ),
@@ -250,10 +250,10 @@ private val TUTORIAL = listOf(
         )
     ),
     TutorialStep(
-        Glyph.Sliders, "14 · Adjustments",
+        Glyph.Sliders, "14 · Effects",
         listOf(
-            "Hue, saturation, brightness, blur, noise, sharpen, motion blur, curves, levels, colour balance, gradient map, posterize and threshold.",
-            "Drag a slider to preview live, then apply. Choose This layer or All layers.",
+            "Tabs: Adjust (colour, tone, blur), Effects (bloom, glitch, halftone, clouds…), Manga lines, comic Frames and Materials (tones, patterns, textures).",
+            "Everything previews live on the canvas while you pan and zoom; apply or cancel when ready. Frames are laid out by dragging panels on a grid.",
             "Long adjustments show a Working… card with the time left; Cancel puts everything back."
         )
     ),

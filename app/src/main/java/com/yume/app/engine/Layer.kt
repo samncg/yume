@@ -178,7 +178,9 @@ fun isOpaque(color: Int): Boolean = Color.alpha(color) == 255
 class LayerPreview(
     val layerId: Long,
     val filter: android.graphics.ColorFilter?,
-    val proxy: Bitmap?
+    val proxy: Bitmap?,
+    /** Something about to be added as a layer, drawn above its layer (see [InsertImage]). */
+    val insert: InsertImage? = null
 ) {
     /** True when this preview is drawn on layer [id]. */
     fun covers(id: Long): Boolean = layerId == id || (layerId == ALL_LAYERS && proxy == null)
@@ -186,5 +188,8 @@ class LayerPreview(
     companion object {
         /** A colour-filter preview applied to every layer (adjust all layers). */
         const val ALL_LAYERS = -2L
+
+        /** No layer is previewed (only an [insert]). */
+        const val NO_LAYER = -3L
     }
 }

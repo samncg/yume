@@ -38,7 +38,7 @@ object Customization {
         BrushStudio("Brush Studio"),
         Layers("Layers panel"),
         Colours("Colour panel"),
-        Adjustments("Adjustments"),
+        Adjustments("Effects"),
         NewLayer("New layer"),
         ClearLayer("Clear layer"),
         SelectAll("Select all"),
@@ -340,7 +340,7 @@ object Customization {
         // so the editor can't be locked out of its own menus.
         Edit("History & actions", "History, Actions, Guides", PillSlot.Left, hidable = false),
         Tools("Tools", "Selection, brush, fill… (order set below)", PillSlot.Right),
-        Panels("Layers & colour", "Adjustments, Layers, colour", PillSlot.Right)
+        Panels("Layers & colour", "Effects, Layers, colour", PillSlot.Right)
     }
 
     enum class PillSlot(val label: String) { Left("Left"), Center("Centre"), Right("Right"), Hidden("Hidden") }

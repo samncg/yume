@@ -1695,6 +1695,33 @@ class DrawingEngine(val width: Int, val height: Int) {
     }
 
     private fun drawLayerInto(c: Canvas, layer: Layer, rect: Rect, clipBase: PixelSource?, opacityScale: Float = 1f) {
+        drawLayerOnly(c, layer, rect, clipBase, opacityScale)
+        val ins = preview?.insert ?: return
+        if (ins.aboveLayerId == layer.id) drawInsert(c, ins)
+    }
+
+    private val insertPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+    /**
+     * A pending insert's preview, right above its layer (where the new layer
+     * will go): the sharp patch where it covers, the overview elsewhere.
+     */
+    private fun drawInsert(c: Canvas, ins: InsertImage) {
+        val full = RectF(0f, 0f, width.toFloat(), height.toFloat())
+        val patch = ins.patch
+        val pr = ins.patchRect
+        if (patch != null && pr != null && !patch.isRecycled) {
+            val save = c.save()
+            c.clipOutRect(pr)
+            c.drawBitmap(ins.overview, null, full, insertPaint)
+            c.restoreToCount(save)
+            c.drawBitmap(patch, null, pr, insertPaint)
+        } else {
+            c.drawBitmap(ins.overview, null, full, insertPaint)
+        }
+    }
+
+    private fun drawLayerOnly(c: Canvas, layer: Layer, rect: Rect, clipBase: PixelSource?, opacityScale: Float = 1f) {
         if (CompositeProfile.enabled) CompositeProfile.layerDraws++
         val hasMask = layer.maskEnabled && layer.hasMask
         val clipped = layer.clipping && clipBase != null

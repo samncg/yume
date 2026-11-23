@@ -726,13 +726,10 @@ private fun PanelHost(
         PanelId.Layers -> LayersPanel(state, session, onClose)
         PanelId.Brush -> BrushPanel(state, session, onClose)
         PanelId.Color -> ColorPanel(state, session, onClose)
-        PanelId.Adjust -> AdjustPanel(
-            state = state,
-            session = session,
-            // Closing keeps the preview pending (not applied): reopening the
-            // panel shows it again with Apply and Cancel.
-            onClose = onClose
-        )
+        // Adjustments, effects, manga lines, frames and materials. Closing
+        // keeps a preview pending (not applied): reopening the panel shows it
+        // again with Apply and Cancel.
+        PanelId.Adjust -> EffectsPanel(state = state, session = session, onClose = onClose)
         PanelId.Selection -> SelectionPanel(state, session, onClose)
         PanelId.Fill -> FillPanel(state, session, onClose)
         PanelId.Gradient -> GradientPanel(state, session, onClose)
@@ -834,7 +831,7 @@ private fun EditorTopBar(
     val rightPill: @Composable () -> Unit = {
             GlassToolCapsule(
                 listOf(
-                    CapsuleItem(Glyph.Sliders, "Adjustments", active = activePanel == PanelId.Adjust) {
+                    CapsuleItem(Glyph.Sliders, "Effects", active = activePanel == PanelId.Adjust) {
                         onPanel(PanelId.Adjust)
                     },
                     CapsuleItem(Glyph.Layers, "Layers", active = activePanel == PanelId.Layers) {
