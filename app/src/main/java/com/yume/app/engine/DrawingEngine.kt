@@ -1806,6 +1806,23 @@ class DrawingEngine(val width: Int, val height: Int) {
         markDirtyAll()
     }
 
+    /**
+     * The flattened picture (background included) inside [rect], into [out]
+     * (exactly rect-sized). Copy merged reads this.
+     */
+    fun readFlattened(rect: Rect, out: Bitmap) {
+        val st = compositeTiles
+        if (st != null) {
+            compositeAll()
+            st.readRectInto(rect, out)
+            return
+        }
+        val c = Canvas(out)
+        c.drawColor(0, BlendMode.CLEAR)
+        c.translate(-rect.left.toFloat(), -rect.top.toFloat())
+        renderInto(c, rect)
+    }
+
     /** Flattened copy including background, for export. */
     fun flatten(): Bitmap {
         val st = compositeTiles

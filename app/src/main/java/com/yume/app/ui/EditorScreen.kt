@@ -484,6 +484,10 @@ fun EditorScreen(
                     com.yume.app.data.Customization.Action.ClearLayer -> session.clearLayer()
                     com.yume.app.data.Customization.Action.SelectAll -> session.selectAll()
                     com.yume.app.data.Customization.Action.Deselect -> session.clearSelection()
+                    com.yume.app.data.Customization.Action.Copy -> session.copy()
+                    com.yume.app.data.Customization.Action.CopyMerged -> session.copyMerged()
+                    com.yume.app.data.Customization.Action.Cut -> session.cut()
+                    com.yume.app.data.Customization.Action.Paste -> session.pasteToPlace()
                     com.yume.app.data.Customization.Action.FitToScreen -> session.fitToScreen()
                     com.yume.app.data.Customization.Action.ActualSize -> session.zoomActualSize()
                     com.yume.app.data.Customization.Action.FlipView -> session.toggleMirrorView()
@@ -664,6 +668,8 @@ fun EditorScreen(
 
         if (state.transforming) {
             TransformBar(
+                mode = state.transformMode,
+                onMode = { session.chooseTransformMode(it) },
                 onCommit = { session.commitTransform() },
                 onCancel = { session.cancelTransform() },
                 onFlipH = { session.flipTransform(true) },
@@ -1075,6 +1081,8 @@ private const val COLOR_DROP_HOLD_MS = 380L
 
 @Composable
 private fun TransformBar(
+    mode: com.yume.app.engine.TransformMode,
+    onMode: (com.yume.app.engine.TransformMode) -> Unit,
     onCommit: () -> Unit,
     onCancel: () -> Unit,
     onFlipH: () -> Unit,
@@ -1093,11 +1101,24 @@ private fun TransformBar(
         YumeIconButton(Glyph.FlipH, onFlipH, size = 40.dp)
         YumeIconButton(Glyph.FlipV, onFlipV, size = 40.dp)
         Spacer(Modifier.width(6.dp))
-        Text(
-            text = "Drag to move · pinch to scale & rotate",
-            style = MaterialTheme.typography.bodySmall,
-            color = YumeColors.textDim
-        )
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            SegmentedRow(
+                options = com.yume.app.engine.TransformMode.entries.map { it.label },
+                selectedIndex = mode.ordinal,
+                onSelect = { onMode(com.yume.app.engine.TransformMode.entries[it]) },
+                modifier = Modifier.width(230.dp)
+            )
+            Text(
+                text = when (mode) {
+                    com.yume.app.engine.TransformMode.Free -> "Drag to move · pinch to scale & rotate"
+                    com.yume.app.engine.TransformMode.Distort -> "Drag a corner · drag inside to move"
+                    com.yume.app.engine.TransformMode.Warp -> "Drag the points to bend · inside to move"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = YumeColors.textDim,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+        }
         Spacer(Modifier.width(6.dp))
         YumeIconButton(Glyph.Check, onCommit, size = 40.dp, tint = YumeColors.accent)
     }

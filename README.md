@@ -63,8 +63,9 @@ glass, and every gesture, button and default can be changed in Settings.
   pen still; **ColorDrop** fills by dragging the colour chip onto the canvas.
 
 ### Tools
-- Selection (freehand, rectangle, oval, automatic), transform, paint bucket,
-  gradient, shapes, liquify and text.
+- Selection (freehand, rectangle, oval, automatic) with copy, cut, paste and
+  copy all layers; transform with free, distort (perspective) and warp modes;
+  paint bucket, gradient, shapes, liquify and text.
 - Adjustments: hue, saturation, brightness, blur, noise, sharpen, motion blur,
   curves, levels, colour balance, gradient map, posterize and threshold, with a
   live preview on one layer or all of them.

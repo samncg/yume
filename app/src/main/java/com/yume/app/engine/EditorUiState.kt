@@ -45,7 +45,10 @@ data class EditorUiState(
     val selectionShape: SelectionShape = SelectionShape.Lasso,
     val selectionOp: SelectionOp = SelectionOp.Replace,
     val hasSelection: Boolean = false,
+    /** Something is on Yume's clipboard to paste. */
+    val canPaste: Boolean = false,
     val transforming: Boolean = false,
+    val transformMode: TransformMode = TransformMode.Free,
     val symmetryX: Boolean = false,
     val symmetryY: Boolean = false,
     val symmetryXPos: Float = 0.5f,

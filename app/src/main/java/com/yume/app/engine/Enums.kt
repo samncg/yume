@@ -5,6 +5,9 @@ import android.graphics.BlendMode
 /** Which tool the canvas is currently using. */
 enum class Tool { Brush, Eraser, Smudge, Selection, Transform, Fill, Gradient, Shape, Liquify, Text }
 
+/** What the transform tool's handles do: move/pinch only, corners, or a bending grid. */
+enum class TransformMode(val label: String) { Free("Free"), Distort("Distort"), Warp("Warp") }
+
 /** Shape used when dragging out a selection. */
 enum class SelectionShape(val label: String) {
     Rectangle("Rect"),

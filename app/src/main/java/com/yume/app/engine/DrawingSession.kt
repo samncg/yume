@@ -431,7 +431,11 @@ class DrawingSession(
     /** Where a dragged guide / handle was, to put it back on a cancel. */
     private var dragRestoreX = 0f
     private var dragRestoreY = 0f
-    private var transformDragStart: android.graphics.Matrix? = null
+    private var transformDragStart: Any? = null
+    /** The transform handle being dragged (distort corner / warp point), or -1. */
+    private var draggingTransformHandle = -1
+    /** Chosen transform mode; carried into each new transform. */
+    private var transformMode = TransformMode.Free
     /** Fill / text: the touch that lands, acted on when it lifts. */
     private var tapPending = false
     private var tapX = 0f
@@ -1042,6 +1046,10 @@ class DrawingSession(
                             gradientGuide = floatArrayOf(g[0], g[1], doc[0], doc[1])
                             changed = true
                         }
+                        draggingTransformHandle >= 0 -> {
+                            transform?.moveHandle(draggingTransformHandle, doc[0], doc[1])
+                            changed = true
+                        }
                         draggingTransform -> {
                             transform?.translate(doc[0] - dragLastDocX, doc[1] - dragLastDocY)
                             dragLastDocX = doc[0]
@@ -1102,6 +1110,7 @@ class DrawingSession(
                     }
                     autoSelectPending -> runAutoSelect()
                     selecting -> endSelection()
+                    draggingTransformHandle >= 0 -> draggingTransformHandle = -1
                     draggingTransform -> draggingTransform = false
                 }
                 requestState()
@@ -1235,9 +1244,10 @@ class DrawingSession(
                     movingSelection = false
                     selectionMoveBase = null
                 }
-                if (draggingTransform) {
-                    transformDragStart?.let { transform?.restoreMatrix(it) }
+                if (draggingTransform || draggingTransformHandle >= 0) {
+                    transformDragStart?.let { transform?.restoreState(it) }
                 }
+                draggingTransformHandle = -1
                 transformDragStart = null
                 if (draggingHandle != NO_HANDLE) {
                     if (draggingHandle == CENTER_HANDLE) {
@@ -1988,19 +1998,42 @@ class DrawingSession(
     // ----------------------------------------------------------- transform
 
     private fun beginTransformDrag(x: Float, y: Float) {
-        if (transform == null) return
+        val t = transform ?: return
+        transformDragStart = t.state()
+        // On a handle (distort corner, warp point): that handle follows the pen.
+        val pts = t.handles()
+        val reach = 34f / max(view.scale, 0.0001f)
+        var best = -1
+        var bestD = reach
+        for (i in 0 until pts.size / 2) {
+            val d = hypot(x - pts[i * 2], y - pts[i * 2 + 1])
+            if (d <= bestD) { bestD = d; best = i }
+        }
+        if (best >= 0) {
+            draggingTransformHandle = best
+            return
+        }
         draggingTransform = true
         dragLastDocX = x
         dragLastDocY = y
-        transformDragStart = android.graphics.Matrix(transform!!.matrix)
     }
+
+    fun chooseTransformMode(mode: TransformMode) = post {
+        transformMode = mode
+        transform?.mode = mode
+        requestState()
+    }
+
+    /** Distort corners / warp points, and the outline, for the renderer (document px). */
+    fun transformHandles(): FloatArray? = transform?.handles()
+    fun transformOutlines(): List<FloatArray>? = transform?.outlines()
 
     private fun startTransform() {
         val layer = engine.activeLayer ?: return
         if (!editable(layer)) return
         if (transform != null) return
         cancelAdjustmentInternal()
-        transform = TransformSession(engine, layer, engine.selection)
+        transform = TransformSession(engine, layer, engine.selection).also { it.mode = transformMode }
         engine.markDirtyAll()
         requestState()
     }
@@ -3218,6 +3251,154 @@ class DrawingSession(
 
     fun invertSelection() = post {
         engine.invertSelection()
+        requestState()
+    }
+
+    // ------------------------------------------------------ copy and paste
+
+    /** Copies the selection (or the whole layer) of the active layer. */
+    fun copy() = post { working { copyWork(merged = false, cut = false) } }
+
+    /** Copies what is visible (every layer, flattened) in the selection. */
+    fun copyMerged() = post { working { copyWork(merged = true, cut = false) } }
+
+    /** Copies the selection of the active layer, then clears it. */
+    fun cut() = post { working { copyWork(merged = false, cut = true) } }
+
+    /** Pastes the clipboard as a new layer and picks it up to place. */
+    fun paste() = post { working { pasteWork() } }
+
+    /** [paste], then the transform tool so the pasted layer can be placed (UI thread). */
+    fun pasteToPlace() {
+        paste()
+        chooseTool(Tool.Transform)
+    }
+
+    private fun copyWork(merged: Boolean, cut: Boolean): Boolean {
+        if (transform != null) commitTransformInternalWork()
+        val layer = engine.activeLayer
+        if (!merged) {
+            if (layer == null) return false
+            if (layer.editMask && layer.hasMask) {
+                onMessage?.invoke("Copy takes the layer’s pixels: switch off mask editing first.")
+                return false
+            }
+            if (cut && !editable(layer)) {
+                onMessage?.invoke("This layer is locked.")
+                return false
+            }
+        }
+        val sel = engine.selection?.takeIf { !it.isEmpty }
+        val area = if (merged) Rect(0, 0, engine.width, engine.height) else editBounds(layer!!.tiles)
+        if (sel != null && !area.intersect(sel.bounds)) area.setEmpty()
+        if (area.isEmpty) {
+            onMessage?.invoke("Nothing to copy here.")
+            return false
+        }
+        val bytes = area.width().toLong() * area.height() * 4L
+        if (bytes > clipboardMaxBytes()) {
+            onMessage?.invoke("That is too big to copy (${MemoryBudget.formatMb(bytes)}). Select a smaller area.")
+            return false
+        }
+        val out = try {
+            Bitmap.createBitmap(area.width(), area.height(), Bitmap.Config.ARGB_8888)
+        } catch (e: OutOfMemoryError) {
+            onMessage?.invoke("Not enough memory to copy that.")
+            return false
+        }
+        if (merged) engine.readFlattened(area, out) else layer!!.tiles.readRectInto(area, out)
+        if (sel != null) {
+            // Only the selected pixels: clear what lies outside the selection.
+            val outside = Region(area)
+            outside.op(sel, Region.Op.DIFFERENCE)
+            if (!outside.isEmpty) {
+                val c = Canvas(out)
+                c.translate(-area.left.toFloat(), -area.top.toFloat())
+                c.clipPath(SelectionUtil.regionFillPath(outside))
+                c.drawColor(0, BlendMode.CLEAR)
+            }
+        }
+        if (isClear(out)) {
+            out.recycle()
+            onMessage?.invoke("Nothing to copy here.")
+            return false
+        }
+        PixelClipboard.set(out, area.left, area.top)
+        if (cut) {
+            val store = layer!!.tiles
+            val capture = TileOps.capture(store, area)
+            store.withWriteCanvas(area) { c ->
+                if (sel != null) c.clipPath(SelectionUtil.regionFillPath(sel))
+                c.drawColor(0, BlendMode.CLEAR)
+            }
+            store.pruneEmptyTiles(area)
+            engine.makeTilePatch(layer, capture, area, "Cut", EditKind.LayerClear)?.let { history.push(it) }
+            layer.touch()
+            engine.markDirty(area)
+        }
+        onMessage?.invoke(if (cut) "Cut" else if (merged) "Copied (all layers)" else "Copied")
+        requestState()
+        return true
+    }
+
+    private fun isClear(bmp: Bitmap): Boolean {
+        val w = bmp.width
+        val row = IntArray(w)
+        for (y in 0 until bmp.height) {
+            bmp.getPixels(row, 0, w, 0, y, w, 1)
+            for (v in row) if (v ushr 24 != 0) return false
+        }
+        return true
+    }
+
+    /** The largest copy the clipboard holds: a quarter of the canvas budget, at most 512 MB. */
+    private fun clipboardMaxBytes(): Long =
+        minOf(MemoryBudget.canvasBudget / 4, 512L * 1024L * 1024L)
+
+    private fun pasteWork() {
+        val clip = PixelClipboard.bitmap
+        if (clip == null || clip.isRecycled) {
+            onMessage?.invoke("Copy something first.")
+            return
+        }
+        if (transform != null) commitTransformInternalWork()
+        if (!MemoryBudget.fitsDocument(engine.width, engine.height, engine.layers.size + 1)) {
+            onMessage?.invoke(MemoryBudget.documentRefusal(engine.width, engine.height, engine.layers.size + 1))
+            return
+        }
+        val w = engine.width
+        val h = engine.height
+        // Where it was copied from when that spot is inside this canvas (the
+        // same artwork); otherwise centred, shrunk to fit when it is bigger.
+        val dst = RectF()
+        if (PixelClipboard.left >= 0 && PixelClipboard.top >= 0 &&
+            PixelClipboard.left + clip.width <= w && PixelClipboard.top + clip.height <= h
+        ) {
+            dst.set(
+                PixelClipboard.left.toFloat(), PixelClipboard.top.toFloat(),
+                (PixelClipboard.left + clip.width).toFloat(), (PixelClipboard.top + clip.height).toFloat()
+            )
+        } else {
+            val scale = min(1f, min(w.toFloat() / clip.width, h.toFloat() / clip.height))
+            val cw = clip.width * scale
+            val ch = clip.height * scale
+            dst.set((w - cw) / 2f, (h - ch) / 2f, (w + cw) / 2f, (h + ch) / 2f)
+        }
+        val before = engine.snapshotState()
+        val layer = engine.newLayer(name = "Pasted", at = engine.activeIndex + 1)
+        val bounds = Rect(
+            kotlin.math.floor(dst.left).toInt(), kotlin.math.floor(dst.top).toInt(),
+            kotlin.math.ceil(dst.right).toInt(), kotlin.math.ceil(dst.bottom).toInt()
+        )
+        bounds.intersect(0, 0, w, h)
+        layer.tiles.withWriteCanvas(bounds) { c ->
+            c.drawBitmap(clip, null, dst, Paint(Paint.FILTER_BITMAP_FLAG))
+        }
+        engine.markDirtyAll()
+        pushStructural(before, "Paste", EditKind.LayerAdd)
+        // Picked up whole, ready to move: the selection belonged to the copy.
+        engine.clearSelection()
+        if (tool == Tool.Transform) startTransform()
         requestState()
     }
 
@@ -4514,7 +4695,9 @@ class DrawingSession(
             selectionShape = selectionShape,
             selectionOp = selectionOp,
             hasSelection = engine.selection != null,
+            canPaste = !PixelClipboard.isEmpty,
             transforming = transform != null,
+            transformMode = transformMode,
             symmetryX = engine.symmetryX,
             symmetryY = engine.symmetryY,
             symmetryXPos = (engine.symmetryXPos / engine.width).coerceIn(0f, 1f),

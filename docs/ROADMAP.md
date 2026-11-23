@@ -6,10 +6,10 @@ with those apps (November 2026). Unchecked items are not built yet.
 
 ## Everyday painting
 
-- [ ] **Distort, perspective and warp transforms.** Drag single corners
+- [x] **Distort, perspective and warp transforms.** Drag single corners
       (distort / perspective) or bend a mesh (warp). Today's transform moves,
       scales, rotates and flips only.
-- [ ] **Copy and paste.** Copy a selection, or all layers merged, and paste
+- [x] **Copy and paste.** Copy a selection, or all layers merged, and paste
       it as a new layer. Today there is Cut only.
 - [ ] **PSD import and export** with layers, blend modes, masks and groups.
 - [ ] **Smarter fill.**

@@ -210,6 +210,9 @@ object YumeHarness {
                     out.append(scoreOverlayTest())
                 } else if (only == "hoist") {
                     out.append(scoreHoist())
+                } else if (only == "clipxform") {
+                    out.append(scoreClipXform(sparse = true))
+                    out.append(scoreClipXform(sparse = false))
                 } else if (only == "bigstroke") {
                     out.append(scoreBigStroke())
                 } else if (only == "bigstroke6k") {
@@ -4443,6 +4446,247 @@ object YumeHarness {
      * live turn, and the stroke must land on the same pixels as without the
      * gesture (its queued screen points are carried into the new view).
      */
+    /**
+     * Copy / cut / paste, and the distort and warp transforms, on a sparse or a
+     * dense document: copies land exactly where they came from, cut and the
+     * transforms undo exactly, a distort matches a whole-bitmap reference
+     * render, an untouched warp grid changes nothing, and a bent warp passes
+     * through its handle.
+     */
+    private fun scoreClipXform(sparse: Boolean): String {
+        val out = StringBuilder()
+        val tag = if (sparse) "sparse" else "dense"
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = sparse
+        try {
+            val size = 1024
+            fun newDoc(w: Int = size, h: Int = size): Pair<DrawingSession, DrawingEngine> {
+                val engine = DrawingEngine(w, h)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val session = DrawingSession("cx", "CX", engine, History())
+                identityView(session, w, h)
+                session.presets = com.yume.app.engine.BrushLibrary.defaults
+                session.runCommands()
+                return session to engine
+            }
+            // A smooth gradient (for sampling through a warp) with hard shapes on it.
+            fun paint(l: Layer) {
+                l.tiles.withWriteCanvas(Rect(150, 150, 850, 850)) { c ->
+                    val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                    p.shader = android.graphics.LinearGradient(
+                        150f, 150f, 850f, 850f, 0xFFE0405A.toInt(), 0xFF3A70E0.toInt(),
+                        android.graphics.Shader.TileMode.CLAMP
+                    )
+                    c.drawRect(150f, 150f, 850f, 850f, p)
+                    p.shader = null
+                    p.color = 0xFF20C060.toInt()
+                    c.drawCircle(400f, 420f, 90f, p)
+                    p.color = 0x80FFD020.toInt()
+                    c.drawRect(560f, 260f, 760f, 600f, p)
+                }
+            }
+            fun pixels(l: Layer): IntArray {
+                val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                l.tiles.readRectInto(Rect(0, 0, size, size), bmp)
+                val px = IntArray(size * size)
+                bmp.getPixels(px, 0, size, 0, 0, size, size)
+                bmp.recycle()
+                return px
+            }
+            fun diff(a: IntArray, b: IntArray, tol: Int): Pair<Int, Int> {
+                var bad = 0
+                var worst = 0
+                for (i in a.indices) {
+                    val x = a[i]
+                    val y = b[i]
+                    if (x == y) continue
+                    // Compared as seen (colour times alpha): an almost clear
+                    // pixel's un-premultiplied colour is noise.
+                    val ax = x ushr 24
+                    val ay = y ushr 24
+                    var m = kotlin.math.abs(ax - ay)
+                    for (sh in intArrayOf(0, 8, 16)) {
+                        val cx = ((x ushr sh) and 255) * ax / 255
+                        val cy = ((y ushr sh) and 255) * ay / 255
+                        m = maxOf(m, kotlin.math.abs(cx - cy))
+                    }
+                    worst = maxOf(worst, m)
+                    if (m > tol) bad++
+                }
+                return bad to worst
+            }
+            fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+
+            // ---------------------------------------------------- copy + paste
+            run {
+                val (session, engine) = newDoc()
+                val l = engine.newLayer("Paint")
+                engine.selectLayer(l.id)
+                paint(l)
+                val orig = pixels(l)
+                val sel = Region(300, 300, 600, 560)
+                sel.op(Rect(450, 450, 700, 700), Region.Op.UNION)
+                engine.setSelection(Region(sel))
+                session.copy()
+                session.runCommands()
+                val clip = com.yume.app.engine.PixelClipboard.bitmap
+                val at = com.yume.app.engine.PixelClipboard.left to com.yume.app.engine.PixelClipboard.top
+                out.append("clipxform $tag: copy holds the selection bounds: ${pass(clip != null && at == (300 to 300) && clip.width == 400 && clip.height == 400)} (${clip?.width}x${clip?.height} at $at)\n")
+                val layersBefore = engine.layers.size
+                session.paste()
+                session.runCommands()
+                val pasted = engine.layers.last()
+                val pp = pixels(pasted)
+                var wrong = 0
+                var outside = 0
+                for (y in 0 until size step 3) for (x in 0 until size step 3) {
+                    val i = y * size + x
+                    if (sel.contains(x, y)) { if (pp[i] != orig[i]) wrong++ }
+                    else if (pp[i] ushr 24 != 0) outside++
+                }
+                out.append("clipxform $tag: paste lands on the copied pixels: ${pass(engine.layers.size == layersBefore + 1 && pasted.name == "Pasted" && wrong == 0 && outside == 0 && engine.selection == null)} (wrong $wrong, outside $outside)\n")
+                session.undo()
+                session.runCommands()
+                out.append("clipxform $tag: undo paste removes the layer: ${pass(engine.layers.size == layersBefore)}\n")
+
+                // Cut: the selected pixels go, undo brings them back exactly.
+                engine.setSelection(Region(sel))
+                session.cut()
+                session.runCommands()
+                val cutPx = pixels(l)
+                var left = 0
+                var kept = 0
+                for (y in 0 until size step 3) for (x in 0 until size step 3) {
+                    val i = y * size + x
+                    if (sel.contains(x, y)) { if (cutPx[i] ushr 24 != 0) left++ }
+                    else if (cutPx[i] != orig[i]) kept++
+                }
+                session.undo()
+                session.runCommands()
+                val (ub, _) = diff(pixels(l), orig, 0)
+                out.append("clipxform $tag: cut clears the selection, undo restores it: ${pass(left == 0 && kept == 0 && ub == 0)} (left $left, changed outside $kept, after undo $ub)\n")
+
+                // Copy merged: the flattened picture, background included.
+                engine.setSelection(Region(100, 100, 300, 300))
+                session.copyMerged()
+                session.runCommands()
+                val m = com.yume.app.engine.PixelClipboard.bitmap
+                val bgOk = m != null && m.getPixel(10, 10) == 0xFFFFFFFF.toInt() && m.getPixel(150, 150) == orig[250 * size + 250]
+                out.append("clipxform $tag: copy all layers is the flattened picture: ${pass(bgOk)}\n")
+
+                // Into a smaller canvas: centred, shrunk to fit.
+                val (s2, e2) = newDoc(256, 256)
+                engine.setSelection(Region(sel))
+                session.copy()
+                session.runCommands()
+                s2.paste()
+                s2.runCommands()
+                val p2 = e2.layers.last()
+                val nb = p2.tiles.nonEmptyBounds()
+                out.append("clipxform $tag: paste into a smaller canvas fits it: ${pass(e2.layers.size == 2 && !nb.isEmpty && nb.width() <= 256 && nb.height() <= 256 && p2.tiles.getPixel(128, 128) ushr 24 != 0)} (bounds $nb)\n")
+                engine.setSelection(null)
+            }
+
+            // -------------------------------------------------------- distort
+            fun dragHandle(session: DrawingSession, index: Int, toX: Float, toY: Float) {
+                val h = session.transformHandles()!!
+                session.pushInput(InputEvent.Down(0, h[index * 2], h[index * 2 + 1], 1f, 0f, true, false))
+                session.runInput()
+                session.pushInput(InputEvent.Move(0, floatArrayOf(toX), floatArrayOf(toY), floatArrayOf(1f), 0f))
+                session.runInput()
+                session.pushInput(InputEvent.Up(0))
+                session.runInput()
+                session.rebuildTransformIfNeeded()
+            }
+            fun transformDoc(mode: com.yume.app.engine.TransformMode): Triple<DrawingSession, DrawingEngine, Layer> {
+                val (session, engine) = newDoc()
+                val l = engine.newLayer("Paint")
+                engine.selectLayer(l.id)
+                paint(l)
+                session.chooseTransformMode(mode)
+                session.chooseTool(Tool.Transform)
+                session.runCommands()
+                return Triple(session, engine, l)
+            }
+            run {
+                val (session, _, l) = transformDoc(com.yume.app.engine.TransformMode.Distort)
+                val orig = pixels(l)
+                val h0 = session.transformHandles()!!
+                // Out and back: the identity again.
+                dragHandle(session, 0, h0[0] + 120f, h0[1] + 70f)
+                dragHandle(session, 0, h0[0], h0[1])
+                val (ib, iw) = diff(pixels(l), orig, 2)
+                // A real distort, against a whole-bitmap render of the same map.
+                val quad = floatArrayOf(h0[0] + 90f, h0[1] + 40f, h0[2] - 30f, h0[3] + 120f, h0[4] + 60f, h0[5] - 20f, h0[6] - 50f, h0[7])
+                for (k in 0 until 4) dragHandle(session, k, quad[k * 2], quad[k * 2 + 1])
+                val got = pixels(l)
+                val m = android.graphics.Matrix()
+                m.setPolyToPoly(h0, 0, quad, 0, 4)
+                val src = Bitmap.createBitmap(orig, size, size, Bitmap.Config.ARGB_8888)
+                val ref = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                Canvas(ref).drawBitmap(src, m, Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG))
+                val rp = IntArray(size * size)
+                ref.getPixels(rp, 0, size, 0, 0, size, size)
+                src.recycle(); ref.recycle()
+                val (db, dw) = diff(got, rp, 3)
+                session.commitTransform()
+                session.runCommands()
+                session.undo()
+                session.runCommands()
+                val (ub, _) = diff(pixels(l), orig, 0)
+                out.append("clipxform $tag: distort out and back is the identity: ${pass(ib == 0)} (off $ib, worst $iw)\n")
+                out.append("clipxform $tag: distort matches the reference render: ${pass(db * 2000 < size * size)} (off $db, worst $dw)\n")
+                out.append("clipxform $tag: undo distort restores the layer: ${pass(ub == 0)} (off $ub)\n")
+            }
+
+            // ----------------------------------------------------------- warp
+            run {
+                val (session, _, l) = transformDoc(com.yume.app.engine.TransformMode.Warp)
+                val orig = pixels(l)
+                val h0 = session.transformHandles()!!
+                out.append("clipxform $tag: warp shows a 4x4 grid: ${pass(h0.size == 32)}\n")
+                // Grab an inner point and put it straight back: the grid is
+                // regular again, so nothing may move (seams would show here).
+                dragHandle(session, 5, h0[10] + 50f, h0[11] + 30f)
+                dragHandle(session, 5, h0[10], h0[11])
+                val (ib, iw) = diff(pixels(l), orig, 3)
+                out.append("clipxform $tag: an untouched warp changes nothing: ${pass(ib * 5000 < size * size)} (off $ib, worst $iw)\n")
+                // Bend: the pixel under the handle travels with it.
+                val sx = h0[10].toInt()
+                val sy = h0[11].toInt()
+                dragHandle(session, 5, sx + 80f, sy + 40f)
+                val got = pixels(l)
+                val want = orig[sy * size + sx]
+                val now = got[(sy + 40) * size + sx + 80]
+                var m = 0
+                for (sh in intArrayOf(0, 8, 16, 24)) m = maxOf(m, kotlin.math.abs(((want ushr sh) and 255) - ((now ushr sh) and 255)))
+                val moved = got[sy * size + sx] != want
+                out.append("clipxform $tag: warped pixel follows its handle: ${pass(m <= 6 && moved)} (channel off $m)\n")
+                if (sparse) {
+                    warpRef = got
+                } else {
+                    val r = warpRef
+                    if (r != null) {
+                        val (sb, sw) = diff(got, r, 3)
+                        out.append("clipxform: warp sparse = dense: ${pass(sb * 5000 < size * size)} (off $sb, worst $sw)\n")
+                    }
+                }
+                session.commitTransform()
+                session.runCommands()
+                session.undo()
+                session.runCommands()
+                val (ub, _) = diff(pixels(l), orig, 0)
+                out.append("clipxform $tag: undo warp restores the layer: ${pass(ub == 0)} (off $ub)\n")
+            }
+        } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /** The sparse run's warp, compared against the dense run's. */
+    private var warpRef: IntArray? = null
+
     private fun scoreHoist(): String {
         val out = StringBuilder()
         val oldS = TileStoreConfig.useSparseLayers

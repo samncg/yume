@@ -419,6 +419,7 @@ class SurfaceRenderer(
             drawShapePreview(canvas, matrix, engine.width, engine.height)
             drawSymmetry(canvas, matrix, engine.width, engine.height)
             drawSelection(canvas, matrix)
+            drawTransform(canvas, matrix)
             drawGradientGuide(canvas, matrix)
             drawPendingInk(canvas, matrix)
             drawPrediction(canvas, matrix)
@@ -560,6 +561,50 @@ class SurfaceRenderer(
         }
         for (i in 0 until g.handleCount()) handle(g.handleX(i), g.handleY(i))
         if (radial >= 2) handle(engine.symmetryXPos, engine.symmetryYPos)
+    }
+
+    private val xformLine = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val xformPath = android.graphics.Path()
+
+    /** The transform's outline, warp grid and draggable handles, in screen space. */
+    private fun drawTransform(canvas: Canvas, matrix: Matrix) {
+        val lines = session.transformOutlines() ?: return
+        xformPath.reset()
+        for (line in lines) {
+            if (line.size < 4) continue
+            val pts = line.copyOf()
+            matrix.mapPoints(pts)
+            xformPath.moveTo(pts[0], pts[1])
+            var i = 2
+            while (i < pts.size) {
+                xformPath.lineTo(pts[i], pts[i + 1])
+                i += 2
+            }
+        }
+        xformLine.strokeWidth = 3f * density
+        xformLine.color = 0x66000000
+        canvas.drawPath(xformPath, xformLine)
+        xformLine.strokeWidth = 1.2f * density
+        xformLine.color = 0xE6FFFFFF.toInt()
+        canvas.drawPath(xformPath, xformLine)
+        val handles = session.transformHandles() ?: return
+        if (handles.isEmpty()) return
+        val pts = handles.copyOf()
+        matrix.mapPoints(pts)
+        var i = 0
+        while (i < pts.size) {
+            handlePaint.style = Paint.Style.FILL
+            handlePaint.color = 0xE6FFFFFF.toInt()
+            canvas.drawCircle(pts[i], pts[i + 1], 8f * density, handlePaint)
+            handlePaint.style = Paint.Style.STROKE
+            handlePaint.strokeWidth = 2.5f * density
+            handlePaint.color = 0xFFE9A13B.toInt()
+            canvas.drawCircle(pts[i], pts[i + 1], 8f * density, handlePaint)
+            i += 2
+        }
     }
 
     private val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {

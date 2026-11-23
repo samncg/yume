@@ -56,6 +56,27 @@ class TransformSession(
 
     val bounds: RectF = RectF()
 
+    /** How drags on the handles reshape the content. */
+    var mode = TransformMode.Free
+
+    /**
+     * The box the handles start on (document px): the selection's bounds, or
+     * the painted part of the layer. Distort corners and the warp grid are
+     * this box carried through the transform.
+     */
+    private val box = RectF()
+
+    /**
+     * Warp control points, [GRID] x [GRID] (x, y) pairs row by row, in
+     * document px; null until the first warp. Once set, every move, pinch,
+     * flip and distort reshapes these points instead of [matrix].
+     */
+    private var warp: FloatArray? = null
+
+    /** Fine mesh the warp is drawn with: destination and source points. */
+    private var meshDst: FloatArray? = null
+    private var meshSrc: FloatArray? = null
+
     private val filterPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val srcPaint = Paint().apply {
         blendMode = BlendMode.SRC
@@ -101,7 +122,77 @@ class TransformSession(
                 bounds.set(0f, 0f, w.toFloat(), h.toFloat())
             }
         }
+        box.set(contentBox(w, h))
         rebuild()
+    }
+
+    private fun contentBox(w: Int, h: Int): RectF {
+        val sel = selection?.takeIf { !it.isEmpty }
+        if (sel != null) return RectF(sel.bounds)
+        val content = if (sparse) Rect(
+            srcBounds.left.toInt(), srcBounds.top.toInt(), srcBounds.right.toInt(), srcBounds.bottom.toInt()
+        ) else store.nonEmptyBounds()
+        if (!content.intersect(0, 0, w, h) || content.isEmpty) return RectF(0f, 0f, w.toFloat(), h.toFloat())
+        return RectF(tighten(content))
+    }
+
+    /**
+     * [r] shrunk to the pixels that are not transparent. Tile bounds are
+     * whole tiles, so the handles would float away from the paint; each side
+     * is read inward in strips until paint is met.
+     */
+    private fun tighten(r: Rect): Rect {
+        val strip = 16
+        fun firstRow(fromTop: Boolean): Int? {
+            val buf = Bitmap.createBitmap(r.width(), strip, Bitmap.Config.ARGB_8888)
+            val row = IntArray(r.width())
+            try {
+                var y = if (fromTop) r.top else r.bottom - strip
+                while (if (fromTop) y < r.bottom else y + strip > r.top) {
+                    val y0 = y.coerceIn(r.top, r.bottom - 1)
+                    val rows = min(strip, r.bottom - y0)
+                    store.readRectInto(Rect(r.left, y0, r.right, y0 + rows), buf)
+                    val order = if (fromTop) 0 until rows else (rows - 1) downTo 0
+                    for (k in order) {
+                        buf.getPixels(row, 0, r.width(), 0, k, r.width(), 1)
+                        if (row.any { it ushr 24 != 0 }) return y0 + k
+                    }
+                    y += if (fromTop) strip else -strip
+                }
+                return null
+            } finally {
+                buf.recycle()
+            }
+        }
+        fun firstCol(fromLeft: Boolean, top: Int, bottom: Int): Int? {
+            val hgt = bottom - top
+            val buf = Bitmap.createBitmap(strip, hgt, Bitmap.Config.ARGB_8888)
+            val col = IntArray(hgt)
+            try {
+                var x = if (fromLeft) r.left else r.right - strip
+                while (if (fromLeft) x < r.right else x + strip > r.left) {
+                    val x0 = x.coerceIn(r.left, r.right - 1)
+                    val cols = min(strip, r.right - x0)
+                    store.readRectInto(Rect(x0, top, x0 + cols, bottom), buf)
+                    val order = if (fromLeft) 0 until cols else (cols - 1) downTo 0
+                    for (k in order) {
+                        buf.getPixels(col, 0, 1, k, 0, 1, hgt)
+                        if (col.any { it ushr 24 != 0 }) return x0 + k
+                    }
+                    x += if (fromLeft) strip else -strip
+                }
+                return null
+            } finally {
+                buf.recycle()
+            }
+        }
+        return runCatching {
+            val top = firstRow(true) ?: return r
+            val bottom = (firstRow(false) ?: return r) + 1
+            val left = firstCol(true, top, bottom) ?: return r
+            val right = (firstCol(false, top, bottom) ?: return r) + 1
+            Rect(left, top, right, bottom)
+        }.getOrDefault(r)
     }
 
     /** Sparse setup: per-tile snapshot plus base/source tiles for the selection. */
@@ -192,7 +283,7 @@ class TransformSession(
         layer.tiles.withWriteCanvas(Rect(0, 0, engine.width, engine.height)) { c ->
             c.drawColor(0, BlendMode.CLEAR)
             c.drawBitmap(base, 0f, 0f, null)
-            c.drawBitmap(src, matrix, filterPaint)
+            if (warp != null) drawMesh(c, src, 0f, 0f, null) else c.drawBitmap(src, matrix, filterPaint)
         }
         layer.touch()
         engine.markDirtyAll()
@@ -219,6 +310,8 @@ class TransformSession(
         val ts = store.tileSize
         val inv = Matrix()
         if (!matrix.invert(inv)) inv.reset()
+        val warped = warp != null
+        val cells = if (warped) cellBounds() else null
         val r = Rect()
         for (ty in dirtyRect.top / ts..(dirtyRect.bottom - 1) / ts) {
             for (tx in dirtyRect.left / ts..(dirtyRect.right - 1) / ts) {
@@ -234,6 +327,25 @@ class TransformSession(
                 if (base != null) c.drawBitmap(base, tile.left.toFloat(), tile.top.toFloat(), srcPaint)
                 // Floating source: read the patch this tile needs, then draw it
                 // with the matrix shifted so the patch's origin lands right.
+                if (warped) {
+                    val area = RectF(tile)
+                    val src = meshSourceFor(area, cells!!)
+                    if (src != null) {
+                        src.inset(-2f, -2f)
+                        r.set(
+                            floor(src.left).toInt(), floor(src.top).toInt(),
+                            ceil(src.right).toInt(), ceil(src.bottom).toInt()
+                        )
+                        if (r.intersect(0, 0, engine.width, engine.height) && !r.isEmpty) {
+                            val patch = buf(r.width(), r.height(), patchBufs)
+                            readSource(r, patch)
+                            drawMesh(c, patch, r.left.toFloat(), r.top.toFloat(), area, cells)
+                        }
+                    }
+                    store.writeRect(tile, buf, Rect(0, 0, tile.width(), tile.height()))
+                    if (!cap.has(tx, ty)) cap.markEmpty(tx, ty)
+                    continue
+                }
                 val near = RectF(tile)
                 inv.mapRect(near)
                 near.inset(-2f, -2f)
@@ -266,9 +378,330 @@ class TransformSession(
     private fun mappedSourceBounds(): RectF {
         val out = RectF(srcBounds)
         if (out.isEmpty) return out
-        matrix.mapRect(out)
+        val mesh = if (warp != null) ensureMesh() else null
+        if (mesh != null) {
+            out.set(mesh[0], mesh[1], mesh[0], mesh[1])
+            var i = 0
+            while (i < mesh.size) {
+                out.union(mesh[i], mesh[i + 1])
+                i += 2
+            }
+        } else {
+            matrix.mapRect(out)
+        }
         out.inset(-2f, -2f)
         return out
+    }
+
+    // ------------------------------------------------------- distort and warp
+
+    /** The box's corners (TL, TR, BR, BL) as they now sit on the canvas. */
+    fun corners(): FloatArray {
+        val w = warp
+        if (w != null) {
+            val n = GRID
+            val out = FloatArray(8)
+            for ((k, i) in intArrayOf(0, n - 1, n * n - 1, n * (n - 1)).withIndex()) {
+                out[k * 2] = w[i * 2]
+                out[k * 2 + 1] = w[i * 2 + 1]
+            }
+            return out
+        }
+        val out = boxCorners()
+        matrix.mapPoints(out)
+        return out
+    }
+
+    private fun boxCorners(): FloatArray = floatArrayOf(
+        box.left, box.top, box.right, box.top, box.right, box.bottom, box.left, box.bottom
+    )
+
+    /** The draggable points for the current mode, as (x, y) pairs. */
+    fun handles(): FloatArray = when (mode) {
+        TransformMode.Free -> FloatArray(0)
+        TransformMode.Distort -> corners()
+        TransformMode.Warp -> warp?.copyOf() ?: gridFromMatrix()
+    }
+
+    /**
+     * Lines to draw over the content, each a polyline of (x, y) pairs: the
+     * outline, and in warp mode the grid through the control points.
+     */
+    fun outlines(): List<FloatArray> {
+        val out = ArrayList<FloatArray>()
+        if (warp == null && mode != TransformMode.Warp) {
+            val c = corners()
+            out.add(floatArrayOf(c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[0], c[1]))
+            return out
+        }
+        val pts = warp ?: gridFromMatrix()
+        val per = FINE
+        val n = (GRID - 1) * per
+        val tmp = FloatArray(2)
+        val lines = if (mode == TransformMode.Warp) (0 until GRID).toList() else listOf(0, GRID - 1)
+        for (k in lines) {
+            val row = FloatArray((n + 1) * 2)
+            val col = FloatArray((n + 1) * 2)
+            for (i in 0..n) {
+                val u = i.toFloat() / per
+                evalWarp(pts, u, k.toFloat(), tmp)
+                row[i * 2] = tmp[0]; row[i * 2 + 1] = tmp[1]
+                evalWarp(pts, k.toFloat(), u, tmp)
+                col[i * 2] = tmp[0]; col[i * 2 + 1] = tmp[1]
+            }
+            out.add(row)
+            out.add(col)
+        }
+        return out
+    }
+
+    /** The control grid the current matrix gives the box (a warp's start). */
+    private fun gridFromMatrix(): FloatArray {
+        val n = GRID
+        val pts = FloatArray(n * n * 2)
+        for (j in 0 until n) for (i in 0 until n) {
+            val k = (j * n + i) * 2
+            pts[k] = box.left + box.width() * i / (n - 1)
+            pts[k + 1] = box.top + box.height() * j / (n - 1)
+        }
+        matrix.mapPoints(pts)
+        return pts
+    }
+
+    /** Moves handle [index] (see [handles]) to ([x], [y]). */
+    fun moveHandle(index: Int, x: Float, y: Float) {
+        when (mode) {
+            TransformMode.Free -> return
+            TransformMode.Distort -> {
+                val from = corners()
+                val to = from.copyOf()
+                to[index * 2] = x
+                to[index * 2 + 1] = y
+                // A corner dragged across the opposite edge would fold the
+                // picture over itself (and the inverse would not exist).
+                if (!isConvex(to)) return
+                val m = Matrix()
+                val w = warp
+                if (w != null) {
+                    if (!m.setPolyToPoly(from, 0, to, 0, 4)) return
+                    m.mapPoints(w)
+                } else {
+                    if (!m.setPolyToPoly(boxCorners(), 0, to, 0, 4)) return
+                    matrix.set(m)
+                }
+            }
+            TransformMode.Warp -> {
+                val w = warp ?: gridFromMatrix().also { warp = it }
+                w[index * 2] = x
+                w[index * 2 + 1] = y
+            }
+        }
+        meshDst = null
+        needsRebuild = true
+    }
+
+    private fun isConvex(q: FloatArray): Boolean {
+        var sign = 0
+        for (i in 0 until 4) {
+            val ax = q[i * 2]; val ay = q[i * 2 + 1]
+            val bx = q[(i + 1) % 4 * 2]; val by = q[(i + 1) % 4 * 2 + 1]
+            val cx = q[(i + 2) % 4 * 2]; val cy = q[(i + 2) % 4 * 2 + 1]
+            val cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx)
+            if (kotlin.math.abs(cross) < 1e-3f) return false
+            val s = if (cross > 0) 1 else -1
+            if (sign == 0) sign = s else if (s != sign) return false
+        }
+        return true
+    }
+
+    /** Applies [m] to whatever holds the shape (the warp grid, or the matrix). */
+    private fun applyAffine(m: Matrix) {
+        val w = warp
+        if (w != null) {
+            m.mapPoints(w)
+            meshDst = null
+        } else {
+            matrix.postConcat(m)
+        }
+        needsRebuild = true
+    }
+
+    /**
+     * A point of the warped surface at grid coordinates ([u], [v]) (0 to
+     * GRID - 1): Catmull-Rom through the control points both ways, so the
+     * surface passes through every handle, and an unwarped grid gives back
+     * the plain mapping exactly.
+     */
+    private fun evalWarp(pts: FloatArray, u: Float, v: Float, out: FloatArray) {
+        val n = GRID
+        val iu = floor(u).toInt().coerceIn(0, n - 2)
+        val iv = floor(v).toInt().coerceIn(0, n - 2)
+        val tu = u - iu
+        val tv = v - iv
+        var x = 0f
+        var y = 0f
+        for (dj in -1..2) {
+            val wv = cr(dj, tv)
+            for (di in -1..2) {
+                val wgt = cr(di, tu) * wv
+                if (wgt == 0f) continue
+                x += wgt * ctrl(pts, iu + di, iv + dj, 0)
+                y += wgt * ctrl(pts, iu + di, iv + dj, 1)
+            }
+        }
+        out[0] = x
+        out[1] = y
+    }
+
+    /** Catmull-Rom weight of the point [k] (-1..2) steps from the segment start, at [t]. */
+    private fun cr(k: Int, t: Float): Float {
+        val t2 = t * t
+        val t3 = t2 * t
+        return when (k) {
+            -1 -> (-t3 + 2f * t2 - t) * 0.5f
+            0 -> (3f * t3 - 5f * t2 + 2f) * 0.5f
+            1 -> (-3f * t3 + 4f * t2 + t) * 0.5f
+            else -> (t3 - t2) * 0.5f
+        }
+    }
+
+    /** Control point (i, j), extended past the edges in a straight line. */
+    private fun ctrl(pts: FloatArray, i: Int, j: Int, axis: Int): Float {
+        val n = GRID
+        fun at(a: Int, b: Int): Float = pts[(b * n + a) * 2 + axis]
+        fun col(a: Int, b: Int): Float = when {
+            b < 0 -> 2f * at(a, 0) - at(a, 1)
+            b >= n -> 2f * at(a, n - 1) - at(a, n - 2)
+            else -> at(a, b)
+        }
+        return when {
+            i < 0 -> 2f * col(0, j) - col(1, j)
+            i >= n -> 2f * col(n - 1, j) - col(n - 2, j)
+            else -> col(i, j)
+        }
+    }
+
+    /** The fine mesh's destination points (built once per change of the grid). */
+    private fun ensureMesh(): FloatArray? {
+        val w = warp ?: return null
+        meshDst?.let { return it }
+        val per = FINE
+        val n = (GRID - 1) * per
+        val dst = FloatArray((n + 1) * (n + 1) * 2)
+        val src = FloatArray((n + 1) * (n + 1) * 2)
+        val tmp = FloatArray(2)
+        for (j in 0..n) for (i in 0..n) {
+            val k = (j * (n + 1) + i) * 2
+            evalWarp(w, i.toFloat() / per, j.toFloat() / per, tmp)
+            dst[k] = tmp[0]
+            dst[k + 1] = tmp[1]
+            src[k] = box.left + box.width() * i / n
+            src[k + 1] = box.top + box.height() * j / n
+        }
+        meshDst = dst
+        meshSrc = src
+        return dst
+    }
+
+    /** Each fine cell's destination bounds (left, top, right, bottom). */
+    private fun cellBounds(): FloatArray {
+        val dst = ensureMesh() ?: return FloatArray(0)
+        val n = (GRID - 1) * FINE
+        val out = FloatArray(n * n * 4)
+        for (j in 0 until n) for (i in 0 until n) {
+            var l = Float.MAX_VALUE
+            var t = Float.MAX_VALUE
+            var r = -Float.MAX_VALUE
+            var b = -Float.MAX_VALUE
+            for ((di, dj) in CORNERS) {
+                val k = ((j + dj) * (n + 1) + i + di) * 2
+                l = min(l, dst[k]); r = maxOf(r, dst[k])
+                t = min(t, dst[k + 1]); b = maxOf(b, dst[k + 1])
+            }
+            val c = (j * n + i) * 4
+            out[c] = l; out[c + 1] = t; out[c + 2] = r; out[c + 3] = b
+        }
+        return out
+    }
+
+    private fun cellTouches(cells: FloatArray, c: Int, area: RectF): Boolean {
+        val o = c * 4
+        return !(cells[o] > area.right || cells[o + 2] < area.left ||
+            cells[o + 1] > area.bottom || cells[o + 3] < area.top)
+    }
+
+    /** Source bounds of the fine cells that land in [area], or null if none do. */
+    private fun meshSourceFor(area: RectF, cells: FloatArray): RectF? {
+        val src = meshSrc ?: return null
+        val n = (GRID - 1) * FINE
+        var out: RectF? = null
+        for (c in 0 until n * n) {
+            if (!cellTouches(cells, c, area)) continue
+            val i = c % n
+            val j = c / n
+            val k0 = (j * (n + 1) + i) * 2
+            val k1 = ((j + 1) * (n + 1) + i + 1) * 2
+            if (out == null) out = RectF(src[k0], src[k0 + 1], src[k1], src[k1 + 1])
+            else out.union(src[k0], src[k0 + 1], src[k1], src[k1 + 1])
+        }
+        return out
+    }
+
+    private val meshPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private var meshVerts = FloatArray(0)
+    private var meshTexs = FloatArray(0)
+
+    /**
+     * Draws [image] (whose top-left is document ([ox], [oy])) through the warp
+     * mesh into [c] (drawing in document coordinates) as textured triangles:
+     * only the cells that touch [area], or all of them when it is null.
+     */
+    private fun drawMesh(
+        c: Canvas, image: Bitmap, ox: Float, oy: Float,
+        area: RectF?, cells: FloatArray? = null
+    ) {
+        val dst = ensureMesh() ?: return
+        val src = meshSrc ?: return
+        val n = (GRID - 1) * FINE
+        if (meshVerts.size < n * n * 12) {
+            meshVerts = FloatArray(n * n * 12)
+            meshTexs = FloatArray(n * n * 12)
+        }
+        val verts = meshVerts
+        val texs = meshTexs
+        var count = 0
+        for (j in 0 until n) for (i in 0 until n) {
+            if (area != null && cells != null && !cellTouches(cells, j * n + i, area)) continue
+            for ((di, dj) in TRIANGLES) {
+                val k = ((j + dj) * (n + 1) + i + di) * 2
+                verts[count] = dst[k]
+                verts[count + 1] = dst[k + 1]
+                texs[count] = src[k] - ox
+                texs[count + 1] = src[k + 1] - oy
+                count += 2
+            }
+        }
+        if (count == 0) return
+        meshPaint.shader = android.graphics.BitmapShader(
+            image, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP
+        )
+        c.drawVertices(
+            Canvas.VertexMode.TRIANGLES, count, verts, 0, texs, 0,
+            null, 0, null, 0, 0, meshPaint
+        )
+        meshPaint.shader = null
+    }
+
+    /** Everything the shape depends on, for putting a cancelled drag back. */
+    fun state(): Any = Pair(Matrix(matrix), warp?.copyOf())
+
+    @Suppress("UNCHECKED_CAST")
+    fun restoreState(state: Any) {
+        val (m, w) = state as Pair<Matrix, FloatArray?>
+        matrix.set(m)
+        warp = w?.copyOf()
+        meshDst = null
+        needsRebuild = true
     }
 
     /** Stitches the floating source out of its tiles for one patch rect. */
@@ -331,32 +764,26 @@ class TransformSession(
     }
 
     fun translate(dx: Float, dy: Float) {
-        matrix.postTranslate(dx, dy)
-        needsRebuild = true
+        applyAffine(Matrix().apply { setTranslate(dx, dy) })
     }
 
     fun scaleRotate(focusX: Float, focusY: Float, factor: Float, degrees: Float) {
         val m = Matrix()
         m.postRotate(degrees, focusX, focusY)
         m.postScale(factor, factor, focusX, focusY)
-        matrix.postConcat(m)
-        needsRebuild = true
+        applyAffine(m)
     }
 
     fun flipHorizontal() {
-        val cx = engine.width / 2f
         val m = Matrix()
-        m.postScale(-1f, 1f, cx, engine.height / 2f)
-        matrix.postConcat(m)
-        needsRebuild = true
+        m.postScale(-1f, 1f, engine.width / 2f, engine.height / 2f)
+        applyAffine(m)
     }
 
     fun flipVertical() {
-        val cy = engine.height / 2f
         val m = Matrix()
-        m.postScale(1f, -1f, engine.width / 2f, cy)
-        matrix.postConcat(m)
-        needsRebuild = true
+        m.postScale(1f, -1f, engine.width / 2f, engine.height / 2f)
+        applyAffine(m)
     }
 
     /** Writes the transformed pixels back and returns the undo action. */
@@ -402,6 +829,16 @@ class TransformSession(
         }
         layer.touch()
         engine.markDirtyAll()
+    }
+
+    private companion object {
+        /** Warp handles per side. */
+        const val GRID = 4
+        /** Mesh cells per warp cell. */
+        const val FINE = 8
+        val CORNERS = listOf(0 to 0, 1 to 0, 0 to 1, 1 to 1)
+        /** Two triangles per cell: (0,0)-(1,0)-(1,1) and (0,0)-(1,1)-(0,1). */
+        val TRIANGLES = listOf(0 to 0, 1 to 0, 1 to 1, 0 to 0, 1 to 1, 0 to 1)
     }
 
     private fun releaseBuffers() {

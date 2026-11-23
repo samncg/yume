@@ -2481,6 +2481,13 @@ fun SelectionPanel(state: EditorUiState, session: DrawingSession, onClose: () ->
                 session.chooseTool(Tool.Brush)
             }
         }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmallButton("Copy") { session.copy() }
+            SmallButton("Copy all") { session.copyMerged() }
+            SmallButton("Cut") { session.cut() }
+            SmallButton("Paste", enabled = state.canPaste) { session.pasteToPlace() }
+        }
     }
 }
 

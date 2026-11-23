@@ -64,6 +64,7 @@ internal fun ringFace(a: com.yume.app.data.Customization.Action): Pair<Glyph?, S
     "ClearLayer" -> Glyph.Clear to null
     "SelectAll" -> null to "All"
     "Deselect" -> null to "None"
+    "CopyMerged" -> null to "Copy+"
     "FitToScreen" -> Glyph.Fit to null
     "ActualSize" -> null to "1:1"
     "FlipView" -> Glyph.FlipH to null
