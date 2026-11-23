@@ -217,7 +217,14 @@ fun YumeSlider(
     max: Float = 1f,
     accent: Color = YumeColors.accent,
     /** Called once when the gesture ends, to commit a single undo step. */
-    onChangeFinished: (() -> Unit)? = null
+    onChangeFinished: (() -> Unit)? = null,
+    /**
+     * A colour track instead of the plain one: the colours along it, left to
+     * right (colour sliders show what each value gives).
+     */
+    trackColors: List<Color>? = null,
+    /** The knob's centre on a colour track: the colour at the current value. */
+    knobColor: Color? = null
 ) {
     val finished = rememberUpdatedState(onChangeFinished)
     Column(modifier.fillMaxWidth()) {
@@ -292,8 +299,23 @@ fun YumeSlider(
             val cy = size.height / 2f
             val pad = knobRadius.toPx()
             val trackW = (size.width - pad * 2f).coerceAtLeast(1f)
-            val trackH = 6.dp.toPx()
             val frac = ((value - min) / (max - min)).coerceIn(0f, 1f)
+            val colours = trackColors
+            if (colours != null && colours.size >= 2) {
+                val trackH = 12.dp.toPx()
+                drawRoundRect(
+                    brush = androidx.compose.ui.graphics.Brush.horizontalGradient(colours, startX = pad, endX = pad + trackW),
+                    topLeft = Offset(pad, cy - trackH / 2f),
+                    size = Size(trackW, trackH),
+                    cornerRadius = CornerRadius(trackH / 2f, trackH / 2f)
+                )
+                val knobX = pad + trackW * frac
+                drawCircle(Color(0x55000000), pad * 1.2f, Offset(knobX, cy + 1.5f))
+                drawCircle(Color.White, pad * 1.05f, Offset(knobX, cy))
+                drawCircle(knobColor ?: accent, pad * 0.72f, Offset(knobX, cy))
+                return@Canvas
+            }
+            val trackH = 6.dp.toPx()
 
             drawRoundRect(
                 color = YumeColors.track,

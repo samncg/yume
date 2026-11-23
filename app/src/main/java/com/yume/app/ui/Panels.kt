@@ -1452,7 +1452,10 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                     label = "Hue",
                     valueLabel = "${hsl[0].roundToInt()}°",
                     min = 0f,
-                    max = 359f
+                    max = 359f,
+                    // Every hue at full strength, so the track reads even for a grey.
+                    trackColors = (0..6).map { Color(hslToRgb(it * 60f, 1f, 0.5f)) },
+                    knobColor = Color(current)
                 )
                 YumeSlider(
                     value = hsl[1],
@@ -1461,7 +1464,9 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                         adopt(hslToRgb(hsl[0], s.coerceIn(0f, 1f), hsl[2]), true)
                     },
                     label = "Saturation",
-                    valueLabel = "${(hsl[1] * 100).roundToInt()}%"
+                    valueLabel = "${(hsl[1] * 100).roundToInt()}%",
+                    trackColors = listOf(Color(hslToRgb(hsl[0], 0f, hsl[2])), Color(hslToRgb(hsl[0], 1f, hsl[2]))),
+                    knobColor = Color(current)
                 )
                 YumeSlider(
                     value = hsl[2],
@@ -1470,7 +1475,13 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                         adopt(hslToRgb(hsl[0], hsl[1], l.coerceIn(0f, 1f)), true)
                     },
                     label = "Lightness",
-                    valueLabel = "${(hsl[2] * 100).roundToInt()}%"
+                    valueLabel = "${(hsl[2] * 100).roundToInt()}%",
+                    trackColors = listOf(
+                        Color(hslToRgb(hsl[0], hsl[1], 0f)),
+                        Color(hslToRgb(hsl[0], hsl[1], 0.5f)),
+                        Color(hslToRgb(hsl[0], hsl[1], 1f))
+                    ),
+                    knobColor = Color(current)
                 )
             }
         }
