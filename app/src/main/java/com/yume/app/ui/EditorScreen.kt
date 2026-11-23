@@ -75,7 +75,8 @@ private const val TOP_BAR_HEIGHT = 54
 
 /** Panels that belong to a tool: they open on a second tap of that tool. */
 private val TOOL_PANELS = setOf(
-    PanelId.Brush, PanelId.Fill, PanelId.Gradient, PanelId.Selection, PanelId.Shape, PanelId.Liquify
+    PanelId.Brush, PanelId.Fill, PanelId.Gradient, PanelId.Selection, PanelId.Shape, PanelId.Liquify,
+    PanelId.Clone
 )
 
 @Composable
@@ -737,6 +738,7 @@ private fun PanelHost(
         PanelId.Shape -> ShapePanel(state, session, onClose)
         PanelId.Guides -> GuidesPanel(state, session, onClose)
         PanelId.Liquify -> LiquifyPanel(state, session, onClose)
+        PanelId.Clone -> ClonePanel(state, session, onClose)
         PanelId.Actions -> ActionsPanel(
             state = state,
             session = session,
@@ -1141,5 +1143,6 @@ internal fun toolChrome(t: Tool): Triple<Glyph, String, PanelId?> = when (t) {
     Tool.Gradient -> Triple(Glyph.Gradient, "Gradient", PanelId.Gradient)
     Tool.Shape -> Triple(Glyph.Shape, "Shape", PanelId.Shape)
     Tool.Liquify -> Triple(Glyph.Liquify, "Liquify", PanelId.Liquify)
+    Tool.Clone -> Triple(Glyph.Clone, "Clone", PanelId.Clone)
     Tool.Text -> Triple(Glyph.Text, "Text", null)
 }

@@ -420,6 +420,7 @@ class SurfaceRenderer(
             drawSymmetry(canvas, matrix, engine.width, engine.height)
             drawSelection(canvas, matrix)
             drawTransform(canvas, matrix)
+            drawCloneSource(canvas, matrix)
             drawGradientGuide(canvas, matrix)
             drawPendingInk(canvas, matrix)
             drawPrediction(canvas, matrix)
@@ -568,6 +569,24 @@ class SurfaceRenderer(
         strokeJoin = Paint.Join.ROUND
     }
     private val xformPath = android.graphics.Path()
+
+    /** The clone tool's source: a ring with a cross, where it is copying from. */
+    private fun drawCloneSource(canvas: Canvas, matrix: Matrix) {
+        val at = session.cloneMarker() ?: return
+        val p = floatArrayOf(at[0], at[1])
+        matrix.mapPoints(p)
+        val r = maxOf(10f * density, session.brushSize * 0.5f * session.view.scale)
+        xformLine.strokeWidth = 3f * density
+        xformLine.color = 0x66000000
+        canvas.drawCircle(p[0], p[1], r, xformLine)
+        canvas.drawLine(p[0] - 6f * density, p[1], p[0] + 6f * density, p[1], xformLine)
+        canvas.drawLine(p[0], p[1] - 6f * density, p[0], p[1] + 6f * density, xformLine)
+        xformLine.strokeWidth = 1.4f * density
+        xformLine.color = 0xF2FFFFFF.toInt()
+        canvas.drawCircle(p[0], p[1], r, xformLine)
+        canvas.drawLine(p[0] - 6f * density, p[1], p[0] + 6f * density, p[1], xformLine)
+        canvas.drawLine(p[0], p[1] - 6f * density, p[0], p[1] + 6f * density, xformLine)
+    }
 
     /** The transform's outline, warp grid and draggable handles, in screen space. */
     private fun drawTransform(canvas: Canvas, matrix: Matrix) {

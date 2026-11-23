@@ -96,6 +96,8 @@ data class EditorUiState(
     val fillExpand: Int = 1,
     /** Fill gap closing, document px (0: off). */
     val fillGap: Int = 0,
+    val cloneSourceSet: Boolean = false,
+    val cloneAllLayers: Boolean = false,
     /** The reference layer's name (fills follow its lines), or null. */
     val referenceLayer: String? = null,
     /** Gradient tool: linear or radial, from the current colour to [gradientSecond]. */

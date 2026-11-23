@@ -76,6 +76,22 @@ class StrokePainter(private val engine: DrawingEngine) {
     private var smudgePatch: Bitmap? = null
     private val smudgePatchRect = Rect()
 
+    // Clone: each dab copies the pixels [cloneDx], [cloneDy] away (from the
+    // layer, or from the picture as shown when [cloneComposite]), cut to the
+    // dab, at full resolution.
+    private var clone = false
+    private var cloneDx = 0f
+    private var cloneDy = 0f
+    private var cloneComposite = false
+    private var clonePatch: Bitmap? = null
+    private var clonePatchCanvas: Canvas? = null
+    private val cloneSrcRect = Rect()
+    private val cloneMaskPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply { blendMode = BlendMode.DST_IN }
+    private val clonePaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val cloneMaskRect = RectF()
+    /** A dab whose source changes every time: never from the tip cache. */
+    private var noTipCache = false
+
     private var canvas: Canvas? = null
     private var store: TileStore? = null
     private var selectionClip: Path? = null
@@ -283,11 +299,18 @@ class StrokePainter(private val engine: DrawingEngine) {
         initialTilt: Float,
         captureBase: Boolean = true,
         assistStrength: Float = 0f,
-        startTaper: Boolean = true
+        startTaper: Boolean = true,
+        /** Clone: the source's offset from the brush (dx, dy), or null to paint. */
+        cloneOffset: FloatArray? = null,
+        cloneFromComposite: Boolean = false
     ) {
         layer = target
         preset = brush
-        smudge = brush.category == BrushCategory.Smudge
+        clone = cloneOffset != null
+        cloneDx = cloneOffset?.get(0) ?: 0f
+        cloneDy = cloneOffset?.get(1) ?: 0f
+        cloneComposite = cloneFromComposite
+        smudge = brush.category == BrushCategory.Smudge && !clone
         dab = BrushDab.dab(brush)
         curve = PressureCurve.of(brush.pressureCurve)
         velocityOn = brush.velocitySize != 0f || brush.velocityOpacity != 0f
@@ -801,6 +824,10 @@ class StrokePainter(private val engine: DrawingEngine) {
     /** One dab: smudge, wet bleed, or paint (with colour jitter and wet mix). */
     private fun dabOnce(d: Bitmap, brush: BrushPreset, sx: Float, sy: Float, half: Float, alpha: Float, angle: Float) {
         val maskEdit = layer?.editMask == true
+        if (clone) {
+            stampClone(d, sx, sy, half, alpha)
+            return
+        }
         if (smudge) {
             if (brush.bleeds && !maskEdit) {
                 stampBleed(d, brush, sx, sy, half, alpha, brush.bleed, brush.bleedPaint)
@@ -997,7 +1024,7 @@ class StrokePainter(private val engine: DrawingEngine) {
         // pixel and its size to a whole pixel, so neighbouring dabs share a
         // resampled tip from [tipCache] (the resample is most of a big dab's
         // cost). Invisible at this size; off for exact (harness) painting.
-        val cacheable = fastDabs && rot == 0f && (right0 - left0) >= FAST_DAB_MIN
+        val cacheable = fastDabs && !noTipCache && rot == 0f && (right0 - left0) >= FAST_DAB_MIN
         if (cacheable) {
             val size = kotlin.math.round(right0 - left0)
             left = kotlin.math.round(left0 * 2f) / 2f
@@ -1278,6 +1305,66 @@ class StrokePainter(private val engine: DrawingEngine) {
         smudgeDstPaint.alpha = (brush.smudgeAmount * 255f).toInt().coerceIn(1, 255)
         smudgeDstPaint.blendMode = BlendMode.SRC_OVER
         drawDab(smudgeBuffer, x - half, y - half, x + half, y + half, smudgeDstPaint)
+    }
+
+    /**
+     * Clone: copies the pixels under the dab moved by the clone offset (the
+     * layer, or the picture as shown), cuts them to the dab, and lays them
+     * down here. Full resolution: the patch is the dab's own size.
+     */
+    private fun stampClone(d: Bitmap, x: Float, y: Float, half: Float, alpha: Float) {
+        val target = layer ?: return
+        // On whole pixels, at a whole-pixel offset: every pixel is copied
+        // as it is (the dab's coverage does the softening).
+        val dstL = floor(x - half).toInt()
+        val dstT = floor(y - half).toInt()
+        val size = (ceil(x + half).toInt() - dstL).coerceAtLeast(1)
+        val left = dstL + cloneDx.toInt()
+        val top = dstT + cloneDy.toInt()
+        cloneSrcRect.set(left, top, left + size, top + size)
+        var p = clonePatch
+        if (p == null || p.width < size || p.height < size) {
+            p?.recycle()
+            p = runCatching { Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888) }.getOrNull() ?: return
+            clonePatch = p
+            clonePatchCanvas = Canvas(p)
+        }
+        val pc = clonePatchCanvas ?: return
+        pc.drawColor(0, BlendMode.CLEAR)
+        val clip = Rect(cloneSrcRect)
+        if (!clip.intersect(0, 0, engine.width, engine.height)) return
+        // The source, read where it lies inside the canvas (outside: nothing).
+        val part = runCatching {
+            Bitmap.createBitmap(clip.width(), clip.height(), Bitmap.Config.ARGB_8888)
+        }.getOrNull() ?: return
+        try {
+            val comp = engine.compositeTiles
+            if (cloneComposite && comp != null) comp.readRectInto(clip, part)
+            else if (cloneComposite) engine.readFlattened(clip, part)
+            else target.paintStore.readRectInto(clip, part)
+            pc.drawBitmap(part, (clip.left - left).toFloat(), (clip.top - top).toFloat(), null)
+        } finally {
+            part.recycle()
+        }
+        // Cut to the dab's shape and softness, at the dab's real position.
+        // DST_IN only touches where the dab is drawn: the rim of the patch
+        // around it must be cleared too, or its square edges show.
+        cloneMaskRect.set(x - half - dstL, y - half - dstT, x + half - dstL, y + half - dstT)
+        pc.drawBitmap(d, null, cloneMaskRect, cloneMaskPaint)
+        val rim = pc.save()
+        pc.clipOutRect(cloneMaskRect)
+        pc.drawColor(0, BlendMode.CLEAR)
+        pc.restoreToCount(rim)
+        clonePaint.alpha = (alpha * 255f).toInt().coerceIn(1, 255)
+        clonePaint.blendMode = if (layer?.alphaLock == true && layer?.editMask != true) BlendMode.SRC_ATOP else BlendMode.SRC_OVER
+        val sub = if (p.width == size && p.height == size) p else Bitmap.createBitmap(p, 0, 0, size, size)
+        noTipCache = true
+        try {
+            drawDab(sub, dstL.toFloat(), dstT.toFloat(), (dstL + size).toFloat(), (dstT + size).toFloat(), clonePaint)
+        } finally {
+            noTipCache = false
+            if (sub !== p) sub.recycle()
+        }
     }
 
     /** Rolls the layer back to the pre-stroke snapshot. */

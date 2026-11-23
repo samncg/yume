@@ -282,7 +282,7 @@ object Customization {
 
     val DEFAULT_TOOL_ORDER: List<Tool> = listOf(
         Tool.Selection, Tool.Transform, Tool.Brush, Tool.Smudge, Tool.Eraser,
-        Tool.Fill, Tool.Gradient, Tool.Shape, Tool.Liquify, Tool.Text
+        Tool.Fill, Tool.Gradient, Tool.Shape, Tool.Liquify, Tool.Text, Tool.Clone
     )
 
     var toolOrder by mutableStateOf(DEFAULT_TOOL_ORDER)

@@ -242,6 +242,16 @@ class DrawingSession(
     /** Gap closing for fills, in document px (0: off). */
     @Volatile var fillGap: Int = 0
 
+    // Clone tool: where it copies from (document px; NaN until set), and the
+    // source's offset from the brush, fixed by the first stroke after the
+    // source is set and kept for the strokes after it (aligned cloning).
+    @Volatile var cloneSourceX = Float.NaN
+    @Volatile var cloneSourceY = Float.NaN
+    private var cloneDx = Float.NaN
+    private var cloneDy = Float.NaN
+    /** Clone what is shown (all layers) rather than the current layer. */
+    @Volatile var cloneAllLayers = false
+
     /** Direction of the motion blur adjustment, in degrees. */
     @Volatile var motionAngle: Float = 0f
 
@@ -676,7 +686,7 @@ class DrawingSession(
      * selection or fill cursor stays a plain ring).
      */
     val cursorPreset: BrushPreset?
-        get() = if (tool == Tool.Brush || tool == Tool.Eraser || tool == Tool.Smudge) activePreset else null
+        get() = if (tool == Tool.Brush || tool == Tool.Eraser || tool == Tool.Smudge || tool == Tool.Clone) activePreset else null
 
     @Volatile var hoverTilt = 0f
         private set
@@ -1001,6 +1011,10 @@ class DrawingSession(
                     tool == Tool.Gradient -> gradientGuide = floatArrayOf(doc[0], doc[1], doc[0], doc[1])
                     tool == Tool.Shape -> beginShape(doc[0], doc[1], event.pressure)
                     tool == Tool.Liquify -> beginLiquify(doc[0], doc[1])
+                    tool == Tool.Clone && cloneSourceX.isNaN() && !event.eraserButton -> {
+                        setCloneSource(doc[0], doc[1])
+                        onMessage?.invoke("Clone source set. Paint to copy from it; hold still to move it.")
+                    }
                     else -> beginStroke(doc[0], doc[1], event.pressure, event.tilt, event.eraserButton)
                 }
                 true
@@ -1224,6 +1238,11 @@ class DrawingSession(
 
             is InputEvent.PickStart -> {
                 view.toDocument(event.x, event.y, doc)
+                if (tool == Tool.Clone) {
+                    setCloneSource(doc[0], doc[1])
+                    onMessage?.invoke("Clone source set")
+                    return true
+                }
                 picking = true
                 sampleColor(doc[0], doc[1])
                 requestState()
@@ -1232,6 +1251,11 @@ class DrawingSession(
 
             is InputEvent.PickMove -> {
                 view.toDocument(event.x, event.y, doc)
+                if (tool == Tool.Clone) {
+                    // Still held: the source follows the finger.
+                    setCloneSource(doc[0], doc[1])
+                    return true
+                }
                 sampleColor(doc[0], doc[1])
                 true
             }
@@ -1567,8 +1591,20 @@ class DrawingSession(
         qsPressureCount = 0
         recordStrokePoint(x, y, pressure)
         assistLocked = false
-        painter.begin(layer, brush, color, x, y, pressure, tilt, assistStrength = assist)
-        liveInk = if (brush.category == BrushCategory.Smudge) null
+        val cloning = tool == Tool.Clone && !cloneSourceX.isNaN() && brush.category == BrushCategory.Brush
+        if (cloning && cloneDx.isNaN()) {
+            // Aligned: the first stroke after setting the source fixes the
+            // offset; later strokes keep it, wherever they start.
+            // Whole pixels: the copy is then exact, never resampled.
+            cloneDx = kotlin.math.round(cloneSourceX - x)
+            cloneDy = kotlin.math.round(cloneSourceY - y)
+        }
+        painter.begin(
+            layer, brush, color, x, y, pressure, tilt, assistStrength = assist,
+            cloneOffset = if (cloning) floatArrayOf(cloneDx, cloneDy) else null,
+            cloneFromComposite = cloneAllLayers
+        )
+        liveInk = if (brush.category == BrushCategory.Smudge || cloning) null
             else LiveInk(brush.category == BrushCategory.Eraser, color, brush.opacity)
         FrameLogger.strokeActive = true
         // Cache the layers below for the tiles this stroke touches, so a frame
@@ -2120,6 +2156,7 @@ class DrawingSession(
         put("fillSelection", fillSelection)
         put("fillExpand", fillExpand)
         put("fillGap", fillGap)
+        put("cloneAllLayers", cloneAllLayers)
         put("wandTolerance", wandTolerance)
         put("eyedropperLayerOnly", eyedropperLayerOnly)
         put("selectionShape", selectionShape.name)
@@ -2142,6 +2179,7 @@ class DrawingSession(
         fillSelection = o.optBoolean("fillSelection", fillSelection)
         fillExpand = o.optInt("fillExpand", fillExpand)
         fillGap = o.optInt("fillGap", fillGap).coerceIn(0, FILL_GAP_MAX)
+        cloneAllLayers = o.optBoolean("cloneAllLayers", cloneAllLayers)
         wandTolerance = o.optInt("wandTolerance", wandTolerance)
         eyedropperLayerOnly = o.optBoolean("eyedropperLayerOnly", eyedropperLayerOnly)
         SelectionShape.entries.firstOrNull { it.name == o.optString("selectionShape") }?.let { selectionShape = it }
@@ -2178,6 +2216,7 @@ class DrawingSession(
         fillSelection = o.optBoolean("fillSelection", fillSelection)
         fillExpand = o.optInt("fillExpand", fillExpand).coerceIn(0, 8)
         fillGap = o.optInt("fillGap", fillGap).coerceIn(0, FILL_GAP_MAX)
+        cloneAllLayers = o.optBoolean("cloneAllLayers", cloneAllLayers)
         Gradients.Kind.entries.firstOrNull { it.name == o.optString("gradientKind") }?.let { gradientKind = it }
         ShapeKind.entries.firstOrNull { it.name == o.optString("shapeKind") }?.let { shapeKind = it }
         shapePerfect = o.optBoolean("shapePerfect", shapePerfect)
@@ -2213,10 +2252,11 @@ class DrawingSession(
             Tool.Brush -> category = BrushCategory.Brush
             Tool.Eraser -> category = BrushCategory.Eraser
             Tool.Smudge -> category = BrushCategory.Smudge
+            Tool.Clone -> category = BrushCategory.Brush
             Tool.Selection, Tool.Transform, Tool.Fill, Tool.Gradient,
             Tool.Shape, Tool.Liquify, Tool.Text -> Unit
         }
-        if (newTool == Tool.Brush || newTool == Tool.Eraser || newTool == Tool.Smudge) {
+        if (newTool == Tool.Brush || newTool == Tool.Eraser || newTool == Tool.Smudge || newTool == Tool.Clone) {
             val list = presetsOf(category)
             if (list.none { it.id == activePresetId }) {
                 // The one used last in this family, else the user's default.
@@ -2237,7 +2277,8 @@ class DrawingSession(
         activePresetId = id
         presets.firstOrNull { it.id == id }?.let { p ->
             when (p.category) {
-                BrushCategory.Brush -> tool = Tool.Brush
+                // The clone tool paints with brushes: choosing one keeps cloning.
+                BrushCategory.Brush -> if (tool != Tool.Clone) tool = Tool.Brush
                 BrushCategory.Eraser -> tool = Tool.Eraser
                 BrushCategory.Smudge -> tool = Tool.Smudge
             }
@@ -2402,6 +2443,43 @@ class DrawingSession(
     fun chooseFillGap(value: Int) {
         fillGap = value.coerceIn(0, FILL_GAP_MAX)
         requestState()
+    }
+
+    fun chooseCloneAllLayers(value: Boolean) {
+        cloneAllLayers = value
+        requestState()
+    }
+
+    /** Sets where the clone tool copies from; the next stroke fixes the offset. */
+    fun setCloneSource(x: Float, y: Float) {
+        cloneSourceX = x.coerceIn(0f, engine.width.toFloat())
+        cloneSourceY = y.coerceIn(0f, engine.height.toFloat())
+        cloneDx = Float.NaN
+        cloneDy = Float.NaN
+        requestState()
+    }
+
+    fun clearCloneSource() = post {
+        cloneSourceX = Float.NaN
+        cloneSourceY = Float.NaN
+        cloneDx = Float.NaN
+        cloneDy = Float.NaN
+        requestState()
+    }
+
+    /**
+     * Where the clone source marker goes (document px), or null: under the
+     * brush plus the offset while painting or hovering once aligned, else on
+     * the source itself.
+     */
+    fun cloneMarker(): FloatArray? {
+        if (tool != Tool.Clone || cloneSourceX.isNaN()) return null
+        if (!cloneDx.isNaN()) {
+            val live = liveCursor()
+            if (live != null) return floatArrayOf(live[0] + cloneDx, live[1] + cloneDy)
+            if (hoverVisible) return floatArrayOf(hoverX + cloneDx, hoverY + cloneDy)
+        }
+        return floatArrayOf(cloneSourceX, cloneSourceY)
     }
 
     /** Where the last paint bucket spent its time (harness timing). */
@@ -4814,6 +4892,8 @@ class DrawingSession(
             fillSelection = fillSelection,
             fillExpand = fillExpand,
             fillGap = fillGap,
+            cloneSourceSet = !cloneSourceX.isNaN(),
+            cloneAllLayers = cloneAllLayers,
             referenceLayer = engine.layers.firstOrNull { it.reference }?.name,
             gradientKind = gradientKind,
             gradientSecond = gradientSecond,

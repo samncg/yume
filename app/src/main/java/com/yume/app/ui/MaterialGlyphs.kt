@@ -16,6 +16,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Contrast
 import androidx.compose.material.icons.rounded.CropFree
 import androidx.compose.material.icons.rounded.Cyclone
+import androidx.compose.material.icons.rounded.ControlPointDuplicate
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.DragIndicator
@@ -107,6 +108,7 @@ internal fun Glyph.material(): ImageVector? = when (this) {
     Glyph.Pin -> Icons.Rounded.PushPin
     Glyph.Shape -> Icons.Rounded.Interests
     Glyph.Liquify -> Icons.Rounded.Cyclone
+    Glyph.Clone -> Icons.Rounded.ControlPointDuplicate
     Glyph.Text -> Icons.Rounded.TextFields
     Glyph.Guides -> Icons.Rounded.Straighten
     Glyph.Eraser, Glyph.Clip, Glyph.ColorDot -> null

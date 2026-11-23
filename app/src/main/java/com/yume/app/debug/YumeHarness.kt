@@ -210,6 +210,9 @@ object YumeHarness {
                     out.append(scoreOverlayTest())
                 } else if (only == "hoist") {
                     out.append(scoreHoist())
+                } else if (only == "clone") {
+                    out.append(scoreClone(sparse = true))
+                    out.append(scoreClone(sparse = false))
                 } else if (only == "fillgap") {
                     out.append(scoreFillGap(sparse = true))
                     out.append(scoreFillGap(sparse = false))
@@ -4845,6 +4848,145 @@ object YumeHarness {
             Log.e("YumeHarness", "psd", t)
         } finally {
             made.forEach { store.deleteProject(it) }
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /**
+     * Clone tool: a tap sets the source, a stroke copies from it, later strokes
+     * keep the same offset, holding still moves the source, undo puts the
+     * layer back, and "all layers" copies what is shown.
+     */
+    private fun scoreClone(sparse: Boolean): String {
+        val out = StringBuilder()
+        val tag = if (sparse) "sparse" else "dense"
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = sparse
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        try {
+            val size = 1024
+            val engine = DrawingEngine(size, size)
+            engine.backgroundColor = 0xFFFFFFFF.toInt()
+            val session = DrawingSession("cl", "CL", engine, History())
+            identityView(session, size, size)
+            session.presets = com.yume.app.engine.BrushLibrary.defaults
+            session.assist = 0f
+            session.quickShapeEnabled = false
+            val p = session.presets.first { it.id == "technical-pen" }
+            pick(session, p, p.category)
+            session.runCommands()
+            session.setBrushSize(80f)
+            session.runCommands()
+            val l = engine.layers[0]
+            // A smooth gradient with shapes on the left half; the right is empty.
+            l.tiles.withWriteCanvas(Rect(0, 0, size, size)) { c ->
+                val pt = Paint(Paint.ANTI_ALIAS_FLAG)
+                pt.shader = android.graphics.LinearGradient(0f, 0f, 480f, 1024f, 0xFFE0405A.toInt(), 0xFF3A70E0.toInt(), android.graphics.Shader.TileMode.CLAMP)
+                c.drawRect(0f, 0f, 480f, 1024f, pt)
+                pt.shader = null
+                pt.color = 0xFF20C060.toInt()
+                c.drawCircle(300f, 300f, 60f, pt)
+            }
+            engine.markDirtyAll()
+            engine.compositeAll()
+            val orig = IntArray(size * size)
+            run {
+                val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                l.tiles.readRectInto(Rect(0, 0, size, size), b)
+                b.getPixels(orig, 0, size, 0, 0, size, size)
+                b.recycle()
+            }
+            fun near(a: Int, b: Int, tol: Int = 10): Boolean {
+                for (sh in intArrayOf(0, 8, 16, 24)) if (kotlin.math.abs(((a ushr sh) and 255) - ((b ushr sh) and 255)) > tol) return false
+                return true
+            }
+            fun stroke(x0: Float, y0: Float, x1: Float, y1: Float) {
+                session.pushInput(InputEvent.Down(0, x0, y0, 1f, 0f, false, false))
+                for (i in 1..20) {
+                    val t = i / 20f
+                    session.pushInput(InputEvent.Move(0, floatArrayOf(x0 + (x1 - x0) * t), floatArrayOf(y0 + (y1 - y0) * t), floatArrayOf(1f), 0f))
+                }
+                session.pushInput(InputEvent.Up(0))
+                session.runInput()
+                session.runCommands()
+            }
+            session.chooseTool(Tool.Clone)
+            session.runCommands()
+            // A tap with no source sets it.
+            session.pushInput(InputEvent.Down(0, 300f, 300f, 1f, 0f, false, false))
+            session.pushInput(InputEvent.Up(0))
+            session.runInput()
+            session.runCommands()
+            val srcSet = !session.cloneSourceX.isNaN()
+            val steps0 = session.history.appliedCount
+            out.append("clone $tag: a tap sets the source, paints nothing: ${pass(srcSet && steps0 == 0 && l.tiles.getPixel(300, 300) == orig[300 * size + 300])}\n")
+            // Copy the circle 400 px to the right.
+            // Starts level with the source: aligned cloning maps the first
+            // stroke's start onto the source, so the offset is (-400, 0).
+            stroke(700f, 300f, 700f, 400f)
+            var bad = 0
+            for (y in 310..390 step 8) for (x in 690..710 step 4) {
+                if (!near(l.tiles.getPixel(x, y), orig[y * size + x - 400])) bad++
+            }
+            out.append("clone $tag: the stroke copies from the source: ${pass(bad == 0 && session.history.appliedCount == 1)} (off $bad)\n")
+            // A second stroke elsewhere keeps the offset (aligned).
+            stroke(820f, 600f, 860f, 600f)
+            bad = 0
+            for (x in 820..860 step 5) if (!near(l.tiles.getPixel(x, 600), orig[600 * size + x - 400])) bad++
+            out.append("clone $tag: later strokes keep the offset: ${pass(bad == 0)} (off $bad)\n")
+            // Holding still moves the source (the hold arrives as PickStart).
+            session.pushInput(InputEvent.PickStart(100f, 900f))
+            session.pushInput(InputEvent.PickEnd)
+            session.runInput()
+            session.runCommands()
+            val colourBefore = session.color
+            stroke(900f, 100f, 900f, 140f)
+            bad = 0
+            for (y in 100..140 step 5) if (!near(l.tiles.getPixel(900, y), orig[(y + 800) * size + 900 - 800])) bad++
+            out.append("clone $tag: holding still moves the source: ${pass(bad == 0 && session.color == colourBefore)} (off $bad, colour kept ${session.color == colourBefore})\n")
+            // Undo every clone stroke: the layer is as it was.
+            repeat(3) { session.undo(); session.runCommands() }
+            var changed = 0
+            for (y in 0 until size step 4) for (x in 0 until size step 4) if (l.tiles.getPixel(x, y) != orig[y * size + x]) changed++
+            out.append("clone $tag: undo restores the layer: ${pass(changed == 0)} (changed $changed)\n")
+            // All layers: copy from what is shown into an empty layer.
+            val top = engine.newLayer("Top")
+            engine.selectLayer(top.id)
+            engine.markDirtyAll()
+            engine.compositeAll()
+            session.chooseCloneAllLayers(true)
+            session.runCommands()
+            session.setCloneSource(300f, 300f)
+            stroke(700f, 300f, 700f, 400f)
+            bad = 0
+            for (y in 310..390 step 8) if (!near(top.tiles.getPixel(700, y), orig[y * size + 300])) bad++
+            out.append("clone $tag: all layers copies what is shown: ${pass(bad == 0 && top.tiles.getPixel(700, 300) ushr 24 == 255)} (off $bad)\n")
+            // The copied patch is square: none of its rim may show. A soft
+            // brush at fractional positions leaves almost nothing at its edge,
+            // so anything solid there is the patch's rim showing through.
+            val rimLayer = engine.newLayer("Rim")
+            engine.selectLayer(rimLayer.id)
+            session.chooseCloneAllLayers(false)
+            val soft = session.presets.first { it.id == "soft-brush" }
+            pick(session, soft, soft.category)
+            session.runCommands()
+            session.chooseTool(Tool.Clone)
+            session.setBrushSize(60f)
+            session.runCommands()
+            engine.selectLayer(l.id)
+            session.setCloneSource(300.3f, 600.7f)
+            stroke(700.4f, 600.7f, 700.4f, 700.2f)
+            var rim = 0
+            for (y in 610..690) for (x in 660..740) {
+                val d = kotlin.math.abs(x + 0.5f - 700.4f)
+                if (d >= 29f && l.tiles.getPixel(x, y) ushr 24 > 80) rim++
+            }
+            out.append("clone $tag: no square edges around a soft brush: ${pass(rim == 0)} (solid at the edge $rim)\n")
+        } catch (t: Throwable) {
+            out.append("clone $tag: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e("YumeHarness", "clone", t)
+        } finally {
             TileStoreConfig.useSparseLayers = oldS
         }
         return out.toString()

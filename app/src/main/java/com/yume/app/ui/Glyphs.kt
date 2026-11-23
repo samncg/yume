@@ -31,7 +31,7 @@ enum class Glyph {
     Droplet, Info, ZoomIn, ZoomOut, Fit, Rotate, Sparkle,
     Grid, Home, Clear, Save, More, History,
     Folder, Mask, Clip, Grip, Bucket, Gradient, Pin,
-    Shape, Liquify, Text, Guides
+    Shape, Liquify, Text, Guides, Clone
 }
 
 @Composable
@@ -142,6 +142,12 @@ private fun DrawScope.drawGlyph(glyph: Glyph, tint: Color, strokeScale: Float) {
                 tint, Offset(10.5f, 11f), Size(9f, 9f),
                 androidx.compose.ui.geometry.CornerRadius(1.6f, 1.6f), style = stroke
             )
+        }
+        Glyph.Clone -> {
+            // Two overlapping rings: one copied from the other.
+            drawCircle(tint, 5.2f, Offset(9f, 9f), style = stroke)
+            drawCircle(tint, 5.2f, Offset(15f, 15f), style = stroke)
+            dot(15f, 15f, 1.6f)
         }
         Glyph.Liquify -> {
             // A swirl pulled out of a point.

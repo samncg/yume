@@ -67,7 +67,8 @@ glass, and every gesture, button and default can be changed in Settings.
 - Selection (freehand, rectangle, oval, automatic) with copy, cut, paste and
   copy all layers; transform with free, distort (perspective) and warp modes;
   a paint bucket that closes gaps in line art, follows a reference layer and
-  sets its threshold as you drag; gradient, shapes, liquify and text.
+  sets its threshold as you drag; a clone tool that paints with pixels
+  copied from another spot; gradient, shapes, liquify and text.
 - Adjustments: hue, saturation, brightness, blur, noise, sharpen, motion blur,
   curves, levels, colour balance, gradient map, posterize and threshold, with a
   live preview on one layer or all of them.

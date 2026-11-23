@@ -18,7 +18,7 @@ with those apps (November 2026). Unchecked items are not built yet.
   - Drag-to-adjust fill threshold, as in Procreate's ColorDrop.
 - [x] **Colour harmony** in the colour picker: complementary,
       split-complementary, analogous, triadic and tetradic.
-- [ ] **Clone tool**: paint with pixels sampled from another spot.
+- [x] **Clone tool**: paint with pixels sampled from another spot.
 - [ ] **Effects**: bloom, glitch, halftone, chromatic aberration (Procreate).
 
 ## Bigger features

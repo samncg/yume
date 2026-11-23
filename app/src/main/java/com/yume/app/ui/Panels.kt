@@ -119,7 +119,7 @@ import com.yume.app.engine.Tool
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-enum class PanelId { Layers, Brush, Color, Adjust, Selection, Actions, History, Fill, Gradient, Shape, Liquify, Guides }
+enum class PanelId { Layers, Brush, Color, Adjust, Selection, Actions, History, Fill, Gradient, Shape, Liquify, Guides, Clone }
 
 private const val PANEL_WIDTH = 348
 
@@ -2479,6 +2479,43 @@ fun GradientPanel(state: EditorUiState, session: DrawingSession, onClose: () -> 
 }
 
 // ================================================================== liquify
+
+@Composable
+fun ClonePanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {
+    PanelCard(Modifier.width(PANEL_WIDTH.dp)) {
+        PanelHeader("Clone", onClose)
+        Text(
+            text = if (state.cloneSourceSet) {
+                "Painting copies from the marked spot, at the same distance and " +
+                    "direction as your first stroke. Hold still on the canvas to pick " +
+                    "a new spot."
+            } else {
+                "Tap the canvas (or hold still on it) to choose where to copy from, " +
+                    "then paint where you want the copy."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = YumeColors.textDim
+        )
+        Spacer(Modifier.height(10.dp))
+        SectionLabel("Copy from")
+        Spacer(Modifier.height(6.dp))
+        SegmentedRow(
+            options = listOf("Current layer", "All layers"),
+            selectedIndex = if (state.cloneAllLayers) 1 else 0,
+            onSelect = { session.chooseCloneAllLayers(it == 1) }
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "The brush's shape, size and opacity shape the copy (Brush panel).",
+            style = MaterialTheme.typography.bodySmall,
+            color = YumeColors.textDim
+        )
+        DividerLine()
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmallButton("Clear source", enabled = state.cloneSourceSet) { session.clearCloneSource() }
+        }
+    }
+}
 
 @Composable
 fun LiquifyPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {

@@ -814,4 +814,4 @@ private const val FINGER_COMMIT_MS = 110L
 /** Holding a stroke this still for this long picks a colour instead. */
 
 /** Tools where a pen held still turns into the eyedropper. */
-private val EYEDROPPER_TOOLS = setOf(Tool.Brush, Tool.Eraser, Tool.Smudge)
+private val EYEDROPPER_TOOLS = setOf(Tool.Brush, Tool.Eraser, Tool.Smudge, Tool.Clone)

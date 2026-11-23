@@ -3,7 +3,7 @@ package com.yume.app.engine
 import android.graphics.BlendMode
 
 /** Which tool the canvas is currently using. */
-enum class Tool { Brush, Eraser, Smudge, Selection, Transform, Fill, Gradient, Shape, Liquify, Text }
+enum class Tool { Brush, Eraser, Smudge, Selection, Transform, Fill, Gradient, Shape, Liquify, Text, Clone }
 
 /** What the transform tool's handles do: move/pinch only, corners, or a bending grid. */
 enum class TransformMode(val label: String) { Free("Free"), Distort("Distort"), Warp("Warp") }
