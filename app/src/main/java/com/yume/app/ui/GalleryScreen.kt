@@ -139,14 +139,39 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
             galleryNote = null
         }
     }
+    val restoreContext = androidx.compose.ui.platform.LocalContext.current
     val restoreLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) scope.launch {
-            val id = withContext(Dispatchers.IO) {
-                runCatching { store.openInput(uri)?.use { store.restoreProject(it) } }.getOrNull()
+            galleryNote = "Importing…"
+            // A Photoshop document becomes a new artwork; anything else is
+            // read as a Yume backup.
+            val note = withContext(Dispatchers.IO) {
+                val tmp = java.io.File(store.cacheRoot(), "import-${System.nanoTime()}")
+                try {
+                    val copied = runCatching {
+                        store.openInput(uri)?.use { i -> tmp.outputStream().use { i.copyTo(it) } } != null
+                    }.getOrDefault(false)
+                    if (!copied) return@withContext "That file could not be read"
+                    if (com.yume.app.data.Psd.isPsd(tmp)) {
+                        val title = displayName(restoreContext, uri)
+                            ?.substringBeforeLast('.')?.ifBlank { null } ?: "Imported PSD"
+                        try {
+                            com.yume.app.data.Psd.importAsProject(store, tmp, title)
+                            "Opened “$title”"
+                        } catch (e: com.yume.app.data.PsdException) {
+                            e.message ?: "That PSD could not be opened"
+                        }
+                    } else {
+                        val id = runCatching { tmp.inputStream().use { store.restoreProject(it) } }.getOrNull()
+                        if (id != null) "Project restored" else "That file is not a Yume backup or a PSD"
+                    }
+                } finally {
+                    tmp.delete()
+                }
             }
-            galleryNote = if (id != null) "Project restored" else "That file is not a Yume backup"
+            galleryNote = note
             refresh++
         }
     }
@@ -282,8 +307,8 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     PressableRow(onClick = { SettingsHost.open = true }) {
                         Text("Settings", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
                     }
-                    PressableRow(onClick = { restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream")) }) {
-                        Text("Restore…", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
+                    PressableRow(onClick = { restoreLauncher.launch(IMPORT_TYPES) }) {
+                        Text("Import…", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
                     }
                 }
             } else
@@ -325,9 +350,9 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     )
                 }
                 Spacer(Modifier.width(10.dp))
-                PressableRow(onClick = { restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream")) }) {
+                PressableRow(onClick = { restoreLauncher.launch(IMPORT_TYPES) }) {
                     Text(
-                        text = "Restore…",
+                        text = "Import…",
                         style = MaterialTheme.typography.labelLarge,
                         color = YumeColors.textDim
                     )
@@ -829,3 +854,16 @@ private object GalleryEdge {
         return out
     }
 }
+
+/** What Import… offers: Yume backups and Photoshop documents. */
+private val IMPORT_TYPES = arrayOf(
+    "application/zip", "application/octet-stream", "image/vnd.adobe.photoshop",
+    "application/x-photoshop", "image/x-photoshop", "application/photoshop", "image/psd", "application/psd"
+)
+
+/** The file name a document picker reports for [uri], if any. */
+private fun displayName(context: android.content.Context, uri: android.net.Uri): String? = runCatching {
+    context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+        if (c.moveToFirst()) c.getString(0) else null
+    }
+}.getOrNull()

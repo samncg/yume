@@ -410,6 +410,10 @@ class EditorController(
             com.yume.app.data.ExportFormat.Jpeg, com.yume.app.data.ExportFormat.Webp ->
                 com.yume.app.data.Exporter.writeRaster(session, format, out)
             com.yume.app.data.ExportFormat.Pdf -> com.yume.app.data.Exporter.writePdf(session, out)
+            com.yume.app.data.ExportFormat.Psd -> {
+                val scratch = java.io.File(store.cacheRoot(), "exports").apply { mkdirs() }
+                com.yume.app.data.Psd.write(session, out, scratch)
+            }
             com.yume.app.data.ExportFormat.Ora -> {
                 // OpenRaster packs the saved layer files: save first.
                 runCatching { saveNow(session) }

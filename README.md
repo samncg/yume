@@ -92,8 +92,10 @@ glass, and every gesture, button and default can be changed in Settings.
 <img src="docs/images/gallery.jpg" alt="The gallery" width="900">
 
 - A gallery of your artworks with pins, time spent and stroke counts.
-- Export PNG, JPEG, WebP, PDF, OpenRaster (layers for Krita and others) or a
+- Export PNG, JPEG, WebP, PDF, Photoshop PSD (layers, groups and masks),
+  OpenRaster (layers for Krita and others) or a
   **timelapse video** of the painting, with progress as it works.
+- Open Photoshop PSD files as new artworks (RGB or greyscale, 8 or 16 bit).
 - Back up and restore whole projects.
 - A step-by-step, animated guide that walks through everything.
 

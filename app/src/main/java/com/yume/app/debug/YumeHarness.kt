@@ -210,6 +210,10 @@ object YumeHarness {
                     out.append(scoreOverlayTest())
                 } else if (only == "hoist") {
                     out.append(scoreHoist())
+                } else if (only == "psd") {
+                    out.append(scorePsd(app))
+                } else if (only == "psdbig") {
+                    out.append(scorePsdBig(app))
                 } else if (only == "clipxform") {
                     out.append(scoreClipXform(sparse = true))
                     out.append(scoreClipXform(sparse = false))
@@ -4679,6 +4683,231 @@ object YumeHarness {
                 out.append("clipxform $tag: undo warp restores the layer: ${pass(ub == 0)} (off $ub)\n")
             }
         } finally {
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /**
+     * PSD round trip: a document with a group, blend modes, opacity, a mask,
+     * clipping, a hidden layer and a Unicode name is written as a PSD and read
+     * back as a new artwork; every property and every layer's pixels (as
+     * seen: colour times alpha) must come back. Then any PSDs pushed to
+     * files/psd-in are imported and summarised (externally made files).
+     */
+    private fun scorePsd(app: YumeApp): String {
+        val out = StringBuilder()
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        val store = app.projectStore
+        val made = ArrayList<String>()
+        try {
+            val w = 1000
+            val h = 700
+            val engine = DrawingEngine(w, h)
+            engine.backgroundColor = 0xFFFFFFFF.toInt()
+            val session = DrawingSession("psd", "PSD", engine, History())
+            identityView(session, w, h)
+            session.runCommands()
+            val base = engine.layers[0]
+            base.name = "Base"
+            base.tiles.withWriteCanvas(Rect(0, 0, w, h)) { c ->
+                val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                p.shader = android.graphics.LinearGradient(50f, 50f, 950f, 650f, 0xFFE0405A.toInt(), 0xFF3A70E0.toInt(), android.graphics.Shader.TileMode.CLAMP)
+                c.drawRect(50f, 50f, 950f, 650f, p)
+            }
+            val shade = engine.newLayer("Shade")
+            shade.blend = LayerBlend.Multiply
+            shade.opacity = 0.6f
+            shade.tiles.withWriteCanvas(Rect(0, 0, w, h)) { c ->
+                val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                p.color = 0xC020A060.toInt()
+                c.drawCircle(500f, 350f, 260f, p)
+            }
+            engine.addMask(shade)
+            shade.maskTiles!!.withWriteCanvas(Rect(0, 0, 500, h)) { c -> c.drawColor(0xFF000000.toInt()) }
+            shade.maskTiles!!.withWriteCanvas(Rect(500, 0, 620, h)) { c -> c.drawColor(0xFF808080.toInt()) }
+            val g = engine.newGroup("Folder")
+            g.opacity = 0.8f
+            val inA = engine.newLayer("In A")
+            inA.blend = LayerBlend.Screen
+            inA.groupId = g.id
+            inA.tiles.withWriteCanvas(Rect(0, 0, w, h)) { c ->
+                val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                p.color = 0xFFFFD020.toInt()
+                c.drawRect(600f, 100f, 900f, 300f, p)
+            }
+            val inB = engine.newLayer("In B")
+            inB.clipping = true
+            inB.groupId = g.id
+            inB.tiles.withWriteCanvas(Rect(0, 0, w, h)) { c ->
+                val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                p.color = 0x80202020.toInt()
+                c.drawRect(650f, 50f, 999f, 699f, p)
+            }
+            val hidden = engine.newLayer("Ünïcode 夢")
+            hidden.visible = false
+            hidden.blend = LayerBlend.Add
+            hidden.tiles.withWriteCanvas(Rect(0, 0, w, h)) { c ->
+                val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                p.color = 0xFF4080FF.toInt()
+                c.drawCircle(150f, 550f, 120f, p)
+            }
+            engine.markDirtyAll()
+            val originals = engine.layers.toList()
+
+            val scratch = File(app.cacheDir, "psdtest").apply { deleteRecursively(); mkdirs() }
+            val psd = File(scratch, "roundtrip.psd")
+            val wrote = java.io.FileOutputStream(psd).use { com.yume.app.data.Psd.write(session, it, scratch) }
+            out.append("psd: write: ${if (wrote && psd.length() > 1000) "PASS" else "FAIL"} (${psd.length() / 1024} KB)\n")
+            // Keep a copy for checking with other tools.
+            psd.copyTo(File(app.filesDir, "roundtrip.psd"), overwrite = true)
+
+            val id = com.yume.app.data.Psd.importAsProject(store, psd, "PSD round trip")
+            made.add(id)
+            val loaded = store.loadProject(id)
+            if (loaded == null) {
+                out.append("psd: import: FAIL (could not load)\n")
+                return out.toString()
+            }
+            out.append("psd: import: ${if (loaded.width == w && loaded.height == h && loaded.layers.size == originals.size) "PASS" else "FAIL"} (${loaded.width}x${loaded.height}, ${loaded.layers.size} layers)\n")
+            val gOk = loaded.groups.size == 1 && loaded.groups[0].name == "Folder" &&
+                kotlin.math.abs(loaded.groups[0].opacity - 0.8f) < 0.01f
+            out.append("psd: group kept: ${if (gOk) "PASS" else "FAIL"} (${loaded.groups.map { it.name + "@" + it.opacity }})\n")
+
+            fun seen(px: Int): IntArray {
+                val a = px ushr 24
+                return intArrayOf(a, ((px ushr 16) and 255) * a / 255, ((px ushr 8) and 255) * a / 255, (px and 255) * a / 255)
+            }
+            var allProps = true
+            var worstPx = 0
+            var badPx = 0
+            for ((i, o) in originals.withIndex()) {
+                val l = loaded.layers[i]
+                val props = l.name == o.name && l.blend == o.blend && l.visible == o.visible &&
+                    l.clipping == o.clipping && kotlin.math.abs(l.opacity - o.opacity) < 0.01f &&
+                    ((l.groupId != 0L) == (o.groupId != 0L)) &&
+                    ((l.maskFile != null || l.mask != null) == o.hasMask)
+                if (!props) {
+                    allProps = false
+                    out.append("psd: layer $i props differ: ${l.name}/${l.blend}/${l.opacity}/${l.visible}/${l.clipping}/${l.groupId} vs ${o.name}/${o.blend}/${o.opacity}/${o.visible}/${o.clipping}/${o.groupId}\n")
+                }
+                val got = l.bitmap ?: com.yume.app.engine.TileFile.decodeSampled(l.file!!, maxOf(w, h))
+                val want = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                o.tiles.readRectInto(Rect(0, 0, w, h), want)
+                if (got == null || got.width != w || got.height != h) {
+                    badPx += w * h
+                    continue
+                }
+                for (y in 0 until h step 2) for (x in 0 until w step 2) {
+                    val a = seen(got.getPixel(x, y))
+                    val b = seen(want.getPixel(x, y))
+                    var m = 0
+                    for (k in 0 until 4) m = maxOf(m, kotlin.math.abs(a[k] - b[k]))
+                    worstPx = maxOf(worstPx, m)
+                    if (m > 2) badPx++
+                }
+                if (o.hasMask) {
+                    val gm = com.yume.app.engine.TileFile.decodeSampled(l.maskFile!!, maxOf(w, h))
+                    val samples = listOf(100 to 300, 550 to 300, 800 to 300)
+                    val wantM = samples.map { (x, y) -> o.maskTiles!!.getPixel(x, y) and 0xFF }
+                    val gotM = samples.map { (x, y) -> gm?.getPixel(x, y)?.and(0xFF) ?: -1 }
+                    out.append("psd: mask kept: ${if (gotM == wantM) "PASS" else "FAIL"} (got $gotM, want $wantM)\n")
+                }
+            }
+            out.append("psd: layer properties kept: ${if (allProps) "PASS" else "FAIL"}\n")
+            out.append("psd: layer pixels kept: ${if (badPx == 0) "PASS" else "FAIL"} (off $badPx, worst $worstPx)\n")
+            val thumb = File(store.projectDir(id), "thumb.png")
+            out.append("psd: thumbnail from the merged picture: ${if (thumb.exists() && thumb.length() > 100) "PASS" else "FAIL"}\n")
+
+            // Externally made PSDs (adb push to files/psd-in): import and summarise.
+            File(app.filesDir, "psd-in").listFiles()?.sortedBy { it.name }?.forEach { f ->
+                val line = try {
+                    val pid = com.yume.app.data.Psd.importAsProject(store, f, f.nameWithoutExtension)
+                    made.add(pid)
+                    val lp = store.loadProject(pid)
+                    fun centre(d: LayerSnapshotData): String {
+                        val f = d.file ?: return "?"
+                        val b = com.yume.app.engine.TileFile.decodeSampled(f, maxOf(lp!!.width, lp.height)) ?: return "?"
+                        return Integer.toHexString(b.getPixel(lp.width / 2, lp.height / 2))
+                    }
+                    "${lp?.width}x${lp?.height}, layers ${lp?.layers?.map { "${it.name}(${it.blend.name},${(it.opacity * 100).toInt()}%${if (!it.visible) ",hidden" else ""}${if (it.clipping) ",clip" else ""}${if (it.maskFile != null) ",mask" else ""}${if (it.groupId != 0L) ",g${it.groupId}" else ""},c=${centre(it)})" }}, groups ${lp?.groups?.map { it.name + "@" + (it.opacity * 100).toInt() + (if (it.visible) "" else ",hidden") }}"
+                } catch (e: com.yume.app.data.PsdException) {
+                    "refused: ${e.message}"
+                }
+                out.append("psd: external ${f.name}: $line\n")
+            }
+        } catch (t: Throwable) {
+            out.append("psd: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e("YumeHarness", "psd", t)
+        } finally {
+            made.forEach { store.deleteProject(it) }
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /** PSD export and import times at 8192²: a full gradient layer, a small one and an empty one. */
+    private fun scorePsdBig(app: YumeApp): String {
+        val out = StringBuilder()
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        val store = app.projectStore
+        var made: String? = null
+        val scratch = File(app.cacheDir, "psdbig").apply { deleteRecursively(); mkdirs() }
+        try {
+            val n = 8192
+            val engine = DrawingEngine(n, n)
+            engine.backgroundColor = 0xFFFFFFFF.toInt()
+            val session = DrawingSession("pb", "PB", engine, History())
+            identityView(session, 2048, 2048)
+            session.runCommands()
+            engine.layers[0].tiles.withWriteCanvas(Rect(0, 0, n, n)) { c ->
+                val p = Paint()
+                p.shader = android.graphics.LinearGradient(0f, 0f, n.toFloat(), n.toFloat(), 0xFFE0405A.toInt(), 0xFF3A70E0.toInt(), android.graphics.Shader.TileMode.CLAMP)
+                c.drawRect(0f, 0f, n.toFloat(), n.toFloat(), p)
+            }
+            val small = engine.newLayer("Small")
+            small.tiles.withWriteCanvas(Rect(3000, 3000, 3600, 3400)) { c ->
+                c.drawColor(0xFF20C060.toInt())
+            }
+            engine.newLayer("Empty")
+            engine.markDirtyAll()
+            val psd = File(scratch, "big.psd")
+            val t0 = android.os.SystemClock.uptimeMillis()
+            val ok = java.io.FileOutputStream(psd).use { com.yume.app.data.Psd.write(session, it, scratch) }
+            val t1 = android.os.SystemClock.uptimeMillis()
+            out.append("psdbig: write 8192² ${if (ok) "PASS" else "FAIL"} in ${t1 - t0} ms, ${psd.length() / (1024 * 1024)} MB\n")
+            val heapBefore = Runtime.getRuntime().let { it.totalMemory() - it.freeMemory() }
+            val id = com.yume.app.data.Psd.importAsProject(store, psd, "PSD big")
+            made = id
+            val t2 = android.os.SystemClock.uptimeMillis()
+            val lp = store.loadProject(id)
+            val heapAfter = Runtime.getRuntime().let { it.totalMemory() - it.freeMemory() }
+            val good = lp != null && lp.width == n && lp.layers.size == 3
+            // Spot-check pixels without decoding the whole layer: a tile row read.
+            var spot = "?"
+            if (lp != null) {
+                val want = engine.layers[1].tiles.getPixel(3300, 3200)
+                var got = 0
+                com.yume.app.engine.TileFile.read(lp.layers[1].file!!) { tx, ty, kind, bytes ->
+                    val ts = TileStoreConfig.tileSize
+                    if (tx == 3300 / ts && ty == 3200 / ts && kind == com.yume.app.engine.TileFile.KIND_PIXELS) {
+                        val b = Bitmap.createBitmap(minOf(ts, n - tx * ts), minOf(ts, n - ty * ts), Bitmap.Config.ARGB_8888)
+                        b.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(bytes))
+                        got = b.getPixel(3300 - tx * ts, 3200 - ty * ts)
+                        b.recycle()
+                    }
+                }
+                spot = if (got == want) "same" else "${Integer.toHexString(got)} vs ${Integer.toHexString(want)}"
+            }
+            out.append("psdbig: import 8192² ${if (good && spot == "same") "PASS" else "FAIL"} in ${t2 - t1} ms (spot $spot, heap ${(heapAfter - heapBefore) / (1024 * 1024)} MB more)\n")
+        } catch (t: Throwable) {
+            out.append("psdbig: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e("YumeHarness", "psdbig", t)
+        } finally {
+            made?.let { store.deleteProject(it) }
+            scratch.deleteRecursively()
             TileStoreConfig.useSparseLayers = oldS
         }
         return out.toString()

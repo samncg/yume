@@ -11,7 +11,7 @@ with those apps (November 2026). Unchecked items are not built yet.
       scales, rotates and flips only.
 - [x] **Copy and paste.** Copy a selection, or all layers merged, and paste
       it as a new layer. Today there is Cut only.
-- [ ] **PSD import and export** with layers, blend modes, masks and groups.
+- [x] **PSD import and export** with layers, blend modes, masks and groups.
 - [ ] **Smarter fill.**
   - Close small gaps in line art before filling (Clip Studio).
   - Pick a reference layer to fill from (both apps).

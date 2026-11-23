@@ -116,7 +116,7 @@ private val GUIDE = listOf(
             GuideItem("Tap a card", "Open the artwork"),
             GuideItem("Card menu (… or long-press)", "Pin to the top, rename, back up, duplicate or delete"),
             GuideItem("New canvas", "Pick a shape and a resolution up to 16K, or type a size"),
-            GuideItem("Restore…", "Bring back a project from a backup .zip"),
+            GuideItem("Import…", "Open a Photoshop .psd, or bring back a backup .zip"),
             GuideItem("Actions → Export", "PNG, JPEG, WebP, PDF, OpenRaster, timelapse video, or share")
         )
     ),
@@ -262,7 +262,7 @@ private val TUTORIAL = listOf(
         listOf(
             "Yume saves as you go; nothing to remember. If the app is closed suddenly, it recovers your work.",
             "Actions → Export: PNG, JPEG, WebP, PDF, OpenRaster (layers for other apps) or a timelapse video of your painting, with a progress bar while it works.",
-            "Back up a project from its card menu; bring it back with Restore… in the gallery."
+            "Back up a project from its card menu; bring it back with Import… in the gallery."
         )
     ),
     TutorialStep(

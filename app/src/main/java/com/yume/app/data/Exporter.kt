@@ -31,6 +31,7 @@ enum class ExportFormat(val label: String, val ext: String, val mime: String) {
     Jpeg("JPEG", "jpg", "image/jpeg"),
     Webp("WebP", "webp", "image/webp"),
     Pdf("PDF", "pdf", "application/pdf"),
+    Psd("Photoshop (layers)", "psd", "image/vnd.adobe.photoshop"),
     Ora("OpenRaster (layers)", "ora", "image/openraster"),
     Timelapse("Timelapse video", "mp4", "video/mp4")
 }

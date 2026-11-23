@@ -56,6 +56,7 @@ fun ExportDialog(
                                 ExportFormat.Jpeg, ExportFormat.Webp ->
                                     if (big) "Scaled to 16 MP (use PNG for full size)" else "Full size"
                                 ExportFormat.Pdf -> "One page, full size"
+                                ExportFormat.Psd -> "Layers, groups and masks, for Photoshop and others"
                                 ExportFormat.Ora -> "Every layer, for other paint apps"
                                 ExportFormat.Timelapse -> "Replay of your painting"
                             }
