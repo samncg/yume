@@ -4921,6 +4921,36 @@ object YumeHarness {
                 val ok = gutter == 0xFFFFFFFF.toInt() && inside == 0 && (borderPx ushr 24) > 200 && (borderPx and 0xFFFFFF) < 0x303030
                 out.append("manga: comic frames (white gutters, clear panels, black borders): ${pass(l.name == "Frames" && ok)} (gutter ${Integer.toHexString(gutter)}, inside $inside, border ${Integer.toHexString(borderPx)})\n")
             }
+            run {
+                // Text: vertical columns and an outline under the letters.
+                val (s, e) = doc()
+                fun inkBounds(l: Layer): Rect {
+                    val r = Rect()
+                    for (y in 0 until n step 2) for (x in 0 until n step 2) if (alpha(l, x, y) > 128) {
+                        if (r.isEmpty) r.set(x, y, x + 1, y + 1) else r.union(x, y)
+                    }
+                    return r
+                }
+                s.addTextLayer("ABCD", 700f, 100f, 80f, "sans-serif", false, false, 0, 0xFF000000.toInt(), vertical = true)
+                s.runCommands()
+                val v = inkBounds(e.layers.last())
+                s.addTextLayer("ABCD", 100f, 700f, 80f, "sans-serif", false, false, 0, 0xFF000000.toInt())
+                s.runCommands()
+                val hz = inkBounds(e.layers.last())
+                out.append("manga: vertical text stacks its letters: ${pass(v.height() > 3 * v.width() && hz.width() > 2 * hz.height())} (vertical ${v.width()}x${v.height()}, horizontal ${hz.width()}x${hz.height()})\n")
+                s.addTextLayer("O", 300f, 300f, 200f, "sans-serif", true, false, 0, 0xFF000000.toInt(), outline = 12f, outlineColor = 0xFFFFFFFF.toInt())
+                s.runCommands()
+                val l = e.layers.last()
+                var white = 0
+                var black = 0
+                for (y in 280 until 560 step 2) for (x in 280 until 520 step 2) {
+                    val c = l.tiles.getPixel(x, y)
+                    if (c ushr 24 == 255) {
+                        if (c and 0xFFFFFF == 0xFFFFFF) white++ else if (c and 0xFFFFFF == 0) black++
+                    }
+                }
+                out.append("manga: outlined text (white outline, black letter): ${pass(white > 100 && black > 100)} (white $white, black $black)\n")
+            }
         } catch (t: Throwable) {
             out.append("manga: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
             Log.e("YumeHarness", "manga", t)

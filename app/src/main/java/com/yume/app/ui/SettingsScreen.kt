@@ -799,7 +799,7 @@ private fun ToolDefaults() {
     Spacer(Modifier.height(6.dp))
     Text("Font", style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim)
     Spacer(Modifier.height(4.dp))
-    SegmentedRow(TEXT_FONT_LABELS, C.tdInt("textFont", 0).coerceIn(0, TEXT_FONT_LABELS.size - 1), { C.setTd("textFont", it) })
+    FontPicker(C.tdInt("textFont", 0).coerceIn(0, TEXT_FONT_LABELS.size - 1)) { C.setTd("textFont", it) }
     Spacer(Modifier.height(8.dp))
     YumeSlider(
         value = C.tdFloat("textSize", 96f),

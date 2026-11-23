@@ -649,8 +649,11 @@ fun EditorScreen(
         textAt?.let { at ->
             TextDialog(
                 onDismiss = { session.textRequest.value = null },
-                onAdd = { text, size, font, bold, italic, align ->
-                    session.addTextLayer(text, at[0], at[1], size, font, bold, italic, align, state.color)
+                onAdd = { text, size, font, bold, italic, align, vertical, outline, outlineColor ->
+                    session.addTextLayer(
+                        text, at[0], at[1], size, font, bold, italic, align, state.color,
+                        vertical, outline, outlineColor
+                    )
                     session.textRequest.value = null
                 }
             )

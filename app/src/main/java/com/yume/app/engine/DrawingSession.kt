@@ -3100,7 +3100,12 @@ class DrawingSession(
      */
     fun addTextLayer(
         text: String, x: Float, y: Float, sizePx: Float, font: String,
-        bold: Boolean, italic: Boolean, align: Int, color: Int
+        bold: Boolean, italic: Boolean, align: Int, color: Int,
+        /** Columns of characters, read top to bottom, right to left. */
+        vertical: Boolean = false,
+        /** Outline width in document px (0: none), drawn under the letters. */
+        outline: Float = 0f,
+        outlineColor: Int = 0xFFFFFFFF.toInt()
     ) = post {
         val lines = text.split('\n')
         if (text.isBlank()) return@post
@@ -3126,21 +3131,55 @@ class DrawingSession(
         }
         val fm = paint.fontMetrics
         val lineH = (fm.descent - fm.ascent) * 1.15f
-        val widest = lines.maxOf { paint.measureText(it) }
-        val left = when (align) {
-            1 -> x - widest / 2f
-            2 -> x - widest
-            else -> x
+        val stroke = outline.coerceIn(0f, sizePx)
+        val outlinePaint = if (stroke > 0f) Paint(paint).apply {
+            this.style = Paint.Style.STROKE
+            strokeWidth = stroke * 2f
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+            this.color = outlineColor
+        } else null
+        // Where each character or line goes: (text, x, baseline y).
+        val placed = ArrayList<Triple<String, Float, Float>>()
+        val bounds: Rect
+        if (vertical) {
+            // Columns right to left from the tap; each character centred in
+            // its column, one under the other.
+            paint.textAlign = Paint.Align.CENTER
+            outlinePaint?.textAlign = Paint.Align.CENTER
+            val colW = sizePx * 1.15f
+            val step = (fm.descent - fm.ascent) * 0.95f
+            var tallest = 0
+            lines.forEachIndexed { i, line ->
+                val cx = x - colW / 2f - i * colW
+                val chars = line.codePoints().toArray().map { String(Character.toChars(it)) }
+                tallest = max(tallest, chars.size)
+                chars.forEachIndexed { k, ch -> placed.add(Triple(ch, cx, y - fm.ascent + k * step)) }
+            }
+            bounds = Rect(
+                (x - colW * lines.size - sizePx - stroke).toInt(), (y - sizePx * 0.2f - stroke).toInt(),
+                (x + sizePx + stroke).toInt(), (y + step * tallest + sizePx + stroke).toInt()
+            )
+        } else {
+            val widest = lines.maxOf { paint.measureText(it) }
+            val left = when (align) {
+                1 -> x - widest / 2f
+                2 -> x - widest
+                else -> x
+            }
+            lines.forEachIndexed { i, line -> placed.add(Triple(line, x, y - fm.ascent + i * lineH)) }
+            bounds = Rect(
+                (left - sizePx - stroke).toInt(), (y - sizePx * 0.2f - stroke).toInt(),
+                (left + widest + sizePx + stroke).toInt(), (y + lineH * lines.size + sizePx + stroke).toInt()
+            )
         }
-        val bounds = Rect(
-            (left - sizePx).toInt(), (y - sizePx * 0.2f).toInt(),
-            (left + widest + sizePx).toInt(), (y + lineH * lines.size + sizePx).toInt()
-        )
         val before = engine.snapshotState()
         val name = "Text: " + lines.first().take(24)
         val layer = engine.newLayer(name = name, at = engine.activeIndex + 1)
         layer.tiles.withWriteCanvas(bounds) { c ->
-            lines.forEachIndexed { i, line -> c.drawText(line, x, y - fm.ascent + i * lineH, paint) }
+            // The outline goes under every letter first, so it never covers one.
+            if (outlinePaint != null) for ((t, px, py) in placed) c.drawText(t, px, py, outlinePaint)
+            for ((t, px, py) in placed) c.drawText(t, px, py, paint)
         }
         engine.markDirtyAll()
         pushStructural(before, "Text", EditKind.LayerAdd)

@@ -39,7 +39,7 @@ with those apps (November 2026). Unchecked items are not built yet.
       radial and parallel lines toward a chosen point.
 - [x] **Frame divider**: split the canvas into comic panels with even gutters
       (overlaps with comic tools above).
-- [ ] **Text upgrades**: vertical text, outlined text, and more fonts.
+- [x] **Text upgrades**: vertical text, outlined text, and more fonts.
 - [ ] **More filters**: ~~pixelate, mosaic~~ (done), glow, lens flare, clouds, and
       "anime background" style colour grading.
 - [ ] **Materials library**: tones, patterns and textures to drop onto the
