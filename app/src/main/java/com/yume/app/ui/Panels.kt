@@ -1353,6 +1353,58 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                 )
             }
 
+            ColorMode.Harmony -> {
+                SegmentedRow(
+                    options = com.yume.app.engine.Harmony.entries.map { it.label },
+                    selectedIndex = state.harmony.ordinal,
+                    onSelect = { session.chooseHarmony(com.yume.app.engine.Harmony.entries[it]) }
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                    HarmonyDisc(hue, sat, value, state.harmony.offsets, 200.dp) { h, s ->
+                        hue = h
+                        sat = s
+                        emit()
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                YumeSlider(
+                    value = value,
+                    onChange = { v ->
+                        value = v.coerceIn(0f, 1f)
+                        emit()
+                    },
+                    label = "Brightness",
+                    valueLabel = "${(value * 100).roundToInt()}%"
+                )
+                Spacer(Modifier.height(6.dp))
+                // The scheme as swatches: the current colour, then its partners.
+                // Tapping a partner makes it the colour (the scheme turns with it).
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val partners = state.harmony.offsets.map { off ->
+                        android.graphics.Color.HSVToColor(
+                            floatArrayOf(((hue + off) % 360f + 360f) % 360f, sat.coerceIn(0f, 1f), value.coerceIn(0f, 1f))
+                        )
+                    }
+                    for ((i, c) in (listOf(current) + partners).withIndex()) {
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .height(34.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(c))
+                                .then(
+                                    if (i == 0) Modifier.border(2.dp, YumeColors.accent, RoundedCornerShape(10.dp))
+                                    else Modifier.clickable { adopt(c) }
+                                )
+                        )
+                    }
+                }
+            }
+
             ColorMode.Hsl -> {
                 val hsl = remember(hue, sat, value) { rgbToHsl(current) }
                 YumeSlider(
@@ -1416,6 +1468,87 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
             Spacer(Modifier.height(8.dp))
             SwatchGrid(state.recentColors) { picked -> adopt(picked) }
         }
+    }
+}
+
+/**
+ * Hue and saturation disc for the harmony mode: hue by angle, saturation by
+ * distance from the centre, shaded to the current brightness. The current
+ * colour's marker can be dragged; its partners' markers (hue [offsets]
+ * away) follow it.
+ */
+@Composable
+private fun HarmonyDisc(
+    hue: Float, sat: Float, value: Float, offsets: FloatArray, size: Dp,
+    onChange: (Float, Float) -> Unit
+) {
+    val spectrum = listOf(
+        Color(0xFFFF0000), Color(0xFFFFFF00), Color(0xFF00FF00),
+        Color(0xFF00FFFF), Color(0xFF0000FF), Color(0xFFFF00FF), Color(0xFFFF0000)
+    )
+    Canvas(
+        Modifier
+            .size(size)
+            .pointerInput(Unit) {
+                fun update(offset: Offset) {
+                    val r = this.size.width / 2f
+                    val dx = offset.x - r
+                    val dy = offset.y - this.size.height / 2f
+                    var deg = Math.toDegrees(kotlin.math.atan2(dy, dx).toDouble()).toFloat()
+                    if (deg < 0f) deg += 360f
+                    val s = (kotlin.math.hypot(dx, dy) / (r * 0.92f)).coerceIn(0f, 1f)
+                    onChange(deg, s)
+                }
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    update(down.position)
+                    down.consume()
+                    drag(down.id) { change ->
+                        update(change.position)
+                        change.consume()
+                    }
+                }
+            }
+    ) {
+        val radius = this.size.minDimension / 2f * 0.92f
+        drawCircle(brush = Brush.sweepGradient(spectrum), radius = radius)
+        drawCircle(
+            brush = Brush.radialGradient(listOf(Color.White, Color.White.copy(alpha = 0f)), center, radius),
+            radius = radius
+        )
+        // Shaded towards the brightness, but never so far that the hues
+        // vanish (a black colour would blank the disc); the markers and the
+        // swatches show the true colours.
+        drawCircle(Color.Black.copy(alpha = ((1f - value) * 0.6f).coerceIn(0f, 0.6f)), radius)
+        fun marker(h: Float, main: Boolean) {
+            val a = Math.toRadians(h.toDouble())
+            val d = radius * sat.coerceIn(0f, 1f)
+            val p = Offset(center.x + (d * kotlin.math.cos(a)).toFloat(), center.y + (d * kotlin.math.sin(a)).toFloat())
+            val c = Color(android.graphics.Color.HSVToColor(floatArrayOf(((h % 360f) + 360f) % 360f, sat, value)))
+            val r = if (main) 11.dp.toPx() else 8.dp.toPx()
+            drawCircle(c, r, p)
+            drawCircle(Color.Black.copy(alpha = 0.45f), r + 1.5f.dp.toPx(), p, style = Stroke(3.dp.toPx()))
+            drawCircle(Color.White, r, p, style = Stroke(if (main) 3.dp.toPx() else 2.dp.toPx()))
+        }
+        // Lines from the centre tie the scheme together.
+        for (off in offsets) {
+            val a = Math.toRadians((hue + off).toDouble())
+            val d = radius * sat.coerceIn(0f, 1f)
+            drawLine(
+                Color.White.copy(alpha = 0.55f), center,
+                Offset(center.x + (d * kotlin.math.cos(a)).toFloat(), center.y + (d * kotlin.math.sin(a)).toFloat()),
+                strokeWidth = 1.5f.dp.toPx()
+            )
+        }
+        val a0 = Math.toRadians(hue.toDouble())
+        val d0 = radius * sat.coerceIn(0f, 1f)
+        drawLine(
+            Color.White.copy(alpha = 0.85f), center,
+            Offset(center.x + (d0 * kotlin.math.cos(a0)).toFloat(), center.y + (d0 * kotlin.math.sin(a0)).toFloat()),
+            strokeWidth = 2.dp.toPx()
+        )
+        for (off in offsets) marker(hue + off, false)
+        marker(hue, true)
     }
 }
 

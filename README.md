@@ -59,7 +59,8 @@ glass, and every gesture, button and default can be changed in Settings.
 
 - Layers with opacity, 17 blend modes, clipping masks, layer masks, alpha lock,
   groups (pass-through, like Photoshop) and drag-to-reorder.
-- Colour wheel, triangle, square, sliders and palettes; eyedropper by holding the
+- Colour wheel, triangle, square, sliders, palettes and a **harmony** disc
+  (opposite, split, analogous, triad and square schemes); eyedropper by holding the
   pen still; **ColorDrop** fills by dragging the colour chip onto the canvas.
 
 ### Tools

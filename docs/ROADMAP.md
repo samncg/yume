@@ -16,7 +16,7 @@ with those apps (November 2026). Unchecked items are not built yet.
   - Close small gaps in line art before filling (Clip Studio).
   - Pick a reference layer to fill from (both apps).
   - Drag-to-adjust fill threshold, as in Procreate's ColorDrop.
-- [ ] **Colour harmony** in the colour picker: complementary,
+- [x] **Colour harmony** in the colour picker: complementary,
       split-complementary, analogous, triadic and tetradic.
 - [ ] **Clone tool**: paint with pixels sampled from another spot.
 - [ ] **Effects**: bloom, glitch, halftone, chromatic aberration (Procreate).

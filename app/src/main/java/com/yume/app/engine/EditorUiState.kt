@@ -74,6 +74,7 @@ data class EditorUiState(
     val history: List<HistoryEntry> = emptyList(),
     val adjusting: Boolean = false,
     val colorMode: ColorMode = ColorMode.Wheel,
+    val harmony: Harmony = Harmony.Complementary,
     /** Bumped whenever the document changes; drives debounced autosave. */
     val documentVersion: Int = 0,
     val backgroundColor: Int = 0xFFFFFFFF.toInt(),

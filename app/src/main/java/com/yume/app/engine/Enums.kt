@@ -35,7 +35,17 @@ enum class ColorMode(val label: String) {
     Wheel("Wheel"),
     Triangle("Triangle"),
     Rgb("RGB"),
-    Hsl("HSL")
+    Hsl("HSL"),
+    Harmony("Harmony")
+}
+
+/** Colour harmony schemes: hue offsets (degrees) of the partner colours. */
+enum class Harmony(val label: String, val offsets: FloatArray) {
+    Complementary("Opposite", floatArrayOf(180f)),
+    Split("Split", floatArrayOf(150f, 210f)),
+    Analogous("Analog", floatArrayOf(-30f, 30f)),
+    Triadic("Triad", floatArrayOf(120f, 240f)),
+    Tetradic("Square", floatArrayOf(90f, 180f, 270f))
 }
 
 /** Layer compositing modes, exposed with Procreate-style labels. */

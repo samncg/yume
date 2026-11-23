@@ -222,6 +222,7 @@ class DrawingSession(
     @Volatile var assist: Float = 0.3f
     @Volatile var quickShapeEnabled: Boolean = true
     @Volatile var colorMode: ColorMode = ColorMode.Wheel
+    @Volatile var harmony: Harmony = Harmony.Complementary
 
     /** Sample the active layer instead of the flattened composite. */
     @Volatile var eyedropperLayerOnly: Boolean = false
@@ -2123,6 +2124,7 @@ class DrawingSession(
         put("eyedropperLayerOnly", eyedropperLayerOnly)
         put("selectionShape", selectionShape.name)
         put("colorMode", colorMode.name)
+        put("harmony", harmony.name)
     }.toString()
 
     /** Restores [toolStateJson]; unknown or missing values keep the current ones. */
@@ -2144,6 +2146,7 @@ class DrawingSession(
         eyedropperLayerOnly = o.optBoolean("eyedropperLayerOnly", eyedropperLayerOnly)
         SelectionShape.entries.firstOrNull { it.name == o.optString("selectionShape") }?.let { selectionShape = it }
         ColorMode.entries.firstOrNull { it.name == o.optString("colorMode") }?.let { colorMode = it }
+        Harmony.entries.firstOrNull { it.name == o.optString("harmony") }?.let { harmony = it }
         requestState()
     }
 
@@ -2252,6 +2255,11 @@ class DrawingSession(
 
     fun chooseColorMode(mode: ColorMode) {
         colorMode = mode
+        requestState()
+    }
+
+    fun chooseHarmony(scheme: Harmony) {
+        harmony = scheme
         requestState()
     }
 
@@ -4798,6 +4806,7 @@ class DrawingSession(
             history = historyCache,
             adjusting = adjusting,
             colorMode = colorMode,
+            harmony = harmony,
             eyedropperLayerOnly = eyedropperLayerOnly,
             wandTolerance = wandTolerance,
             fillTolerance = fillTolerance,
