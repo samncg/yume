@@ -37,7 +37,14 @@ enum class AdjustmentKind(val label: String) {
     ColorBalance("Colour balance"),
     GradientMap("Gradient map"),
     Posterize("Posterize"),
-    Threshold("Threshold");
+    Threshold("Threshold"),
+    Bloom("Bloom"),
+    Glitch("Glitch"),
+    Halftone("Halftone"),
+    Aberration("Chromatic aberration");
+
+    /** Procreate-style effects, run by the exact chunked kernels. */
+    val isEffect: Boolean get() = this == Bloom || this == Glitch || this == Halftone || this == Aberration
 
     /** Driven by a lookup table built from the panel's editor, not the amount. */
     val isTone: Boolean get() = this == Curves || this == Levels || this == ColorBalance || this == GradientMap ||
@@ -265,6 +272,10 @@ class DrawingSession(
         AdjustmentKind.Blur -> blurHalo
         AdjustmentKind.Sharpen -> 2
         AdjustmentKind.MotionBlur -> MOTION_MAX_RADIUS + 1
+        AdjustmentKind.Bloom -> Kernels.bloomHalo(1f)
+        AdjustmentKind.Glitch -> Kernels.glitchHalo(1f)
+        AdjustmentKind.Halftone -> Kernels.halftoneHalo(1f)
+        AdjustmentKind.Aberration -> Kernels.aberrationHalo(1f)
         else -> 0
     }
 
@@ -501,6 +512,11 @@ class DrawingSession(
         AdjustmentKind.Noise -> 0.04f
         AdjustmentKind.Sharpen -> 0.12f
         AdjustmentKind.MotionBlur -> 0.2f
+        // Measured on a 3072 px canvas (tablet, 8 threads).
+        AdjustmentKind.Bloom -> 0.1f
+        AdjustmentKind.Halftone -> 0.065f
+        AdjustmentKind.Aberration -> 0.06f
+        AdjustmentKind.Glitch -> 0.03f
         else -> 0.03f
     }
     private var adjustKind: AdjustmentKind? = null
@@ -3848,6 +3864,14 @@ class DrawingSession(
                 adjustProxy = proxy
                 LayerPreview(layer.id, null, proxy)
             }
+            AdjustmentKind.Bloom,
+            AdjustmentKind.Glitch,
+            AdjustmentKind.Halftone,
+            AdjustmentKind.Aberration ->
+                effectPreview(store, snapshot, kind, amount)?.let { proxy ->
+                    adjustProxy = proxy
+                    LayerPreview(layer.id, null, proxy)
+                }
         }
         engine.applyPreview(preview)
         requestState()
@@ -3944,6 +3968,60 @@ class DrawingSession(
         return proxy
     }
 
+    /** Small unfiltered copy of the layer the effect previews run on (at most 1024 px). */
+    private var effectBase: Bitmap? = null
+
+    /**
+     * An effect's preview: the same kernel as Apply, on a copy of the layer
+     * at most 1024 px across, with its distances scaled to match.
+     */
+    private fun effectPreview(store: TileStore, snapshot: Bitmap?, kind: AdjustmentKind, amount: Float): Bitmap? {
+        val scale = minOf(1f, 1024f / maxOf(engine.width, engine.height))
+        val w = max(1, (engine.width * scale).toInt())
+        val h = max(1, (engine.height * scale).toInt())
+        var base = effectBase
+        if (base == null || base.isRecycled || base.width != w || base.height != h) {
+            base?.recycle()
+            if (snapshot == null && !store.isSparse) return null
+            base = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val c = Canvas(base)
+            val p = Paint(Paint.FILTER_BITMAP_FLAG)
+            if (snapshot != null) {
+                c.drawBitmap(snapshot, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), p)
+            } else {
+                val save = c.save()
+                c.scale(w.toFloat() / engine.width, h.toFloat() / engine.height)
+                store.drawInto(c, p)
+                c.restoreToCount(save)
+            }
+            effectBase = base
+        }
+        val reuse = adjustProxy
+        val proxy = if (reuse != null && !reuse.isRecycled && reuse.width == w && reuse.height == h) reuse
+        else Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val pc = Canvas(proxy)
+        val src = Paint().apply { blendMode = BlendMode.SRC }
+        pc.drawBitmap(base, 0f, 0f, src)
+        val unit = w.toFloat() / engine.width
+        runEffect(kind, w, h, Rect(0, 0, w, h), amount, unit, Kernels.bitmapSource(base)) { r, bmp ->
+            pc.drawBitmap(bmp, r.left.toFloat(), r.top.toFloat(), src)
+        }
+        return proxy
+    }
+
+    private fun runEffect(
+        kind: AdjustmentKind, w: Int, h: Int, bounds: Rect, amount: Float, unit: Float,
+        source: Kernels.Source, write: (Rect, Bitmap) -> Unit
+    ) {
+        when (kind) {
+            AdjustmentKind.Bloom -> Kernels.bloom(w, h, bounds, amount, unit, source, write)
+            AdjustmentKind.Glitch -> Kernels.glitch(w, h, bounds, amount, unit, source, write)
+            AdjustmentKind.Halftone -> Kernels.halftone(w, h, bounds, amount, unit, source, write)
+            AdjustmentKind.Aberration -> Kernels.aberration(w, h, bounds, amount, unit, source, write)
+            else -> Unit
+        }
+    }
+
     /**
      * Quarter-resolution blurred copy of a tile store, used as the live blur
      * preview. Built from the layer's own tiles so the document is never
@@ -3990,7 +4068,7 @@ class DrawingSession(
 
     /** Adjustments whose bake captures each tile just before writing it. */
     private fun lazyCapture(kind: AdjustmentKind): Boolean =
-        kind == AdjustmentKind.Sharpen || kind == AdjustmentKind.MotionBlur
+        kind == AdjustmentKind.Sharpen || kind == AdjustmentKind.MotionBlur || kind.isEffect
 
     private fun previewTarget(layer: Layer): Long =
         if (adjustAllLayers) LayerPreview.ALL_LAYERS else layer.id
@@ -4146,6 +4224,17 @@ class DrawingSession(
                 AdjustmentKind.Curves, AdjustmentKind.Levels, AdjustmentKind.ColorBalance,
                 AdjustmentKind.GradientMap, AdjustmentKind.Posterize, AdjustmentKind.Threshold ->
                     toneLut?.let { TileOps.tone(store, work, it) }
+                AdjustmentKind.Bloom,
+                AdjustmentKind.Glitch,
+                AdjustmentKind.Halftone,
+                AdjustmentKind.Aberration -> runEffect(
+                    kind, engine.width, engine.height, work, amount, 1f,
+                    Kernels.captureSource(capture, lazy = true)
+                ) { r, bmp ->
+                    TileOps.captureRect(capture, r)
+                    store.writeRect(r, bmp, Rect(0, 0, r.width(), r.height()))
+                    bakeSafePoint()
+                }
             }
             // The action covers the whole snapshot region: a blurred tile past
             // the work rect is unchanged, and copying it costs nothing extra.
@@ -4187,6 +4276,18 @@ class DrawingSession(
                 }
                 AdjustmentKind.Curves, AdjustmentKind.Levels, AdjustmentKind.ColorBalance,
                 AdjustmentKind.GradientMap, AdjustmentKind.Posterize, AdjustmentKind.Threshold -> toneLut?.apply(target)
+                AdjustmentKind.Bloom,
+                AdjustmentKind.Glitch,
+                AdjustmentKind.Halftone,
+                AdjustmentKind.Aberration -> runEffect(
+                    kind, engine.width, engine.height, Rect(0, 0, engine.width, engine.height), amount, 1f,
+                    Kernels.bitmapSource(snapshot)
+                ) { r, bmp ->
+                    android.graphics.Canvas(target).drawBitmap(
+                        bmp, r.left.toFloat(), r.top.toFloat(),
+                        Paint().apply { blendMode = BlendMode.SRC }
+                    )
+                }
             }
             val full = Rect(0, 0, engine.width, engine.height)
             layer.tiles.writeRect(full, target)

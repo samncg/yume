@@ -10,6 +10,10 @@ import androidx.compose.material.icons.rounded.BlurLinear
 import androidx.compose.material.icons.rounded.ShowChart
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.Balance
+import androidx.compose.material.icons.rounded.WbSunny
+import androidx.compose.material.icons.rounded.BrokenImage
+import androidx.compose.material.icons.rounded.Texture
+import androidx.compose.material.icons.rounded.Lens
 import androidx.compose.material.icons.rounded.Gradient
 import androidx.compose.material.icons.rounded.Filter
 import androidx.compose.material.icons.rounded.Contrast
@@ -2055,7 +2059,7 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
             )
         }
         if (kind == AdjustmentKind.Noise || kind == AdjustmentKind.Sharpen ||
-            kind == AdjustmentKind.MotionBlur
+            kind == AdjustmentKind.MotionBlur || kind.isEffect
         ) {
             Spacer(Modifier.height(6.dp))
             Text(
@@ -2086,6 +2090,8 @@ private fun adjustValueLabel(kind: AdjustmentKind, amount: Float): String = when
     AdjustmentKind.Noise -> "${(amount * 100).roundToInt()}%"
     AdjustmentKind.Sharpen -> "${(amount * 200).roundToInt()}%"
     AdjustmentKind.MotionBlur -> "${(amount * 96).roundToInt()} px"
+    AdjustmentKind.Bloom, AdjustmentKind.Glitch, AdjustmentKind.Aberration -> "${(amount * 100).roundToInt()}%"
+    AdjustmentKind.Halftone -> "${(4f + 36f * amount).roundToInt()} px dots"
     else -> ""
 }
 
@@ -2914,5 +2920,9 @@ private fun adjustIcon(k: AdjustmentKind): androidx.compose.ui.graphics.vector.I
         AdjustmentKind.GradientMap -> i.Gradient
         AdjustmentKind.Posterize -> i.Filter
         AdjustmentKind.Threshold -> i.Contrast
+        AdjustmentKind.Bloom -> i.WbSunny
+        AdjustmentKind.Glitch -> i.BrokenImage
+        AdjustmentKind.Halftone -> i.Texture
+        AdjustmentKind.Aberration -> i.Lens
     }
 }

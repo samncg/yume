@@ -90,7 +90,9 @@ object Kernels {
      */
     private fun run(
         width: Int, height: Int, bounds: Rect, halo: Int,
-        source: Source, op: Op, write: (Rect, Bitmap) -> Unit
+        source: Source, op: Op, write: (Rect, Bitmap) -> Unit,
+        /** Leave flat chunks alone (false for ops that change flat colour). */
+        skipFlat: Boolean = true
     ) {
         val b = Rect(bounds)
         if (!b.intersect(0, 0, width, height)) return
@@ -108,7 +110,7 @@ object Kernels {
             for (i in 0 until n) src[i] = premul(src[i])
             // One opaque colour (or nothing) everywhere: unchanged.
             val v = src[0]
-            if ((v ushr 24) == 255 || v == 0) {
+            if (skipFlat && ((v ushr 24) == 255 || v == 0)) {
                 var i = 1
                 while (i < n && src[i] == v) i++
                 if (i == n) {
@@ -128,7 +130,7 @@ object Kernels {
             for (k in 0 until used) {
                 OpCancel.check()
                 val s = slots[k]
-                if (source.flat(s.pad)) {
+                if (skipFlat && source.flat(s.pad)) {
                     s.skip = true
                     continue
                 }
@@ -461,6 +463,323 @@ object Kernels {
     }
 
     /** Source reading a dense snapshot bitmap. */
+    // ================================================================ effects
+    //
+    // Procreate-style effects, on the same exact chunked footing: every output
+    // pixel is a function of source pixels at absolute positions, so dense and
+    // sparse stores agree. [unit] scales every distance (1 at full size; the
+    // preview's scale on its smaller copy), so the preview looks the same.
+
+    private fun mix32(v0: Int): Int {
+        var v = v0
+        v = v xor (v ushr 16)
+        v *= -0x7a143595
+        v = v xor (v ushr 13)
+        v *= -0x3d4d51cb
+        v = v xor (v ushr 16)
+        return v
+    }
+
+    private fun luma(c: Int): Int =
+        (((c shr 16) and 0xFF) * 54 + ((c shr 8) and 0xFF) * 183 + (c and 0xFF) * 19) shr 8
+
+    /** Per-thread buffers of [bloom]: four channel planes and a scratch line. */
+    private class BloomWork {
+        var planes = Array(4) { IntArray(0) }
+        var line = IntArray(0)
+        var tmp = IntArray(0)
+    }
+
+    private val bloomWork = ThreadLocal.withInitial { BloomWork() }
+
+    private fun screen(base: Int, glow0: Int, k256: Int): Int {
+        val g = min(255, (glow0 * k256) shr 8)
+        return min(255, base + g - base * g / 255)
+    }
+
+    /** Halo [bloom] needs at [amount]. */
+    fun bloomHalo(amount: Float, unit: Float = 1f): Int = 2 * bloomRadius(amount, unit) + 2
+
+    private fun bloomRadius(amount: Float, unit: Float): Int =
+        max(1, ((4f + 28f * amount.coerceIn(0f, 1f)) * unit).roundToInt())
+
+    /**
+     * Bloom: the bright parts (above about 55% brightness) blurred (two box
+     * passes) and screened back over the picture, so light glows into its
+     * surroundings (also onto transparent areas).
+     */
+    fun bloom(
+        width: Int, height: Int, bounds: Rect, amount: Float, unit: Float,
+        source: Source, write: (Rect, Bitmap) -> Unit
+    ) {
+        if (amount <= 0.001f) return
+        val r = bloomRadius(amount, unit)
+        val k256 = (amount.coerceIn(0f, 1f) * 1.3f * 256f).roundToInt()
+        run(width, height, bounds, 2 * r + 2, source, { src, pad, chunk, out ->
+            val pw = pad.width()
+            val ph = pad.height()
+            val n = pw * ph
+            // Bright pass, premultiplied, per channel (a, r, g, b), in
+            // buffers kept per thread (a chunk's planes are 2 MB).
+            val work = bloomWork.get()!!
+            if (work.planes[0].size < n) work.planes = Array(4) { IntArray(n) }
+            val ch = work.planes
+            for (a in ch) java.util.Arrays.fill(a, 0, n, 0)
+            val m = max(pw, ph) + 1
+            if (work.tmp.size < m) {
+                work.tmp = IntArray(m)
+                work.line = IntArray(m)
+            }
+            val tmp = work.tmp
+            val line = work.line
+            for (i in 0 until n) {
+                val c = src[i]
+                val a = c ushr 24
+                if (a == 0) continue
+                val l = luma(c) * 255 / a
+                val w = ((l - 140) * 256 / 115).coerceIn(0, 256)
+                if (w == 0) continue
+                ch[0][i] = (a * w) shr 8
+                ch[1][i] = (((c shr 16) and 0xFF) * w) shr 8
+                ch[2][i] = (((c shr 8) and 0xFF) * w) shr 8
+                ch[3][i] = ((c and 0xFF) * w) shr 8
+            }
+            fun boxRows(a: IntArray) {
+                val row = line
+                for (y in 0 until ph) {
+                    val o = y * pw
+                    tmp[0] = 0
+                    for (x in 0 until pw) tmp[x + 1] = tmp[x] + a[o + x]
+                    for (x in 0 until pw) {
+                        val lo = max(0, x - r)
+                        val hi = min(pw - 1, x + r)
+                        row[x] = (tmp[hi + 1] - tmp[lo]) / (hi - lo + 1)
+                    }
+                    System.arraycopy(row, 0, a, o, pw)
+                }
+            }
+            fun boxCols(a: IntArray) {
+                val col = line
+                for (x in 0 until pw) {
+                    tmp[0] = 0
+                    for (y in 0 until ph) tmp[y + 1] = tmp[y] + a[y * pw + x]
+                    for (y in 0 until ph) {
+                        val lo = max(0, y - r)
+                        val hi = min(ph - 1, y + r)
+                        col[y] = (tmp[hi + 1] - tmp[lo]) / (hi - lo + 1)
+                    }
+                    for (y in 0 until ph) a[y * pw + x] = col[y]
+                }
+            }
+            for (a in ch) {
+                boxRows(a); boxCols(a); boxRows(a); boxCols(a)
+            }
+            var o = 0
+            for (y in chunk.top until chunk.bottom) {
+                val py = y - pad.top
+                for (x in chunk.left until chunk.right) {
+                    val i = py * pw + (x - pad.left)
+                    val c = src[i]
+                    val a = screen(c ushr 24, ch[0][i], k256)
+                    val rr = min(a, screen((c shr 16) and 0xFF, ch[1][i], k256))
+                    val gg = min(a, screen((c shr 8) and 0xFF, ch[2][i], k256))
+                    val bb = min(a, screen(c and 0xFF, ch[3][i], k256))
+                    out[o++] = (a shl 24) or (rr shl 16) or (gg shl 8) or bb
+                }
+            }
+        }, write, skipFlat = false)
+    }
+
+    private fun glitchShift(amount: Float, unit: Float): Int =
+        max(1, (amount.coerceIn(0f, 1f) * 80f * unit).roundToInt())
+
+    private fun glitchSplit(amount: Float, unit: Float): Int =
+        (amount.coerceIn(0f, 1f) * 6f * unit).roundToInt()
+
+    /** Halo [glitch] needs at [amount]. */
+    fun glitchHalo(amount: Float, unit: Float = 1f): Int = glitchShift(amount, unit) + glitchSplit(amount, unit) + 2
+
+    /**
+     * Glitch: horizontal bands slid sideways by amounts drawn from the band's
+     * position (the same every time), with red and blue pulled apart in the
+     * moved bands.
+     */
+    fun glitch(
+        width: Int, height: Int, bounds: Rect, amount: Float, unit: Float,
+        source: Source, write: (Rect, Bitmap) -> Unit
+    ) {
+        if (amount <= 0.001f) return
+        val maxShift = glitchShift(amount, unit)
+        val split = glitchSplit(amount, unit)
+        val share = (0.12f + 0.5f * amount.coerceIn(0f, 1f)) * 1000f
+        run(width, height, bounds, glitchHalo(amount, unit), source, { src, pad, chunk, out ->
+            val pw = pad.width()
+            var o = 0
+            for (y in chunk.top until chunk.bottom) {
+                // Bands of varying height: a coarse band picks its own split.
+                val coarse = (y / (24f * unit)).toInt()
+                val hc = mix32(coarse * 7919 + 17)
+                val fine = if ((hc and 1) == 0) coarse * 2 + ((y / (12f * unit)).toInt() and 1) else coarse * 2
+                val h = mix32(fine * 2654435 + 101)
+                val moved = ((h ushr 8) % 1000) < share
+                val shift = if (moved) ((h ushr 18) % (2 * maxShift + 1)) - maxShift else 0
+                val sp = if (moved) split else 0
+                val py = y - pad.top
+                for (x in chunk.left until chunk.right) {
+                    fun at(dx: Int): Int {
+                        val sx = (x - shift + dx).coerceIn(0, width - 1) - pad.left
+                        return src[py * pw + sx.coerceIn(0, pw - 1)]
+                    }
+                    if (sp == 0) {
+                        out[o++] = at(0)
+                        continue
+                    }
+                    val cr = at(-sp)
+                    val cg = at(0)
+                    val cb = at(sp)
+                    val a = max(cg ushr 24, max(cr ushr 24, cb ushr 24))
+                    out[o++] = (a shl 24) or (cr and 0xFF0000) or (cg and 0xFF00) or (cb and 0xFF)
+                }
+            }
+        }, write, skipFlat = true)
+    }
+
+    private fun halftoneCell(amount: Float, unit: Float): Float =
+        max(2f, (4f + 36f * amount.coerceIn(0f, 1f)) * unit)
+
+    /** Halo [halftone] needs at [amount]. */
+    fun halftoneHalo(amount: Float, unit: Float = 1f): Int = kotlin.math.ceil(halftoneCell(amount, unit) * 1.2f).toInt() + 2
+
+    /**
+     * Halftone: a 45-degree grid of dots, each in its cell's colour and as
+     * large as the cell is dark (and opaque); between the dots, nothing.
+     */
+    fun halftone(
+        width: Int, height: Int, bounds: Rect, amount: Float, unit: Float,
+        source: Source, write: (Rect, Bitmap) -> Unit
+    ) {
+        if (amount <= 0.001f) return
+        val s = halftoneCell(amount, unit)
+        val inv = 1f / kotlin.math.sqrt(2f)
+        run(width, height, bounds, halftoneHalo(amount, unit), source, { src, pad, chunk, out ->
+            val pw = pad.width()
+            fun sample(fx: Float, fy: Float): Int {
+                val sx = fx.toInt().coerceIn(0, width - 1).coerceIn(pad.left, pad.right - 1) - pad.left
+                val sy = fy.toInt().coerceIn(0, height - 1).coerceIn(pad.top, pad.bottom - 1) - pad.top
+                return src[sy * pw + sx]
+            }
+            var o = 0
+            var lastCell = Long.MIN_VALUE
+            var cx = 0f
+            var cy = 0f
+            var dot = 0
+            var radius = 0f
+            for (y in chunk.top until chunk.bottom) {
+                for (x in chunk.left until chunk.right) {
+                    val px = x + 0.5f
+                    val py = y + 0.5f
+                    val u = (px + py) * inv / s
+                    val v = (py - px) * inv / s
+                    val iu = kotlin.math.floor(u).toInt()
+                    val iv = kotlin.math.floor(v).toInt()
+                    val key = (iu.toLong() shl 32) or (iv.toLong() and 0xFFFFFFFFL)
+                    if (key != lastCell) {
+                        lastCell = key
+                        val uc = (iu + 0.5f) * s
+                        val vc = (iv + 0.5f) * s
+                        cx = (uc - vc) * inv
+                        cy = (uc + vc) * inv
+                        // The cell's colour: five samples, premultiplied.
+                        var sa = 0; var sr = 0; var sg = 0; var sb = 0
+                        val q = s * 0.25f
+                        for ((dx, dy) in arrayOf(0f to 0f, q to 0f, -q to 0f, 0f to q, 0f to -q)) {
+                            val c = sample(cx + dx, cy + dy)
+                            sa += c ushr 24; sr += (c shr 16) and 0xFF; sg += (c shr 8) and 0xFF; sb += c and 0xFF
+                        }
+                        val a = sa / 5
+                        if (a == 0) {
+                            dot = 0
+                            radius = 0f
+                        } else {
+                            val r = min(255, sr * 255 / sa)
+                            val g = min(255, sg * 255 / sa)
+                            val b = min(255, sb * 255 / sa)
+                            val dark = (a / 255f) * (1f - 0.85f * luma((255 shl 24) or (r shl 16) or (g shl 8) or b) / 255f)
+                            radius = s * 0.7072f * kotlin.math.sqrt(dark.coerceIn(0f, 1f))
+                            dot = (r shl 16) or (g shl 8) or b
+                        }
+                    }
+                    if (radius <= 0f) {
+                        out[o++] = 0
+                        continue
+                    }
+                    val d = kotlin.math.hypot(px - cx, py - cy)
+                    val cov = (radius - d + 0.5f).coerceIn(0f, 1f)
+                    val a = (cov * 255f + 0.5f).toInt()
+                    if (a == 0) {
+                        out[o++] = 0
+                        continue
+                    }
+                    val r = (((dot shr 16) and 0xFF) * a + 127) / 255
+                    val g = (((dot shr 8) and 0xFF) * a + 127) / 255
+                    val b = ((dot and 0xFF) * a + 127) / 255
+                    out[o++] = (a shl 24) or (r shl 16) or (g shl 8) or b
+                }
+            }
+        }, write, skipFlat = false)
+    }
+
+    private fun aberrationShift(amount: Float, unit: Float): Float =
+        amount.coerceIn(0f, 1f) * 32f * unit
+
+    /** Halo [aberration] needs at [amount]. */
+    fun aberrationHalo(amount: Float, unit: Float = 1f): Int =
+        kotlin.math.ceil(aberrationShift(amount, unit)).toInt() + 2
+
+    /**
+     * Chromatic aberration: red pushed outwards and blue inwards from the
+     * canvas centre, by more the further out (nothing at the centre).
+     */
+    fun aberration(
+        width: Int, height: Int, bounds: Rect, amount: Float, unit: Float,
+        source: Source, write: (Rect, Bitmap) -> Unit
+    ) {
+        if (amount <= 0.001f) return
+        val d = aberrationShift(amount, unit)
+        val cx = width / 2f
+        val cy = height / 2f
+        val maxDist = kotlin.math.hypot(cx, cy).coerceAtLeast(1f)
+        run(width, height, bounds, aberrationHalo(amount, unit), source, { src, pad, chunk, out ->
+            val pw = pad.width()
+            fun at(x: Int, y: Int): Int {
+                val sx = x.coerceIn(0, width - 1).coerceIn(pad.left, pad.right - 1) - pad.left
+                val sy = y.coerceIn(0, height - 1).coerceIn(pad.top, pad.bottom - 1) - pad.top
+                return src[sy * pw + sx]
+            }
+            var o = 0
+            for (y in chunk.top until chunk.bottom) {
+                for (x in chunk.left until chunk.right) {
+                    val dx = x + 0.5f - cx
+                    val dy = y + 0.5f - cy
+                    val dist = kotlin.math.hypot(dx, dy)
+                    if (dist < 0.5f) {
+                        out[o++] = at(x, y)
+                        continue
+                    }
+                    // Displacement grows towards the corners.
+                    val k = d / maxDist
+                    val ox = (dx * k).roundToInt()
+                    val oy = (dy * k).roundToInt()
+                    val cr = at(x - ox, y - oy)
+                    val cg = at(x, y)
+                    val cb = at(x + ox, y + oy)
+                    val a = max(cg ushr 24, max(cr ushr 24, cb ushr 24))
+                    out[o++] = (a shl 24) or (cr and 0xFF0000) or (cg and 0xFF00) or (cb and 0xFF)
+                }
+            }
+        }, write, skipFlat = true)
+    }
+
     fun bitmapSource(bmp: Bitmap) = Source { rect, out ->
         bmp.getPixels(out, 0, rect.width(), rect.left, rect.top, rect.width(), rect.height())
     }

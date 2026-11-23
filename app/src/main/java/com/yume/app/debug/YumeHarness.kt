@@ -210,6 +210,8 @@ object YumeHarness {
                     out.append(scoreOverlayTest())
                 } else if (only == "hoist") {
                     out.append(scoreHoist())
+                } else if (only == "effects") {
+                    out.append(scoreEffects())
                 } else if (only == "clone") {
                     out.append(scoreClone(sparse = true))
                     out.append(scoreClone(sparse = false))
@@ -4848,6 +4850,161 @@ object YumeHarness {
             Log.e("YumeHarness", "psd", t)
         } finally {
             made.forEach { store.deleteProject(it) }
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /**
+     * Effects (bloom, glitch, halftone, chromatic aberration): each gives the
+     * same bytes on a sparse and a dense document (their chunks start in
+     * different places, so this also shows a pixel never depends on its
+     * chunk), does what it should, and undoes exactly.
+     */
+    private fun scoreEffects(): String {
+        val out = StringBuilder()
+        val oldS = TileStoreConfig.useSparseLayers
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        val w = 900
+        val h = 700
+        // Drawn once and copied in, so both stores start from the same bytes.
+        val picture = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { bmp ->
+            run {
+                val c = Canvas(bmp)
+                val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                p.shader = android.graphics.LinearGradient(40f, 40f, 640f, 640f, 0xFF203060.toInt(), 0xFFE08040.toInt(), android.graphics.Shader.TileMode.CLAMP)
+                c.drawRect(40f, 40f, 640f, 640f, p)
+                p.shader = null
+                p.color = 0xFF808080.toInt()
+                c.drawRect(100f, 420f, 380f, 620f, p)          // flat mid grey (halftone)
+                p.color = 0xFFFFFFF0.toInt()
+                c.drawCircle(760f, 200f, 70f, p)               // bright, on transparent (bloom)
+                p.color = 0xFFFF2020.toInt()
+                c.drawRect(700f, 450f, 860f, 660f, p)          // red block near a corner (aberration)
+            }
+        }
+        fun paint(l: Layer) {
+            l.tiles.writeRect(Rect(0, 0, w, h), picture, Rect(0, 0, w, h))
+        }
+        class Run(val after: IntArray, val before: IntArray, val undone: IntArray)
+        fun runEffect(sparse: Boolean, kind: AdjustmentKind, amount: Float): Run {
+            TileStoreConfig.useSparseLayers = sparse
+            val engine = DrawingEngine(w, h)
+            engine.backgroundColor = 0xFFFFFFFF.toInt()
+            val session = DrawingSession("fx", "FX", engine, History())
+            identityView(session, w, h)
+            session.runCommands()
+            val l = engine.layers[0]
+            paint(l)
+            engine.markDirtyAll()
+            fun px(): IntArray {
+                val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                l.tiles.readRectInto(Rect(0, 0, w, h), b)
+                val a = IntArray(w * h)
+                b.getPixels(a, 0, w, 0, 0, w, h)
+                b.recycle()
+                return a
+            }
+            val before = px()
+            session.previewAdjustment(kind, amount)
+            session.consumePendingPreview()
+            session.commitAdjustment()
+            session.runCommands()
+            val after = px()
+            session.undo()
+            session.runCommands()
+            return Run(after, before, px())
+        }
+        try {
+            for ((kind, amount) in listOf(
+                AdjustmentKind.Bloom to 0.8f, AdjustmentKind.Glitch to 0.7f,
+                AdjustmentKind.Halftone to 0.4f, AdjustmentKind.Aberration to 0.9f
+            )) {
+                val t0 = android.os.SystemClock.uptimeMillis()
+                val s = runEffect(true, kind, amount)
+                val ms = android.os.SystemClock.uptimeMillis() - t0
+                val d = runEffect(false, kind, amount)
+                val sameStart = s.before.contentEquals(d.before)
+                var diff = 0
+                for (i in s.after.indices) if (s.after[i] != d.after[i]) diff++
+                var changed = 0
+                for (i in s.after.indices) if (s.after[i] != s.before[i]) changed++
+                val undoOk = s.undone.contentEquals(s.before) && d.undone.contentEquals(d.before)
+                val a = s.after
+                fun at(x: Int, y: Int) = a[y * w + x]
+                val specific = when (kind) {
+                    // Light spills past the bright circle onto transparent pixels.
+                    AdjustmentKind.Bloom -> (at(760, 200 - 78) ushr 24) > 0 && (s.before[(200 - 78) * w + 760] ushr 24) == 0
+                    // Some rows moved sideways, others not at all.
+                    AdjustmentKind.Glitch -> {
+                        var movedRows = 0
+                        var sameRows = 0
+                        for (y in 50 until 630 step 3) {
+                            var same = true
+                            for (x in 50 until 630 step 7) if (a[y * w + x] != s.before[y * w + x]) { same = false; break }
+                            if (same) sameRows++ else movedRows++
+                        }
+                        movedRows > 5 && sameRows > 5
+                    }
+                    // Flat grey becomes dots: clear between, opaque inside.
+                    AdjustmentKind.Halftone -> {
+                        var clear = 0
+                        var solid = 0
+                        for (y in 440 until 600 step 2) for (x in 120 until 360 step 2) {
+                            val al = at(x, y) ushr 24
+                            if (al == 0) clear++ else if (al == 255) solid++
+                        }
+                        clear > 100 && solid > 100
+                    }
+                    // Unmoved at the centre; red and blue split near a corner edge.
+                    AdjustmentKind.Aberration -> {
+                        val cx = w / 2
+                        val cy = h / 2
+                        var split = 0
+                        for (x in 690 until 720) {
+                            val c = at(x, 560)
+                            if (((c shr 16) and 0xFF) != (c and 0xFF) || ((c shr 16) and 0xFF) != ((c shr 8) and 0xFF)) split++
+                        }
+                        at(cx, cy) == s.before[cy * w + cx] && split > 0
+                    }
+                    else -> true
+                }
+                out.append("effects ${kind.name}: same start ${pass(sameStart)}, sparse = dense ${pass(diff == 0)} (off $diff), changes ${pass(changed > 500)} ($changed px), behaves ${pass(specific)}, undo ${pass(undoOk)}, ${ms} ms\n")
+            }
+            // Timing on a bigger, fully painted canvas (sparse, as in use).
+            run {
+                TileStoreConfig.useSparseLayers = true
+                val n = 3072
+                val engine = DrawingEngine(n, n)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val session = DrawingSession("fxt", "FXT", engine, History())
+                identityView(session, 2048, 2048)
+                session.runCommands()
+                engine.layers[0].tiles.withWriteCanvas(Rect(0, 0, n, n)) { c ->
+                    val p = Paint()
+                    p.shader = android.graphics.LinearGradient(0f, 0f, n.toFloat(), n.toFloat(), 0xFF203060.toInt(), 0xFFF0E0C0.toInt(), android.graphics.Shader.TileMode.CLAMP)
+                    c.drawRect(0f, 0f, n.toFloat(), n.toFloat(), p)
+                }
+                engine.markDirtyAll()
+                val times = StringBuilder()
+                for ((kind, amount) in listOf(AdjustmentKind.Bloom to 1f, AdjustmentKind.Glitch to 1f, AdjustmentKind.Halftone to 1f, AdjustmentKind.Aberration to 1f)) {
+                    val t0 = android.os.SystemClock.uptimeMillis()
+                    session.previewAdjustment(kind, amount)
+                    session.consumePendingPreview()
+                    val t1 = android.os.SystemClock.uptimeMillis()
+                    session.commitAdjustment()
+                    session.runCommands()
+                    val t2 = android.os.SystemClock.uptimeMillis()
+                    session.undo()
+                    session.runCommands()
+                    times.append(" ${kind.name} preview ${t1 - t0} ms apply ${t2 - t1} ms;")
+                }
+                out.append("effects 3072² at full strength:$times\n")
+            }
+        } catch (t: Throwable) {
+            out.append("effects: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e("YumeHarness", "effects", t)
+        } finally {
             TileStoreConfig.useSparseLayers = oldS
         }
         return out.toString()
