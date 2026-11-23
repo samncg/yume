@@ -57,6 +57,7 @@ import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -1931,133 +1932,204 @@ internal fun HueBar(hue: Float, onChange: (Float) -> Unit) {
 
 // ================================================================ adjustments
 
+/** The adjustments panel's groups, in order. */
+private val ADJUST_GROUPS: List<Pair<String, List<AdjustmentKind>>> = listOf(
+    "Colour" to listOf(
+        AdjustmentKind.Hue, AdjustmentKind.Saturation, AdjustmentKind.Brightness,
+        AdjustmentKind.ColorBalance, AdjustmentKind.GradientMap
+    ),
+    "Tone" to listOf(
+        AdjustmentKind.Curves, AdjustmentKind.Levels, AdjustmentKind.Posterize, AdjustmentKind.Threshold
+    ),
+    "Blur and sharpen" to listOf(
+        AdjustmentKind.Blur, AdjustmentKind.MotionBlur, AdjustmentKind.Sharpen, AdjustmentKind.Noise
+    ),
+    "Effects" to listOf(
+        AdjustmentKind.Bloom, AdjustmentKind.Glitch, AdjustmentKind.Halftone,
+        AdjustmentKind.Aberration, AdjustmentKind.Mosaic, AdjustmentKind.LineArt
+    )
+)
+
+/**
+ * Adjustments: a gallery of large sample buttons in groups; choosing one opens
+ * its controls. A preview that was not applied stays pending when the panel
+ * closes, and reopening the panel goes straight back to it (Apply / Cancel).
+ */
 @Composable
 fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {
-    var kind by remember { mutableStateOf(AdjustmentKind.Hue) }
-    var amount by remember { mutableFloatStateOf(0f) }
+    // Reopened over a preview that was not applied: carry on with it.
+    var kind by remember { mutableStateOf(state.pendingAdjust ?: AdjustmentKind.Hue) }
+    var amount by remember { mutableFloatStateOf(if (state.pendingAdjust != null) state.pendingAdjustAmount else 0f) }
+    var editing by remember { mutableStateOf(state.pendingAdjust != null) }
+    var samplesReady by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { AdjustSamples.build() }
+        samplesReady = true
+    }
 
-    fun pick(next: AdjustmentKind) {
-        if (next != kind) {
-            session.cancelAdjustment()
+    fun open(next: AdjustmentKind) {
+        val changed = next != kind || state.pendingAdjust != next
+        if (next != kind) session.cancelAdjustment()
+        kind = next
+        editing = true
+        if (!changed) return
+        // Effects start at half strength, previewed at once.
+        if (next.isEffect) {
+            amount = 0.5f
+            session.previewAdjustment(next, amount)
+        } else {
             amount = 0f
-            kind = next
         }
     }
 
     PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
-        PanelHeader("Adjustments", onClose)
+        if (!editing) {
+            PanelHeader("Adjustments", onClose)
+            if (state.pendingAdjust != null) {
+                PendingNote(state.pendingAdjust) { editing = true; kind = state.pendingAdjust }
+            }
+            for ((group, kinds) in ADJUST_GROUPS) {
+                SectionLabel(group)
+                Spacer(Modifier.height(6.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    kinds.chunked(2).forEach { row ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            for (k in row) {
+                                AdjustTile(k, samplesReady, Modifier.weight(1f), state.pendingAdjust == k) { open(k) }
+                            }
+                            if (row.size == 1) Spacer(Modifier.weight(1f))
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+            DividerLine()
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallButton("Invert colours") { session.invertColors() }
+                SmallButton("Grayscale") { session.grayscale() }
+            }
+            return@PanelCard
+        }
+
+        // ------------------------------------------------------------ editing
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            YumeIconButton(Glyph.ChevronDown, { editing = false }, size = 32.dp, iconSize = 18.dp, label = "All adjustments")
+            Spacer(Modifier.width(6.dp))
+            Text(kind.label, style = MaterialTheme.typography.titleMedium, color = YumeColors.text, modifier = Modifier.weight(1f))
+            YumeIconButton(Glyph.Close, onClose, size = 32.dp, iconSize = 16.dp, label = "Close")
+        }
+        Spacer(Modifier.height(6.dp))
         Text(
-            text = if (state.adjustAllLayers) "Drag a slider to preview live on every visible layer." else "Drag a slider to preview live on “${state.activeLayer?.name ?: "-"}”.",
+            text = if (state.adjustAllLayers) "Previewing on every visible layer." else "Previewing on “${state.activeLayer?.name ?: "-"}”.",
             style = MaterialTheme.typography.bodySmall,
             color = YumeColors.textDim
         )
-        Spacer(Modifier.height(10.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            AdjustmentKind.entries.chunked(2).forEach { rowItems ->
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    rowItems.forEach { item ->
-                        val selected = item == kind
-                        Box(
-                            Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(
-                                    if (selected) YumeColors.accentSoft else YumeColors.panelAlt
-                                )
-                                .clickable { pick(item) }
-                                .padding(vertical = 9.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                androidx.compose.foundation.Image(
-                                    painter = androidx.compose.ui.graphics.vector.rememberVectorPainter(adjustIcon(item)),
-                                    contentDescription = null,
-                                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(
-                                        if (selected) YumeColors.accent else YumeColors.textDim
-                                    ),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    text = item.label,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (selected) YumeColors.accent else YumeColors.text
-                                )
-                            }
-                        }
-                    }
-                    if (rowItems.size == 1) Spacer(Modifier.weight(1f))
-                }
-            }
-        }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(8.dp))
         SegmentedRow(
             options = listOf("This layer", "All layers"),
             selectedIndex = if (state.adjustAllLayers) 1 else 0,
             onSelect = {
                 session.chooseAdjustAllLayers(it == 1)
-                amount = 0f
+                if (!kind.isEffect) amount = 0f
+                else if (amount != 0f) session.previewAdjustment(kind, amount)
             }
         )
         Spacer(Modifier.height(10.dp))
+        val longEdge = maxOf(state.width, state.height)
         if (kind.isTone) {
             ToneEditor(kind, state) { lut ->
                 amount = 1f
                 session.previewTone(kind, lut)
             }
-        } else {
-        val range = adjustRange(kind)
-        YumeSlider(
-            value = amount,
-            onChange = { value ->
-                amount = value
-                session.previewAdjustment(kind, value)
-            },
-            label = "${kind.label} amount",
-            valueLabel = adjustValueLabel(kind, amount),
-            min = range.first,
-            max = range.second
-        )
-        }
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SmallButton("Apply") {
-                session.commitAdjustment()
-                amount = 0f
+        } else if (kind.isEffect) {
+            YumeSlider(
+                value = amount,
+                onChange = { value ->
+                    amount = value
+                    session.previewAdjustment(kind, value)
+                },
+                label = com.yume.app.engine.EffectSettings.mainLabel(kind),
+                valueLabel = com.yume.app.engine.EffectSettings.mainValue(kind, amount, longEdge)
+            )
+            val params = session.effectParams(kind).also { state.strokeCount }
+            com.yume.app.engine.EffectSettings.of(kind).forEachIndexed { i, setting ->
+                // Settings tied to a mode only show for it.
+                if (kind == AdjustmentKind.Aberration && i == 1 && params.getOrElse(0) { 0f } < 0.5f) return@forEachIndexed
+                if (kind == AdjustmentKind.Aberration && i == 2 && params.getOrElse(0) { 0f } >= 0.5f) return@forEachIndexed
+                var v by remember(kind, i) { mutableFloatStateOf(params.getOrElse(i) { setting.default }) }
+                fun set(x: Float) {
+                    v = x
+                    session.setEffectParam(kind, i, x)
+                    session.previewAdjustment(kind, amount)
+                }
+                val choices = setting.choices
+                if (choices != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(setting.label, style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim)
+                    Spacer(Modifier.height(4.dp))
+                    SegmentedRow(choices, v.roundToInt().coerceIn(0, choices.size - 1), { set(it.toFloat()) })
+                    Spacer(Modifier.height(4.dp))
+                } else {
+                    YumeSlider(
+                        value = v, onChange = { set(it) }, label = setting.label,
+                        valueLabel = setting.format(v, longEdge), min = setting.min, max = setting.max
+                    )
+                }
             }
-            SmallButton("Cancel", enabled = abs(amount) > 0.0001f) {
+        } else {
+            val range = adjustRange(kind)
+            YumeSlider(
+                value = amount,
+                onChange = { value ->
+                    amount = value
+                    session.previewAdjustment(kind, value)
+                },
+                label = kind.label,
+                valueLabel = adjustValueLabel(kind, amount),
+                min = range.first,
+                max = range.second
+            )
+            if (kind == AdjustmentKind.MotionBlur) {
+                YumeSlider(
+                    value = (state.motionAngle + 90f) / 180f,
+                    onChange = {
+                        session.chooseMotionAngle(it * 180f - 90f)
+                        if (abs(amount) > 0.0001f) session.previewAdjustment(kind, amount)
+                    },
+                    label = "Direction",
+                    valueLabel = "${state.motionAngle.roundToInt()}°",
+                    min = 0f,
+                    max = 1f
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        val pending = state.pendingAdjust == kind
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            SmallButton("Apply", enabled = pending) {
+                session.commitAdjustment()
+                amount = if (kind.isEffect) 0f else 0f
+                editing = false
+            }
+            SmallButton("Cancel", enabled = pending) {
                 session.cancelAdjustment()
                 amount = 0f
             }
-            // How long Apply will take on this canvas, once it is worth saying.
             val eta = session.adjustEstimateSeconds(kind).also { state.strokeCount }
             if (eta >= 1.5f) {
                 Text(
                     text = "Apply: about ${formatDuration(eta)}",
                     style = MaterialTheme.typography.bodySmall,
-                    color = YumeColors.textDim,
-                    modifier = Modifier.align(Alignment.CenterVertically)
+                    color = YumeColors.textDim
                 )
             }
         }
-        DividerLine()
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SmallButton("Invert") { session.invertColors() }
-            SmallButton("Grayscale") { session.grayscale() }
-        }
-        if (kind == AdjustmentKind.MotionBlur) {
-            Spacer(Modifier.height(4.dp))
-            YumeSlider(
-                value = (state.motionAngle + 90f) / 180f,
-                onChange = {
-                    session.chooseMotionAngle(it * 180f - 90f)
-                    // The live preview follows the direction too.
-                    if (abs(amount) > 0.0001f) session.previewAdjustment(kind, amount)
-                },
-                label = "Direction",
-                valueLabel = "${state.motionAngle.roundToInt()}°",
-                min = 0f,
-                max = 1f
+        if (pending) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Not applied yet. Closing the panel keeps the preview; come back here to apply or cancel it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YumeColors.accent
             )
         }
         if (kind == AdjustmentKind.Noise || kind == AdjustmentKind.Sharpen ||
@@ -2071,6 +2143,85 @@ fun AdjustPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
             )
         }
     }
+}
+
+/** A large button: the adjustment's sample picture with its name under it. */
+@Composable
+private fun AdjustTile(
+    kind: AdjustmentKind, ready: Boolean, modifier: Modifier, pending: Boolean, onClick: () -> Unit
+) {
+    val sample = if (ready) AdjustSamples.get(kind) else null
+    Column(
+        modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (pending) YumeColors.accentSoft else YumeColors.panelAlt)
+            .clickable(onClick = onClick)
+            .padding(6.dp)
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(AdjustSamples.W.toFloat() / AdjustSamples.H)
+                .clip(RoundedCornerShape(8.dp))
+                .background(YumeColors.track),
+            contentAlignment = Alignment.Center
+        ) {
+            if (sample != null) {
+                androidx.compose.foundation.Image(
+                    bitmap = sample.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                androidx.compose.foundation.Image(
+                    painter = androidx.compose.ui.graphics.vector.rememberVectorPainter(adjustIcon(kind)),
+                    contentDescription = null,
+                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(YumeColors.textDim),
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+        Spacer(Modifier.height(5.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.foundation.Image(
+                painter = androidx.compose.ui.graphics.vector.rememberVectorPainter(adjustIcon(kind)),
+                contentDescription = null,
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(if (pending) YumeColors.accent else YumeColors.textDim),
+                modifier = Modifier.size(14.dp)
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                text = kind.label,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (pending) YumeColors.accent else YumeColors.text,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+/** "A preview is waiting": shown at the top of the gallery, opens it. */
+@Composable
+private fun PendingNote(kind: AdjustmentKind, onOpen: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(YumeColors.accentSoft)
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "${kind.label} is previewing, not applied",
+            style = MaterialTheme.typography.bodySmall,
+            color = YumeColors.accent,
+            modifier = Modifier.weight(1f)
+        )
+        Text("Open", style = MaterialTheme.typography.labelLarge, color = YumeColors.accent)
+    }
+    Spacer(Modifier.height(10.dp))
 }
 
 private fun adjustRange(kind: AdjustmentKind): Pair<Float, Float> = when (kind) {

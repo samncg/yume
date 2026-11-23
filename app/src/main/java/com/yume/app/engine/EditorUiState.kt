@@ -73,6 +73,9 @@ data class EditorUiState(
     val shapeSides: Int = 5,
     val history: List<HistoryEntry> = emptyList(),
     val adjusting: Boolean = false,
+    /** The adjustment being previewed and not yet applied, and its amount. */
+    val pendingAdjust: AdjustmentKind? = null,
+    val pendingAdjustAmount: Float = 0f,
     val colorMode: ColorMode = ColorMode.Wheel,
     val harmony: Harmony = Harmony.Complementary,
     /** Bumped whenever the document changes; drives debounced autosave. */

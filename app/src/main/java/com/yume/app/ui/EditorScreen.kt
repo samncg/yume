@@ -729,11 +729,9 @@ private fun PanelHost(
         PanelId.Adjust -> AdjustPanel(
             state = state,
             session = session,
-            // Closing the panel keeps whatever the user was previewing.
-            onClose = {
-                session.commitAdjustment()
-                onClose()
-            }
+            // Closing keeps the preview pending (not applied): reopening the
+            // panel shows it again with Apply and Cancel.
+            onClose = onClose
         )
         PanelId.Selection -> SelectionPanel(state, session, onClose)
         PanelId.Fill -> FillPanel(state, session, onClose)

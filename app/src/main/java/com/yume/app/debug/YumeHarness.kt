@@ -5040,7 +5040,7 @@ object YumeHarness {
                 fun at(x: Int, y: Int) = a[y * w + x]
                 val specific = when (kind) {
                     // Light spills past the bright circle onto transparent pixels.
-                    AdjustmentKind.Bloom -> (at(760, 200 - 78) ushr 24) > 0 && (s.before[(200 - 78) * w + 760] ushr 24) == 0
+                    AdjustmentKind.Bloom -> (at(760, 200 - 73) ushr 24) > 0 && (s.before[(200 - 73) * w + 760] ushr 24) == 0
                     // Some rows moved sideways, others not at all.
                     AdjustmentKind.Glitch -> {
                         var movedRows = 0
@@ -5075,7 +5075,7 @@ object YumeHarness {
                     }
                     // Every block one colour (blocks on a canvas-fixed grid).
                     AdjustmentKind.Mosaic -> {
-                        val cell = kotlin.math.round(2f + 62f * 0.3f).toInt()
+                        val cell = com.yume.app.engine.EffectSettings.mosaicBlock(0.3f, maxOf(w, h))
                         var uneven = 0
                         for (by in 2 until 10) for (bx in 2 until 10) {
                             val v = at(bx * cell, by * cell)
@@ -5105,7 +5105,12 @@ object YumeHarness {
                 }
                 engine.markDirtyAll()
                 val times = StringBuilder()
-                for ((kind, amount) in listOf(AdjustmentKind.Bloom to 1f, AdjustmentKind.Glitch to 1f, AdjustmentKind.Halftone to 1f, AdjustmentKind.Aberration to 1f)) {
+                for ((kind, amount) in listOf(
+                    AdjustmentKind.Bloom to 1f, AdjustmentKind.Glitch to 1f, AdjustmentKind.Halftone to 1f,
+                    AdjustmentKind.Aberration to 1f, AdjustmentKind.Mosaic to 1f
+                )) {
+                    // Every setting at its widest reach.
+                    com.yume.app.engine.EffectSettings.widest(kind).forEachIndexed { i, v -> session.setEffectParam(kind, i, v) }
                     val t0 = android.os.SystemClock.uptimeMillis()
                     session.previewAdjustment(kind, amount)
                     session.consumePendingPreview()
@@ -5118,6 +5123,37 @@ object YumeHarness {
                     times.append(" ${kind.name} preview ${t1 - t0} ms apply ${t2 - t1} ms;")
                 }
                 out.append("effects 3072² at full strength:$times\n")
+            }
+            // The widest bloom and halftone on an 8K canvas (the slowest cases).
+            run {
+                TileStoreConfig.useSparseLayers = true
+                val n = 8192
+                val engine = DrawingEngine(n, n)
+                engine.backgroundColor = 0xFFFFFFFF.toInt()
+                val session = DrawingSession("fx8", "FX8", engine, History())
+                identityView(session, 2048, 2048)
+                session.runCommands()
+                engine.layers[0].tiles.withWriteCanvas(Rect(0, 0, n, n)) { c ->
+                    val p = Paint()
+                    p.shader = android.graphics.LinearGradient(0f, 0f, n.toFloat(), n.toFloat(), 0xFF203060.toInt(), 0xFFF0E0C0.toInt(), android.graphics.Shader.TileMode.CLAMP)
+                    c.drawRect(0f, 0f, n.toFloat(), n.toFloat(), p)
+                }
+                engine.markDirtyAll()
+                val times = StringBuilder()
+                for (kind in listOf(AdjustmentKind.Bloom, AdjustmentKind.Halftone)) {
+                    com.yume.app.engine.EffectSettings.widest(kind).forEachIndexed { i, v -> session.setEffectParam(kind, i, v) }
+                    val t0 = android.os.SystemClock.uptimeMillis()
+                    session.previewAdjustment(kind, 1f)
+                    session.consumePendingPreview()
+                    val t1 = android.os.SystemClock.uptimeMillis()
+                    session.commitAdjustment()
+                    session.runCommands()
+                    val t2 = android.os.SystemClock.uptimeMillis()
+                    session.undo()
+                    session.runCommands()
+                    times.append(" ${kind.name} preview ${t1 - t0} ms apply ${t2 - t1} ms;")
+                }
+                out.append("effects 8192² widest:$times\n")
             }
         } catch (t: Throwable) {
             out.append("effects: FAIL (${t.javaClass.simpleName}: ${t.message})\n")

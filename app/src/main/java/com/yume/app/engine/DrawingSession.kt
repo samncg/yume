@@ -275,11 +275,11 @@ class DrawingSession(
         AdjustmentKind.Blur -> blurHalo
         AdjustmentKind.Sharpen -> 2
         AdjustmentKind.MotionBlur -> MOTION_MAX_RADIUS + 1
-        AdjustmentKind.Bloom -> Kernels.bloomHalo(1f)
-        AdjustmentKind.Glitch -> Kernels.glitchHalo(1f)
-        AdjustmentKind.Halftone -> Kernels.halftoneHalo(1f)
-        AdjustmentKind.Aberration -> Kernels.aberrationHalo(1f)
-        AdjustmentKind.Mosaic -> Kernels.mosaicHalo(1f)
+        // Effects: the widest any of their settings can reach on this canvas
+        // (the settings may change while the preview runs).
+        AdjustmentKind.Bloom, AdjustmentKind.Glitch, AdjustmentKind.Halftone,
+        AdjustmentKind.Aberration, AdjustmentKind.Mosaic ->
+            Kernels.maxEffectHalo(kind, engine.width, engine.height)
         else -> 0
     }
 
@@ -2179,6 +2179,9 @@ class DrawingSession(
         put("fillExpand", fillExpand)
         put("fillGap", fillGap)
         put("cloneAllLayers", cloneAllLayers)
+        put("effects", org.json.JSONObject().apply {
+            for ((k, v) in effectParamsByKind) put(k.name, org.json.JSONArray(v.map { it.toDouble() }))
+        })
         put("wandTolerance", wandTolerance)
         put("eyedropperLayerOnly", eyedropperLayerOnly)
         put("selectionShape", selectionShape.name)
@@ -2202,6 +2205,13 @@ class DrawingSession(
         fillExpand = o.optInt("fillExpand", fillExpand)
         fillGap = o.optInt("fillGap", fillGap).coerceIn(0, FILL_GAP_MAX)
         cloneAllLayers = o.optBoolean("cloneAllLayers", cloneAllLayers)
+        o.optJSONObject("effects")?.let { e ->
+            for (k in AdjustmentKind.entries) {
+                val a = e.optJSONArray(k.name) ?: continue
+                val d = EffectSettings.defaults(k)
+                effectParamsByKind[k] = FloatArray(d.size) { i -> if (i < a.length()) a.optDouble(i, d[i].toDouble()).toFloat() else d[i] }
+            }
+        }
         wandTolerance = o.optInt("wandTolerance", wandTolerance)
         eyedropperLayerOnly = o.optBoolean("eyedropperLayerOnly", eyedropperLayerOnly)
         SelectionShape.entries.firstOrNull { it.name == o.optString("selectionShape") }?.let { selectionShape = it }
@@ -2239,6 +2249,13 @@ class DrawingSession(
         fillExpand = o.optInt("fillExpand", fillExpand).coerceIn(0, 8)
         fillGap = o.optInt("fillGap", fillGap).coerceIn(0, FILL_GAP_MAX)
         cloneAllLayers = o.optBoolean("cloneAllLayers", cloneAllLayers)
+        o.optJSONObject("effects")?.let { e ->
+            for (k in AdjustmentKind.entries) {
+                val a = e.optJSONArray(k.name) ?: continue
+                val d = EffectSettings.defaults(k)
+                effectParamsByKind[k] = FloatArray(d.size) { i -> if (i < a.length()) a.optDouble(i, d[i].toDouble()).toFloat() else d[i] }
+            }
+        }
         Gradients.Kind.entries.firstOrNull { it.name == o.optString("gradientKind") }?.let { gradientKind = it }
         ShapeKind.entries.firstOrNull { it.name == o.optString("shapeKind") }?.let { shapeKind = it }
         shapePerfect = o.optBoolean("shapePerfect", shapePerfect)
@@ -4199,26 +4216,30 @@ class DrawingSession(
         val pc = Canvas(proxy)
         val src = Paint().apply { blendMode = BlendMode.SRC }
         pc.drawBitmap(base, 0f, 0f, src)
-        val unit = w.toFloat() / engine.width
-        runEffect(kind, w, h, Rect(0, 0, w, h), amount, unit, Kernels.bitmapSource(base)) { r, bmp ->
+        runEffect(kind, w, h, Rect(0, 0, w, h), amount, Kernels.bitmapSource(base)) { r, bmp ->
             pc.drawBitmap(bmp, r.left.toFloat(), r.top.toFloat(), src)
         }
         return proxy
     }
 
     private fun runEffect(
-        kind: AdjustmentKind, w: Int, h: Int, bounds: Rect, amount: Float, unit: Float,
+        kind: AdjustmentKind, w: Int, h: Int, bounds: Rect, amount: Float,
         source: Kernels.Source, write: (Rect, Bitmap) -> Unit
-    ) {
-        when (kind) {
-            AdjustmentKind.Bloom -> Kernels.bloom(w, h, bounds, amount, unit, source, write)
-            AdjustmentKind.Glitch -> Kernels.glitch(w, h, bounds, amount, unit, source, write)
-            AdjustmentKind.Halftone -> Kernels.halftone(w, h, bounds, amount, unit, source, write)
-            AdjustmentKind.Aberration -> Kernels.aberration(w, h, bounds, amount, unit, source, write)
-            AdjustmentKind.Mosaic -> Kernels.mosaic(w, h, bounds, amount, unit, source, write)
-            AdjustmentKind.LineArt -> Kernels.lineArt(w, h, bounds, amount, unit, source, write)
-            else -> Unit
-        }
+    ) = Kernels.effect(kind, w, h, bounds, amount, effectParams(kind), source, write)
+
+    /** Each effect's extra settings (see [EffectSettings]), kept for the session. */
+    private val effectParamsByKind = java.util.concurrent.ConcurrentHashMap<AdjustmentKind, FloatArray>()
+
+    fun effectParams(kind: AdjustmentKind): FloatArray =
+        effectParamsByKind.getOrPut(kind) { EffectSettings.defaults(kind) }
+
+    /** Changes one of [kind]'s settings; the live preview follows on its next update. */
+    fun setEffectParam(kind: AdjustmentKind, index: Int, value: Float) {
+        val next = effectParams(kind).copyOf()
+        if (index !in next.indices) return
+        next[index] = value
+        effectParamsByKind[kind] = next
+        requestState()
     }
 
     /**
@@ -4429,7 +4450,7 @@ class DrawingSession(
                 AdjustmentKind.Aberration,
                 AdjustmentKind.Mosaic,
                 AdjustmentKind.LineArt -> runEffect(
-                    kind, engine.width, engine.height, work, amount, 1f,
+                    kind, engine.width, engine.height, work, amount,
                     Kernels.captureSource(capture, lazy = true)
                 ) { r, bmp ->
                     TileOps.captureRect(capture, r)
@@ -4483,7 +4504,7 @@ class DrawingSession(
                 AdjustmentKind.Aberration,
                 AdjustmentKind.Mosaic,
                 AdjustmentKind.LineArt -> runEffect(
-                    kind, engine.width, engine.height, Rect(0, 0, engine.width, engine.height), amount, 1f,
+                    kind, engine.width, engine.height, Rect(0, 0, engine.width, engine.height), amount,
                     Kernels.bitmapSource(snapshot)
                 ) { r, bmp ->
                     android.graphics.Canvas(target).drawBitmap(
@@ -5187,6 +5208,8 @@ class DrawingSession(
             shapeSides = shapeSides,
             history = historyCache,
             adjusting = adjusting,
+            pendingAdjust = adjustKind,
+            pendingAdjustAmount = adjustAmount,
             colorMode = colorMode,
             harmony = harmony,
             eyedropperLayerOnly = eyedropperLayerOnly,
