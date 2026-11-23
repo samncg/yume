@@ -260,20 +260,21 @@ private fun MangaTab(state: EditorUiState, session: DrawingSession) {
     EditingTitle(if (speed) "Speed lines" else "Focus lines") { editing = false }
     val thickShare = p.thickness / longEdge * 100f
     YumeSlider(value = p.count.toFloat(), onChange = { v -> update { it.copy(count = v.roundToInt()) } },
-        label = "Lines", valueLabel = "${p.count}", min = 30f, max = 500f)
+        label = "Lines", valueLabel = "${p.count}", min = 30f, max = 500f, resetTo = 160f)
     YumeSlider(value = thickShare, onChange = { v -> update { it.copy(thickness = (v / 100f * longEdge).coerceAtLeast(1f)) } },
-        label = "Thickness", valueLabel = "${p.thickness.roundToInt().coerceAtLeast(1)} px", min = 0.05f, max = 3f)
+        label = "Thickness", valueLabel = "${p.thickness.roundToInt().coerceAtLeast(1)} px", min = 0.05f, max = 3f, resetTo = 0.5f)
     if (!speed && state.hasSelection) {
         Hint("The lines aim at the selection and stop at it.")
     } else {
         YumeSlider(value = p.clear, onChange = { v -> update { it.copy(clear = v) } },
-            label = if (speed) "Clear band" else "Clear area", valueLabel = "${(p.clear * 100).roundToInt()}%", min = 0f, max = 0.9f)
+            label = if (speed) "Clear band" else "Clear area", valueLabel = "${(p.clear * 100).roundToInt()}%", min = 0f, max = 0.9f,
+            resetTo = 0.45f)
     }
     YumeSlider(value = p.variation, onChange = { v -> update { it.copy(variation = v) } },
-        label = "Variation", valueLabel = "${(p.variation * 100).roundToInt()}%")
+        label = "Variation", valueLabel = "${(p.variation * 100).roundToInt()}%", resetTo = 0.6f)
     if (speed) {
         YumeSlider(value = p.angle, onChange = { v -> update { it.copy(angle = v) } },
-            label = "Direction", valueLabel = "${p.angle.roundToInt()}°", min = 0f, max = 180f)
+            label = "Direction", valueLabel = "${p.angle.roundToInt()}°", min = 0f, max = 180f, resetTo = 0f)
     } else if (!state.hasSelection) {
         Hint("Touch or drag on the canvas to aim the lines. Two fingers still pan and zoom.")
     }
@@ -344,12 +345,12 @@ private fun FramesTab(state: EditorUiState, session: DrawingSession) {
         update { it.regrid(it.cols, v.roundToInt()) }
     }, label = "Grid rows", valueLabel = "${rows.roundToInt()}", min = 1f, max = 12f)
     YumeSlider(value = layout.gutter, onChange = { v -> update { it.copy(gutter = v) } },
-        label = "Gutter", valueLabel = "${(layout.gutter * unit).roundToInt()} px", min = 0f, max = 0.08f)
+        label = "Gutter", valueLabel = "${(layout.gutter * unit).roundToInt()} px", min = 0f, max = 0.08f, resetTo = 0.025f)
     YumeSlider(value = layout.margin, onChange = { v -> update { it.copy(margin = v) } },
-        label = "Margin", valueLabel = "${(layout.margin * unit).roundToInt()} px", min = 0f, max = 0.15f)
+        label = "Margin", valueLabel = "${(layout.margin * unit).roundToInt()} px", min = 0f, max = 0.15f, resetTo = 0.05f)
     val borderShare = layout.border / unit * 100f
     YumeSlider(value = borderShare, onChange = { v -> update { it.copy(border = (v / 100f * unit).coerceAtLeast(1f)) } },
-        label = "Border", valueLabel = "${layout.border.roundToInt()} px", min = 0.05f, max = 1.5f)
+        label = "Border", valueLabel = "${layout.border.roundToInt()} px", min = 0.05f, max = 1.5f, resetTo = 0.35f)
     Spacer(Modifier.height(6.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         SmallButton("Fill empty cells") { update { it.fillEmpty() } }
@@ -447,12 +448,13 @@ private fun MaterialsTab(state: EditorUiState, session: DrawingSession) {
     // The size slider is the inverse of Material.sizeFor.
     val sizeSlider = sqrt(((p.size - 3f) / (0.08f * longEdge)).coerceIn(0f, 1f))
     YumeSlider(value = sizeSlider, onChange = { v -> update { it.copy(size = Material.sizeFor(v, longEdge)) } },
-        label = "Size", valueLabel = "${p.size.roundToInt()} px")
+        label = "Size", valueLabel = "${p.size.roundToInt()} px", resetTo = 0.12f)
     YumeSlider(value = p.angle, onChange = { v -> update { it.copy(angle = v) } },
-        label = "Angle", valueLabel = "${p.angle.roundToInt()}°", min = 0f, max = 180f)
+        label = "Angle", valueLabel = "${p.angle.roundToInt()}°", min = 0f, max = 180f,
+        resetTo = defaultMaterialAngle(p.kind))
     p.kind.densityLabel?.let { label ->
         YumeSlider(value = p.density, onChange = { v -> update { it.copy(density = v) } },
-            label = label, valueLabel = "${(p.density * 100).roundToInt()}%")
+            label = label, valueLabel = "${(p.density * 100).roundToInt()}%", resetTo = p.kind.defaultDensity)
     }
     Spacer(Modifier.height(4.dp))
     Text("Ink", style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim)

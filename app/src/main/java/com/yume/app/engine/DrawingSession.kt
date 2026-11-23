@@ -4391,6 +4391,9 @@ class DrawingSession(
     fun consumePendingPreview(): Boolean {
         val insertBusy = tickInsert()
         if (!hasPendingPreview) return insertBusy
+        // A Cancel or Apply asked for before this preview has not run yet:
+        // it goes first (next frame), or it would undo this preview.
+        if (queuedEnds.get() > 0) return true
         hasPendingPreview = false
         val kind = pendingPreviewKind ?: return false
         // The first preview of a big layer builds its small copy: that shows
@@ -4750,10 +4753,10 @@ class DrawingSession(
     private fun previewTarget(layer: Layer): Long =
         if (adjustAllLayers) LayerPreview.ALL_LAYERS else layer.id
 
-    private fun commitAdjustmentInternal() = working { commitAdjustmentInternalWork() }
+    private fun commitAdjustmentInternal(dropQueued: Boolean = true) = working { commitAdjustmentInternalWork(dropQueued) }
 
-    private fun commitAdjustmentInternalWork() {
-        hasPendingPreview = false
+    private fun commitAdjustmentInternalWork(dropQueued: Boolean = true) {
+        if (dropQueued) hasPendingPreview = false
         dropEffectBase()
         val layer = adjustLayer?.takeIf { engine.layers.contains(it) } ?: engine.activeLayer
         adjustLayer = null
@@ -4991,8 +4994,14 @@ class DrawingSession(
         return null
     }
 
-    private fun cancelAdjustmentInternal() {
-        hasPendingPreview = false
+    /**
+     * [dropQueued]: also drop a preview waiting for its frame. The working
+     * card's Cancel does (that preview belongs to what is being cancelled); a
+     * Cancel from the panel does not, because the panel already dropped it and
+     * anything waiting now was asked for after the Cancel (another effect).
+     */
+    private fun cancelAdjustmentInternal(dropQueued: Boolean = true) {
+        if (dropQueued) hasPendingPreview = false
         dropEffectBase()
         engine.applyPreview(null)
         adjustProxy?.recycle()
@@ -5028,15 +5037,31 @@ class DrawingSession(
      */
     fun commitAdjustment() {
         hasPendingPreview = false
-        post { commitAdjustmentInternal() }
+        queuedEnds.incrementAndGet()
+        post {
+            queuedEnds.decrementAndGet()
+            commitAdjustmentInternal(dropQueued = false)
+        }
     }
 
     fun cancelAdjustment() {
         hasPendingPreview = false
         // An effect preview still being made stops now instead of finishing first.
         if (previewRunning) OpCancel.requested = true
-        post { cancelAdjustmentInternal() }
+        queuedEnds.incrementAndGet()
+        post {
+            queuedEnds.decrementAndGet()
+            cancelAdjustmentInternal(dropQueued = false)
+        }
     }
+
+    /**
+     * Panel Cancels and Applies posted but not run yet. A preview asked for
+     * after one (choosing another effect cancels the current one first) waits
+     * for it, and it leaves that preview alone: it used to clear it, so a
+     * chosen effect showed nothing until a slider moved.
+     */
+    private val queuedEnds = java.util.concurrent.atomic.AtomicInteger()
 
     /** Drops the small copy effect previews run on (it shows the layer as it was). */
     private fun dropEffectBase() {

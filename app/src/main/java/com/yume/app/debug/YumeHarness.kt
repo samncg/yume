@@ -5259,6 +5259,36 @@ object YumeHarness {
                 out.append("inserts $tag focus lines: a touch aims them ${pass(aimed)}, cancel ${pass(cancelled)}, undo drops only the preview ${pass(undoDrops)}\n")
             }
 
+            // Choosing another effect cancels the current one first: the new
+            // one still shows at once, whichever frame the cancel lands in.
+            run {
+                val (s, e) = doc()
+                e.layers[0].tiles.withWriteCanvas(Rect(0, 0, n, n)) { c -> c.drawRect(100f, 100f, 700f, 700f, Paint().apply { color = 0xFF808080.toInt() }) }
+                e.markDirtyAll()
+                s.previewAdjustment(AdjustmentKind.Glitch, 0.5f)
+                frame(s)
+                // Cancel and the new preview before any frame runs.
+                s.cancelAdjustment()
+                s.previewAdjustment(AdjustmentKind.Halftone, 0.5f)
+                frame(s)
+                frame(s)
+                val a = s.pendingAdjustForTest() == AdjustmentKind.Halftone && e.preview != null
+                // The preview's frame comes before the cancel's commands.
+                s.cancelAdjustment()
+                s.previewAdjustment(AdjustmentKind.Glitch, 0.5f)
+                s.consumePendingPreview()
+                s.runCommands()
+                frame(s)
+                val b = s.pendingAdjustForTest() == AdjustmentKind.Glitch && e.preview != null
+                // A plain Cancel still clears it.
+                s.cancelAdjustment()
+                frame(s)
+                frame(s)
+                val c = s.pendingAdjustForTest() == null && e.preview == null
+                s.runCommands()
+                out.append("inserts $tag: a chosen effect shows at once after another ${pass(a && b)} ($a $b), cancel still clears ${pass(c)}\n")
+            }
+
             // One preview at a time.
             run {
                 val (s, e) = doc()

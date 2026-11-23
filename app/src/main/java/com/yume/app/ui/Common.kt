@@ -224,7 +224,9 @@ fun YumeSlider(
      */
     trackColors: List<Color>? = null,
     /** The knob's centre on a colour track: the colour at the current value. */
-    knobColor: Color? = null
+    knobColor: Color? = null,
+    /** When set, a "Reset" button shows while the value is elsewhere and puts it back. */
+    resetTo: Float? = null
 ) {
     val finished = rememberUpdatedState(onChangeFinished)
     // The gesture handler outlives recompositions: it must call the latest
@@ -240,6 +242,21 @@ fun YumeSlider(
                     color = YumeColors.textDim
                 )
                 Spacer(Modifier.weight(1f))
+                if (resetTo != null && kotlin.math.abs(value - resetTo) > (max - min) * 0.001f) {
+                    Text(
+                        text = "Reset",
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = accent,
+                        modifier = Modifier
+                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(50))
+                            .clickable {
+                                change.value(resetTo)
+                                finished.value?.invoke()
+                            }
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                }
                 Text(
                     text = valueLabel.orEmpty(),
                     style = androidx.compose.material3.MaterialTheme.typography.bodySmall,

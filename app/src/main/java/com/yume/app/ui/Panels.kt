@@ -2064,7 +2064,8 @@ internal fun AdjustContent(
                     session.previewAdjustment(kind, value)
                 },
                 label = com.yume.app.engine.EffectSettings.mainLabel(kind),
-                valueLabel = com.yume.app.engine.EffectSettings.mainValue(kind, amount, longEdge)
+                valueLabel = com.yume.app.engine.EffectSettings.mainValue(kind, amount, longEdge),
+                resetTo = 0.5f
             )
             val params = session.effectParams(kind).also { state.strokeCount }
             com.yume.app.engine.EffectSettings.of(kind).forEachIndexed { i, setting ->
@@ -2087,7 +2088,8 @@ internal fun AdjustContent(
                 } else {
                     YumeSlider(
                         value = v, onChange = { set(it) }, label = setting.label,
-                        valueLabel = setting.format(v, longEdge), min = setting.min, max = setting.max
+                        valueLabel = setting.format(v, longEdge), min = setting.min, max = setting.max,
+                        resetTo = setting.default
                     )
                 }
             }
@@ -2102,7 +2104,8 @@ internal fun AdjustContent(
                 label = kind.label,
                 valueLabel = adjustValueLabel(kind, amount),
                 min = range.first,
-                max = range.second
+                max = range.second,
+                resetTo = 0f
             )
             if (kind == AdjustmentKind.MotionBlur) {
                 YumeSlider(
