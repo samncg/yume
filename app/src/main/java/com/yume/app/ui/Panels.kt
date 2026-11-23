@@ -1442,44 +1442,65 @@ fun ColorPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
             }
 
             ColorMode.Hsl -> {
-                val hsl = remember(hue, sat, value) { rgbToHsl(current) }
+                // The sliders keep their own values: black or white has no hue
+                // or saturation to read back, so values derived from the colour
+                // snapped to 0 and the sliders seemed dead. They take the colour
+                // when the tab opens or the colour changes elsewhere.
+                val startHsl = remember(outsideChange) {
+                    rgbToHsl(current).also { if (it[1] <= 0.004f || it[2] <= 0.002f || it[2] >= 0.998f) it[0] = hue }
+                }
+                var hslH by remember(outsideChange) { mutableFloatStateOf(startHsl[0]) }
+                var hslS by remember(outsideChange) {
+                    // A grey keeps the HSV saturation it came with (often 0).
+                    mutableFloatStateOf(startHsl[1])
+                }
+                var hslL by remember(outsideChange) { mutableFloatStateOf(startHsl[2]) }
+                fun applyHsl() {
+                    hue = hslH
+                    adopt(hslToRgb(hslH, hslS, hslL), true)
+                }
                 YumeSlider(
-                    value = hsl[0],
+                    value = hslH,
                     onChange = { h ->
-                        hue = h
-                        adopt(hslToRgb(h, hsl[1], hsl[2]), true)
+                        hslH = h.coerceIn(0f, 359f)
+                        applyHsl()
                     },
                     label = "Hue",
-                    valueLabel = "${hsl[0].roundToInt()}°",
+                    valueLabel = "${hslH.roundToInt()}°",
                     min = 0f,
                     max = 359f,
                     // Every hue at full strength, so the track reads even for a grey.
                     trackColors = (0..6).map { Color(hslToRgb(it * 60f, 1f, 0.5f)) },
-                    knobColor = Color(current)
+                    knobColor = Color(hslToRgb(hslH, 1f, 0.5f))
                 )
                 YumeSlider(
-                    value = hsl[1],
-                    onChange = { s ->
-                        hue = hsl[0]
-                        adopt(hslToRgb(hsl[0], s.coerceIn(0f, 1f), hsl[2]), true)
+                    value = hslS,
+                    onChange = { v ->
+                        hslS = v.coerceIn(0f, 1f)
+                        applyHsl()
                     },
                     label = "Saturation",
-                    valueLabel = "${(hsl[1] * 100).roundToInt()}%",
-                    trackColors = listOf(Color(hslToRgb(hsl[0], 0f, hsl[2])), Color(hslToRgb(hsl[0], 1f, hsl[2]))),
+                    valueLabel = "${(hslS * 100).roundToInt()}%",
+                    // Shown at mid lightness when the colour is black or white,
+                    // where every saturation looks the same.
+                    trackColors = run {
+                        val l = if (hslL <= 0.02f || hslL >= 0.98f) 0.5f else hslL
+                        listOf(Color(hslToRgb(hslH, 0f, l)), Color(hslToRgb(hslH, 1f, l)))
+                    },
                     knobColor = Color(current)
                 )
                 YumeSlider(
-                    value = hsl[2],
-                    onChange = { l ->
-                        hue = hsl[0]
-                        adopt(hslToRgb(hsl[0], hsl[1], l.coerceIn(0f, 1f)), true)
+                    value = hslL,
+                    onChange = { v ->
+                        hslL = v.coerceIn(0f, 1f)
+                        applyHsl()
                     },
                     label = "Lightness",
-                    valueLabel = "${(hsl[2] * 100).roundToInt()}%",
+                    valueLabel = "${(hslL * 100).roundToInt()}%",
                     trackColors = listOf(
-                        Color(hslToRgb(hsl[0], hsl[1], 0f)),
-                        Color(hslToRgb(hsl[0], hsl[1], 0.5f)),
-                        Color(hslToRgb(hsl[0], hsl[1], 1f))
+                        Color(hslToRgb(hslH, hslS, 0f)),
+                        Color(hslToRgb(hslH, hslS, 0.5f)),
+                        Color(hslToRgb(hslH, hslS, 1f))
                     ),
                     knobColor = Color(current)
                 )
