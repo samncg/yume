@@ -5,7 +5,6 @@ import android.graphics.Rect
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -85,18 +83,23 @@ fun EffectsPanel(state: EditorUiState, session: DrawingSession, onClose: () -> U
     var tab by remember { mutableIntStateOf(pendingTab(state).takeIf { it >= 0 } ?: lastEffectsTab) }
     PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
         PanelHeader("Effects", onClose)
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        // All five tabs share the width, so none is cut off.
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             EFFECT_TABS.forEachIndexed { i, name ->
                 val sel = i == tab
                 Text(
                     text = name,
                     style = MaterialTheme.typography.labelMedium,
                     color = if (sel) YumeColors.accent else YumeColors.textDim,
+                    maxLines = 1,
+                    softWrap = false,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     modifier = Modifier
+                        .weight(name.length + 3f)
                         .clip(RoundedCornerShape(50))
                         .background(if (sel) YumeColors.accentSoft else YumeColors.panelAlt)
                         .clickable { tab = i; lastEffectsTab = i }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .padding(horizontal = 2.dp, vertical = 6.dp)
                 )
             }
         }
@@ -145,15 +148,19 @@ private fun EditingTitle(title: String, onBack: () -> Unit) {
     Spacer(Modifier.height(8.dp))
 }
 
+/** Apply or Cancel; either one goes back to the samples ([onDone]). */
 @Composable
-private fun ApplyRow(pending: Boolean, session: DrawingSession, onApplied: () -> Unit, extra: @Composable () -> Unit = {}) {
+private fun ApplyRow(pending: Boolean, session: DrawingSession, onDone: () -> Unit, extra: @Composable () -> Unit = {}) {
     Spacer(Modifier.height(8.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         SmallButton("Apply", enabled = pending) {
             session.applyInsert()
-            onApplied()
+            onDone()
         }
-        SmallButton("Cancel", enabled = pending) { session.cancelInsert() }
+        SmallButton("Cancel", enabled = pending) {
+            session.cancelInsert()
+            onDone()
+        }
         extra()
     }
     if (pending) {
@@ -270,7 +277,7 @@ private fun MangaTab(state: EditorUiState, session: DrawingSession) {
     } else if (!state.hasSelection) {
         Hint("Touch or drag on the canvas to aim the lines. Two fingers still pan and zoom.")
     }
-    ApplyRow(pendingKind != null, session, onApplied = { editing = false }) {
+    ApplyRow(pendingKind != null, session, onDone = { editing = false }) {
         SmallButton("New variation") { update { it.copy(seed = it.seed * 31 + 17) } }
     }
 }
@@ -324,8 +331,10 @@ private fun FramesTab(state: EditorUiState, session: DrawingSession) {
         style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim
     )
     Spacer(Modifier.height(8.dp))
-    var cols by remember { mutableFloatStateOf(layout.cols.toFloat()) }
-    var rows by remember { mutableFloatStateOf(layout.rows.toFloat()) }
+    // Follow the layout: a preset chosen a moment ago reaches the state after
+    // this tab switches to editing.
+    var cols by remember(layout.cols) { mutableFloatStateOf(layout.cols.toFloat()) }
+    var rows by remember(layout.rows) { mutableFloatStateOf(layout.rows.toFloat()) }
     YumeSlider(value = cols, onChange = { v ->
         cols = v
         update { it.regrid(v.roundToInt(), it.rows) }
@@ -349,7 +358,7 @@ private fun FramesTab(state: EditorUiState, session: DrawingSession) {
         }
         SmallButton("Clear", enabled = layout.panels.isNotEmpty()) { update { it.copy(panels = emptyList(), selected = -1) } }
     }
-    ApplyRow(pending, session, onApplied = { editing = false })
+    ApplyRow(pending, session, onDone = { editing = false })
 }
 
 // ================================================================= materials
@@ -450,7 +459,7 @@ private fun MaterialsTab(state: EditorUiState, session: DrawingSession) {
     Spacer(Modifier.height(4.dp))
     SegmentedRow(listOf("Current colour", "Black", "White"), p.ink, { i -> update { it.copy(ink = i) } })
     Hint("Zoom in to see it at full detail. Move or scale it afterwards with Transform.")
-    ApplyRow(pending, session, onApplied = { editing = false }) {
+    ApplyRow(pending, session, onDone = { editing = false }) {
         if (p.kind.seeded) SmallButton("New variation") { update { it.copy(seed = it.seed * 31 + 17) } }
     }
 }

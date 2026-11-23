@@ -628,13 +628,18 @@ class SurfaceRenderer(
         overlay.color = 0x66E9A13B
         canvas.drawPath(framePath, overlay)
         overlay.pathEffect = null
-        // Panels.
+        // Panels: the outline sits just inside the black border so the
+        // border itself (and the Border slider) stays visible.
+        val scale = session.view.scale.coerceAtLeast(1e-4f)
         for ((i, r) in f.panels.withIndex()) {
             val sel = i == f.selected
             overlay.style = Paint.Style.STROKE
             overlay.strokeWidth = (if (sel) 3f else 1.6f) * density
             overlay.color = if (sel) 0xFFE9A13B.toInt() else 0xCCE9A13B.toInt()
-            canvas.drawPath(mappedRect(r, matrix), overlay)
+            val inset = (f.border / 2f + (overlay.strokeWidth / 2f + 1.5f * density) / scale)
+                .coerceAtMost(minOf(r.width(), r.height()) / 4f)
+            val inner = android.graphics.RectF(r).apply { inset(inset, inset) }
+            canvas.drawPath(mappedRect(inner, matrix), overlay)
             val corner = floatArrayOf(r.right, r.bottom, r.right, r.top)
             matrix.mapPoints(corner)
             handlePaint.style = Paint.Style.FILL

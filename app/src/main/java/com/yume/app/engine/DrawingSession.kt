@@ -3477,7 +3477,9 @@ class DrawingSession(
         val panels: List<RectF>,
         val selected: Int,
         val ghost: RectF?,
-        val ghostValid: Boolean
+        val ghostValid: Boolean,
+        /** The panels' border width (document px), so the outline can sit inside it. */
+        val border: Float
     )
 
     fun framesOverlay(): FramesOverlay? {
@@ -3488,7 +3490,7 @@ class DrawingSession(
         for (r in 0 until l.rows) for (c in 0 until l.cols) cells.add(l.rectOf(FramePanel(c, r, 1, 1), geo))
         return FramesOverlay(
             cells, l.panels.map { l.rectOf(it, geo) }, l.selected,
-            framesGhost?.let { l.rectOf(it, geo) }, framesGhostValid
+            framesGhost?.let { l.rectOf(it, geo) }, framesGhostValid, l.border
         )
     }
 
