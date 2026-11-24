@@ -161,27 +161,102 @@ class Upscaler(private val modelFile: File) {
     fun upscale4(argb: IntArray, w: Int, h: Int, onTile: (done: Int, total: Int) -> Unit): IntArray =
         Onnx.use(modelFile) { session -> upscale4(session, argb, w, h, onTile) }
 
+    /**
+     * What the model makes of a flat tile of one colour (packed RGB), kept:
+     * a flat window anywhere gets exactly this, so skipped tiles match the
+     * tiles the model ran on around them.
+     */
+    private val flatCache = HashMap<Int, Int>()
+
+    /** Harness: false runs every tile through the model (to compare). */
+    @Volatile var skipFlat = true
+
+    private fun flatResult(session: OrtSession, rgb: Int): Int = flatCache.getOrPut(rgb and 0xFFFFFF) {
+        val tile = FloatArray(3 * TILE * TILE)
+        val plane = TILE * TILE
+        java.util.Arrays.fill(tile, 0, plane, ((rgb shr 16) and 255) / 255f)
+        java.util.Arrays.fill(tile, plane, 2 * plane, ((rgb shr 8) and 255) / 255f)
+        java.util.Arrays.fill(tile, 2 * plane, 3 * plane, (rgb and 255) / 255f)
+        val res = runTile(session, tile)
+        // The middle of the output, clear of the model's own zero border.
+        val op = OUT * OUT
+        var r = 0f; var g = 0f; var b = 0f; var n = 0
+        for (y in OUT / 4 until OUT * 3 / 4 step 4) for (x in OUT / 4 until OUT * 3 / 4 step 4) {
+            val k = y * OUT + x
+            r += res[k]; g += res[op + k]; b += res[2 * op + k]; n++
+        }
+        fun c(v: Float) = (v / n * 255f).roundToInt().coerceIn(0, 255)
+        (c(r) shl 16) or (c(g) shl 8) or c(b)
+    }
+
     private fun upscale4(session: OrtSession, argb: IntArray, w: Int, h: Int, onTile: (done: Int, total: Int) -> Unit): IntArray {
         val opaque = argb.all { (it ushr 24) == 255 }
         val color = if (opaque) argb else bleed(argb, w, h)
         val stride = TILE - 2 * OVERLAP
         val tx = max(1, (w + stride - 1) / stride)
         val ty = max(1, (h + stride - 1) / stride)
-        val total = tx * ty * (if (opaque) 1 else 2)
+        val passes = if (opaque) 1 else 2
+        // First, which tiles need the model: a window of one colour (or, for
+        // alpha, one alpha) takes the cached flat result, and a window with
+        // nothing visible needs no colour at all.
+        val flatColor = IntArray(tx * ty) { -1 }
+        val flatAlpha = IntArray(tx * ty) { -1 }
+        val invisible = BooleanArray(tx * ty)
+        var total = 0
+        for (j in 0 until ty) for (i in 0 until tx) {
+            val t = j * tx + i
+            val wx0 = i * stride - OVERLAP
+            val wy0 = j * stride - OVERLAP
+            val c0 = color[mirror(wy0, h) * w + mirror(wx0, w)] and 0xFFFFFF
+            val a0 = argb[mirror(wy0, h) * w + mirror(wx0, w)] ushr 24
+            var oneColor = true
+            var oneAlpha = true
+            var visible = false
+            for (y in 0 until TILE) {
+                val row = mirror(wy0 + y, h) * w
+                for (x in 0 until TILE) {
+                    val k = row + mirror(wx0 + x, w)
+                    if (oneColor && (color[k] and 0xFFFFFF) != c0) oneColor = false
+                    val a = argb[k] ushr 24
+                    if (a != 0) visible = true
+                    if (oneAlpha && a != a0) oneAlpha = false
+                }
+                if (!oneColor && !oneAlpha && visible) break
+            }
+            invisible[t] = !visible && skipFlat
+            if (oneColor && skipFlat) flatColor[t] = c0
+            if (oneAlpha && skipFlat) flatAlpha[t] = a0
+            if (!invisible[t] && flatColor[t] < 0) total++
+            if (passes == 2 && flatAlpha[t] < 0) total++
+        }
         var done = 0
         val ow = w * 4
         val oh = h * 4
         val out = IntArray(ow * oh)
         val tile = FloatArray(3 * TILE * TILE)
         val plane = TILE * TILE
-        for (pass in 0 until (if (opaque) 1 else 2)) {
+        for (pass in 0 until passes) {
             val alphaPass = pass == 1
             for (j in 0 until ty) for (i in 0 until tx) {
+                val t = j * tx + i
                 // The tile's core (written) and its window (read, with context).
                 val cx0 = i * stride
                 val cy0 = j * stride
                 val cx1 = min(w, cx0 + stride)
                 val cy1 = min(h, cy0 + stride)
+                if (!alphaPass && invisible[t]) continue
+                val flat = if (alphaPass) flatAlpha[t].let { if (it < 0) -1 else (it shl 16) or (it shl 8) or it } else flatColor[t]
+                if (flat >= 0) {
+                    val v = flatResult(session, flat)
+                    for (y in cy0 * 4 until cy1 * 4) for (x in cx0 * 4 until cx1 * 4) {
+                        val o = y * ow + x
+                        out[o] = if (alphaPass) {
+                            val a = (((v shr 16) and 255) + ((v shr 8) and 255) + (v and 255) + 1) / 3
+                            (out[o] and 0x00FFFFFF) or (a shl 24)
+                        } else (0xFF shl 24) or v
+                    }
+                    continue
+                }
                 // The window may reach past the picture: mirrored pixels
                 // there, so the model's own (zero-padded) border never lands
                 // on the picture's edge.
@@ -227,6 +302,7 @@ class Upscaler(private val modelFile: File) {
                 onTile(++done, total)
             }
         }
+        if (total == 0) onTile(0, 0)
         return out
     }
 

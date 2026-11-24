@@ -215,6 +215,8 @@ object YumeHarness {
                     out.append(scorePreviewDraw(false))
                 } else if (only == "ai") {
                     out.append(scoreAi(app))
+                } else if (only == "upbench") {
+                    out.append(scoreUpBench(app))
                 } else if (only == "folders") {
                     out.append(scoreFolders(app))
                 } else if (only == "guides") {
@@ -8819,6 +8821,49 @@ object YumeHarness {
                 val alphaOk = inside > 240 && outside < 15
                 out.append("ai ${model.name}: 4x ${pass(sized)}, seamless ${pass(worst <= 6)} (max ${worst}), alpha ${pass(alphaOk)} " +
                     "(${tiles} tiles in ${ms} ms, ${if (tiles > 0) ms / tiles else 0} ms/tile)\n")
+                // Skipping flat and empty tiles: the same picture as running the
+                // model everywhere, in less time. A transparent layer with a
+                // drawing in one corner and a flat-filled shape.
+                run {
+                    val lw = 700
+                    val lh = 460
+                    val art = IntArray(lw * lh) { i ->
+                        val x = i % lw
+                        val y = i / lw
+                        when {
+                            x < 260 && y < 200 -> {
+                                val v = (128 + 100 * kotlin.math.sin(x * 0.09) * kotlin.math.cos(y * 0.13)).toInt().coerceIn(0, 255)
+                                (0xFF shl 24) or (v shl 16) or ((255 - v) shl 8) or 90
+                            }
+                            (x - 480) * (x - 480) + (y - 300) * (y - 300) < 120 * 120 -> 0xFF3060C0.toInt()
+                            else -> 0
+                        }
+                    }
+                    val fast = com.yume.app.ai.Upscaler(store.file(model))
+                    var nFast = 0
+                    val tf = android.os.SystemClock.uptimeMillis()
+                    val a1 = fast.upscale4(art, lw, lh) { d, _ -> nFast = d }
+                    val msFast = android.os.SystemClock.uptimeMillis() - tf
+                    val full = com.yume.app.ai.Upscaler(store.file(model)).apply { skipFlat = false }
+                    var nFull = 0
+                    val tg = android.os.SystemClock.uptimeMillis()
+                    val a2 = full.upscale4(art, lw, lh) { d, _ -> nFull = d }
+                    val msFull = android.os.SystemClock.uptimeMillis() - tg
+                    var worstC = 0
+                    var worstA = 0
+                    for (i in a1.indices) {
+                        val p = a1[i]; val q = a2[i]
+                        worstA = maxOf(worstA, kotlin.math.abs((p ushr 24) - (q ushr 24)))
+                        if ((q ushr 24) > 128) worstC = maxOf(worstC,
+                            kotlin.math.abs(((p shr 16) and 255) - ((q shr 16) and 255)),
+                            kotlin.math.abs(((p shr 8) and 255) - ((q shr 8) and 255)),
+                            kotlin.math.abs((p and 255) - (q and 255)))
+                    }
+                    // Within the model's own grain on flat colour (the seam check allows 6).
+                    val same = worstC <= 6 && worstA <= 4
+                    out.append("ai ${model.name}: skipping flat tiles matches ${pass(same)} (colour ${worstC}, alpha ${worstA}), " +
+                        "$nFast model runs in $msFast ms vs $nFull in $msFull ms\n")
+                }
             }
 
             // 6. A whole upscaled copy: right size, no seam between bands,
@@ -9140,6 +9185,47 @@ object YumeHarness {
             Log.e(TAG, "folders", t)
         } finally {
             app.getSharedPreferences(name, android.content.Context.MODE_PRIVATE).edit().clear().commit()
+        }
+        return out.toString()
+    }
+
+    /** Upscaler throughput: threads per run x tiles run at once. */
+    private fun scoreUpBench(app: YumeApp): String {
+        val out = StringBuilder()
+        val store = com.yume.app.ai.ModelStore(app)
+        for (model in listOf(com.yume.app.ai.AiModel.UpscaleFast, com.yume.app.ai.AiModel.UpscaleDetailed)) {
+            if (!store.isReady(model)) { out.append("upbench ${model.name}: SKIP\n"); continue }
+            val t = com.yume.app.ai.Upscaler.TILE
+            val rnd = java.util.Random(1)
+            val tile = FloatArray(3 * t * t) { rnd.nextFloat() }
+            val tilesPer = if (model == com.yume.app.ai.AiModel.UpscaleFast) 24 else 6
+            for ((threads, par) in listOf(8 to 1, 4 to 2, 2 to 4, 6 to 1, 3 to 2)) {
+                val opts = ai.onnxruntime.OrtSession.SessionOptions().apply {
+                    setOptimizationLevel(ai.onnxruntime.OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                    setIntraOpNumThreads(threads)
+                }
+                val session = com.yume.app.ai.Onnx.env.createSession(store.file(model).path, opts)
+                try {
+                    val name = session.inputNames.first()
+                    fun one() {
+                        val buf = java.nio.FloatBuffer.wrap(tile)
+                        ai.onnxruntime.OnnxTensor.createTensor(com.yume.app.ai.Onnx.env, buf, longArrayOf(1, 3, t.toLong(), t.toLong())).use { x ->
+                            session.run(mapOf(name to x)).use { }
+                        }
+                    }
+                    one() // warm up
+                    val t0 = android.os.SystemClock.uptimeMillis()
+                    val pool = java.util.concurrent.Executors.newFixedThreadPool(par)
+                    val futures = (0 until tilesPer).map { pool.submit { one() } }
+                    futures.forEach { it.get() }
+                    pool.shutdown()
+                    val ms = android.os.SystemClock.uptimeMillis() - t0
+                    out.append("upbench ${model.name}: threads $threads x $par at once: ${ms / tilesPer} ms/tile\n")
+                } finally {
+                    session.close()
+                    opts.close()
+                }
+            }
         }
         return out.toString()
     }
