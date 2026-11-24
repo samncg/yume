@@ -68,17 +68,28 @@ glass, and every gesture, button and default can be changed in Settings.
   copy all layers; transform with free, distort (perspective) and warp modes;
   a paint bucket that closes gaps in line art, follows a reference layer and
   sets its threshold as you drag; a clone tool that paints with pixels
-  copied from another spot; gradient, shapes, liquify and text.
+  copied from another spot; gradient, liquify and text; and shapes that stay
+  editable (resize, rotate, move, round the corners) until you apply them.
 - Adjustments: hue, saturation, brightness, blur, noise, sharpen, motion blur,
   curves, levels, colour balance, gradient map, posterize and threshold, plus
   bloom, glow, glitch, halftone, chromatic aberration, mosaic, lens flare,
   clouds and anime background effects, and line
   art extraction (paper to transparent), with a
   live preview on one layer or all of them.
-- Guides: grids, perspective with vanishing points, rulers, mirror and radial
-  symmetry.
-- One **Effects** panel with tabs: Adjust, Effects, Manga, Frames and
-  Materials. Everything previews live on the canvas (pan and zoom freely)
+- Guides that strokes snap to: grids, isometric, perspective with vanishing
+  points, fisheye (curvilinear, 4 or 5 points), ellipses, a French curve and
+  rulers, plus mirror and radial symmetry.
+- **Pattern mode**: the canvas is one tile of a seamless pattern (tile, brick
+  or half drop). Strokes wrap across its edges and the repeats show around it.
+- **AI tools, all on the tablet** (nothing is uploaded; models download once,
+  on first use):
+  - Background removal tuned for illustrations or photos that usually works
+    first time, with settings for the edge, and marks you paint to keep or
+    remove parts. It keeps the result as a mask, erases, or makes a new layer.
+  - Upscaling 2× to 4×: fast, detailed (AI), smooth, or crisp pixel art.
+  - The reference window removes backgrounds with the same AI.
+- One **Effects** panel with tabs: Adjust, Effects, Manga, Frames, Materials
+  and AI. Everything previews live on the canvas (pan and zoom freely)
   until you apply or cancel.
 - Manga focus lines (touch to aim them) and speed lines.
 - Comic frames laid out on a grid: drag panels of any size into place, move
@@ -106,7 +117,7 @@ glass, and every gesture, button and default can be changed in Settings.
 ### Files
 <img src="docs/images/gallery.jpg" alt="The gallery" width="900">
 
-- A gallery of your artworks with pins, time spent and stroke counts.
+- A gallery of your artworks with folders, pins, time spent and stroke counts.
 - Export PNG, JPEG, WebP, PDF, Photoshop PSD (layers, groups and masks),
   OpenRaster (layers for Krita and others) or a
   **timelapse video** of the painting, with progress as it works.

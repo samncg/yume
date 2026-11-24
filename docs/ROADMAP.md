@@ -44,26 +44,27 @@ with those apps (November 2026). Unchecked items are not built yet.
       "anime background" style colour grading.
 - [x] **Materials library**: tones, patterns and textures to drop onto the
       canvas.
-- [ ] **Optional AI tools** (on device where possible): background removal,
-      upscaling, and flat-colour suggestions for line art.
+- [x] **Optional AI tools** on device: background removal and upscaling.
+- [ ] Flat-colour suggestions for line art.
 
 ## From Infinite Painter
 
-- [ ] **Pattern mode**: paint one tile and see it repeated live (square,
-      brick, hexagon, kaleidoscope), for seamless textures.
-- [ ] **More guides**: ellipse and curve guides that strokes snap to, plus
-      curvilinear (fisheye) perspective with 4 or 5 points.
-- [ ] **Editable shapes**: a shape stays adjustable (corners, roundness,
-      stroke and fill) until it is committed.
-- [ ] **Gallery folders** (Procreate calls them stacks).
+- [x] **Pattern mode**: paint one tile and see it repeated live (tile, brick
+      and half drop), for seamless textures.
+- [ ] Hexagon and kaleidoscope patterns.
+- [x] **More guides**: ellipse and curve guides that strokes snap to,
+      isometric grid, and curvilinear (fisheye) perspective with 4 or 5 points.
+- [x] **Editable shapes**: a shape stays adjustable (corners, rotation,
+      roundness) until it is applied.
+- [x] **Gallery folders** (Procreate calls them stacks).
 
 ## From desktop apps (Krita, Photoshop, Rebelle)
 
 - [ ] **Adjustment and filter layers**: non-destructive hue, curves, gradient
       map and blur that can be edited or hidden later.
 - [ ] **Layer effects**: outline, drop shadow, glow, applied live to a layer.
-- [ ] **Wrap-around mode**: the canvas repeats at its edges so strokes cross
-      over, for seamless tiles.
+- [x] **Wrap-around mode**: the canvas repeats at its edges so strokes cross
+      over, for seamless tiles (pattern mode).
 - [ ] **Pigment colour mixing**: blending and smudging mix like real paint
       (blue + yellow gives green, not grey).
 - [ ] **Navigator**: a small live view of the whole canvas while zoomed in.
