@@ -4147,7 +4147,10 @@ class DrawingSession(
         val hints = ByteArray(com.yume.app.ai.CutOut.N * com.yume.app.ai.CutOut.N)
         val strokes = ArrayList<CutOutStroke>()
         var proxy: Bitmap? = null
-        var gen = 0
+        @Volatile var gen = 0
+        /** The model run the matte comes from, and the newest refine shown. */
+        var baseGen = 0
+        var shownGen = 0
         @Volatile var run: ai.onnxruntime.OrtSession.RunOptions? = null
     }
 
@@ -4221,6 +4224,7 @@ class DrawingSession(
         st.raw = null
         cutOutPhase = CutOutPhase.Finding
         val gen = ++st.gen
+        st.baseGen = gen
         val opts = ai.onnxruntime.OrtSession.RunOptions()
         st.run = opts
         requestState()
@@ -4250,11 +4254,18 @@ class DrawingSession(
     }
 
     /** New settings: the matte is refined again (fast) and the preview follows. */
-    fun setCutOutSettings(settings: com.yume.app.ai.BgSettings) = post {
+    /**
+     * New settings show on the sliders at once; the matte follows when it is
+     * worked out (only the latest settings are, while a slider moves).
+     */
+    fun setCutOutSettings(settings: com.yume.app.ai.BgSettings) {
         val old = cutOutSettings
         cutOutSettings = settings
-        val st = cutOut ?: return@post
-        if (settings.subject != old.subject) chooseCutOutModel(st) else refineCutOut()
+        requestState()
+        post {
+            val st = cutOut ?: return@post
+            if (settings.subject != old.subject) chooseCutOutModel(st) else refineCutOut()
+        }
     }
 
     fun setCutOutBrush(mode: Int, size: Float = cutOutBrushSize) {
@@ -4278,13 +4289,18 @@ class DrawingSession(
         val gen = ++st.gen
         val scale = com.yume.app.ai.CutOut.gridScale(engine.width, engine.height)
         aiExecutor.execute {
+            // Settings moved on while this waited: only the newest is worth working out.
+            if (st.gen != gen || cutOut !== st) return@execute
             val refined = runCatching { com.yume.app.ai.Matte.refine(raw, st.grid, hints, s, scale) }.getOrNull()
             val proxy = refined?.let { r -> runCatching { com.yume.app.ai.CutOut.applied(st.small, r) }.getOrNull() }
             post {
-                if (cutOut !== st || st.gen != gen || refined == null || proxy == null) {
+                // A newer result than the one on screen is shown even while a
+                // slider still moves, so the preview keeps up with the drag.
+                if (cutOut !== st || gen < st.baseGen || gen <= st.shownGen || refined == null || proxy == null) {
                     proxy?.recycle()
                     return@post
                 }
+                st.shownGen = gen
                 st.refined = refined
                 val old = st.proxy
                 st.proxy = proxy
@@ -4326,7 +4342,16 @@ class DrawingSession(
 
     private fun applyCutOutWork(output: Int) {
         val st = cutOut ?: return
-        val m = st.refined ?: return
+        // Applied before the preview caught up with the last slider move:
+        // work the matte out from the settings as they are now.
+        val raw = st.raw
+        val m = if (raw != null && st.shownGen != st.gen && st.gen > st.baseGen) {
+            val hints = if (st.strokes.isEmpty()) null else st.hints
+            runCatching {
+                com.yume.app.ai.Matte.refine(raw, st.grid, hints, cutOutSettings, com.yume.app.ai.CutOut.gridScale(engine.width, engine.height))
+            }.getOrNull() ?: st.refined
+        } else st.refined
+        if (m == null) return
         val layer = st.layer
         if (!engine.layers.contains(layer)) {
             cancelCutOutInternal()

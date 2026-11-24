@@ -8743,6 +8743,37 @@ object YumeHarness {
                     out.append("ai tool ($label): preview ${pass(previewing)}, body kept ${pass(bodyKept)}, background gone ${pass(bgGone)}, " +
                         "remove mark ${pass(headGone)}, result ${pass(shape)}, undo ${pass(undone)}\n")
                 }
+                // Sliders: each move shows at once (before the matte is worked
+                // out), and Apply straight after a burst of moves uses the last.
+                run {
+                    val w = 900
+                    val h = 1200
+                    val e = DrawingEngine(w, h)
+                    e.backgroundColor = BG
+                    e.newLayer("L", bitmap = subject(w, h))
+                    val s = DrawingSession("ai", "A", e, History())
+                    identityView(s, w, h)
+                    s.startCutOut(com.yume.app.ai.BgSettings(subject = 1))
+                    s.runCommands()
+                    val t0 = android.os.SystemClock.uptimeMillis()
+                    while (s.cutOutMatteForTest() == null && android.os.SystemClock.uptimeMillis() - t0 < 60_000) {
+                        Thread.sleep(50)
+                        s.runCommands()
+                    }
+                    var shownAtOnce = true
+                    for (i in 0..19) {
+                        val t = 0.3f + i * 0.02f
+                        s.setCutOutSettings(com.yume.app.ai.BgSettings(subject = 1, threshold = t, invert = i == 19))
+                        s.publishIfNeeded()
+                        if (kotlin.math.abs(s.uiState.value.cutOutSettings.threshold - t) > 1e-4f) shownAtOnce = false
+                        s.runCommands()
+                    }
+                    s.applyCutOut(1); s.runCommands()
+                    val l = e.layers[0]
+                    val bgKept = (l.tiles.getPixel(20, 20) ushr 24) > 200
+                    val bodyGone = (l.tiles.getPixel(w / 2, (h * 0.66f).toInt()) ushr 24) < 60
+                    out.append("ai tool sliders: value shows at once ${pass(shownAtOnce)}, apply uses the last move ${pass(bgKept && bodyGone)}\n")
+                }
             }
 
             // 5. Upscaling: 4x, seamless on flat colour, alpha kept.
