@@ -293,6 +293,9 @@ object Customization {
     /** The toolbar's tools in order, without the hidden ones. */
     val visibleTools: List<Tool> get() = toolOrder.filter { it !in hiddenTools }
 
+    /** Buttons in the tools pill: the shown tools, plus More when some are hidden. */
+    val toolButtons: Int get() = visibleTools.size + if (hiddenTools.isNotEmpty()) 1 else 0
+
     fun moveTool(t: Tool, by: Int) {
         val list = toolOrder.toMutableList()
         val i = list.indexOf(t)

@@ -345,7 +345,14 @@ fun EditorScreen(
                                         exportOpen = true
                                         panel = null
                                     },
-                                    hasReference = reference != null
+                                    hasReference = reference != null,
+                                    onPickTool = { t ->
+                                        // Like the toolbar: a hidden tool is chosen with
+                                        // one tap, and a second tap opens its settings.
+                                        val same = state.tool == t
+                                        session.chooseTool(t)
+                                        showPanel(if (same) toolChrome(t).third else null)
+                                    }
                                 )
                             }
                         }
@@ -720,9 +727,11 @@ private fun PanelHost(
     onOpenProject: (String) -> Unit = {},
     onReference: () -> Unit = {},
     hasReference: Boolean = false,
-    onExportDialog: () -> Unit = {}
+    onExportDialog: () -> Unit = {},
+    onPickTool: (Tool) -> Unit = {}
 ) {
     when (panel) {
+        PanelId.MoreTools -> MoreToolsPanel(state, onPickTool, onClose)
         PanelId.Layers -> LayersPanel(state, session, onClose)
         PanelId.Brush -> BrushPanel(state, session, onClose)
         PanelId.Color -> ColorPanel(state, session, onClose)
@@ -818,11 +827,25 @@ private fun EditorTopBar(
     val toolsPill: @Composable (Modifier) -> Unit = { modifier ->
             // The order and the hidden tools are the user's (Settings, Layout).
             val tb = toolButton
+            // Hidden tools stay one tap away behind More, which wears the
+            // hidden tool's icon while that tool is in use.
+            val hidden = com.yume.app.data.Customization.hiddenTools
+            val more = if (hidden.isEmpty()) emptyList() else {
+                val inUse = state.tool in hidden
+                listOf(
+                    CapsuleItem(
+                        if (inUse) toolChrome(state.tool).first else Glyph.More,
+                        if (inUse) "More tools (${toolChrome(state.tool).second})" else "More tools",
+                        selected = inUse,
+                        active = activePanel == PanelId.MoreTools
+                    ) { onPanel(PanelId.MoreTools) }
+                )
+            }
             GlassToolCapsule(
                 com.yume.app.data.Customization.visibleTools.map { t ->
                     val (glyph, label, toolPanel) = toolChrome(t)
                     CapsuleItem(glyph, label, selected = state.tool == t) { onTool(t, toolPanel) }
-                },
+                } + more,
                 onAnchor = onAnchor,
                 modifier = modifier,
                 button = tb ?: 44.dp
@@ -881,7 +904,7 @@ private fun EditorTopBar(
         if (part == BarPart.Tools) {
             // Phone: the tools alone, fitted to the width, at the bottom.
             if (toolsShown) {
-                toolButton = capsuleButtonFor(barWidth, com.yume.app.data.Customization.visibleTools.size)
+                toolButton = capsuleButtonFor(barWidth, com.yume.app.data.Customization.toolButtons)
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     pill(com.yume.app.data.Customization.Pill.Tools)
                 }
@@ -897,7 +920,7 @@ private fun EditorTopBar(
             toolButton = if (maxWidth >= TOOLBAR_ONE_ROW_MIN || !toolsShown) null else {
                 val othersDp = with(density) { others.filterKeys { it != com.yume.app.data.Customization.Pill.Tools && it in shown }.values.sum().toDp() }
                 val gaps = 10.dp * (shown.size - 1).coerceAtLeast(0)
-                capsuleButtonFor(barWidth - othersDp - gaps - 16.dp, com.yume.app.data.Customization.visibleTools.size)
+                capsuleButtonFor(barWidth - othersDp - gaps - 16.dp, com.yume.app.data.Customization.toolButtons)
             }
             @Composable
             fun measured(p: com.yume.app.data.Customization.Pill) {
@@ -935,7 +958,7 @@ private fun EditorTopBar(
                     // On its own row the tools shrink to fit the width, so
                     // none is cut off at the edge (it still scrolls if even
                     // the smallest buttons cannot fit).
-                    toolButton = capsuleButtonFor(barWidth, com.yume.app.data.Customization.visibleTools.size)
+                    toolButton = capsuleButtonFor(barWidth, com.yume.app.data.Customization.toolButtons)
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                         pill(com.yume.app.data.Customization.Pill.Tools)
                     }
@@ -1121,6 +1144,33 @@ private fun TransformBar(
         }
         Spacer(Modifier.width(6.dp))
         YumeIconButton(Glyph.Check, onCommit, size = 40.dp, tint = YumeColors.accent)
+    }
+}
+
+/** The tools hidden from the toolbar (Settings, Layout), one tap away. */
+@Composable
+private fun MoreToolsPanel(state: EditorUiState, onPick: (Tool) -> Unit, onClose: () -> Unit) {
+    PanelCard(Modifier.width(260.dp)) {
+        PanelHeader("More tools", onClose)
+        val tools = com.yume.app.data.Customization.toolOrder.filter { it in com.yume.app.data.Customization.hiddenTools }
+        for (t in tools) {
+            val (glyph, label, toolPanel) = toolChrome(t)
+            val inUse = state.tool == t
+            MenuRow(
+                glyph, label,
+                trailing = when {
+                    inUse && toolPanel != null -> "Settings"
+                    inUse -> "In use"
+                    else -> null
+                }
+            ) { onPick(t) }
+        }
+        Text(
+            "Show or hide tools in Settings, Layout.",
+            style = MaterialTheme.typography.bodySmall,
+            color = YumeColors.textDim,
+            modifier = Modifier.padding(start = 8.dp, top = 4.dp)
+        )
     }
 }
 

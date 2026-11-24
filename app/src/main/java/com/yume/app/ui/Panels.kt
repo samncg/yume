@@ -130,7 +130,7 @@ import com.yume.app.engine.Tool
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-enum class PanelId { Layers, Brush, Color, Adjust, Selection, Actions, History, Fill, Gradient, Shape, Liquify, Guides, Clone }
+enum class PanelId { Layers, Brush, Color, Adjust, Selection, Actions, History, Fill, Gradient, Shape, Liquify, Guides, Clone, MoreTools }
 
 internal const val PANEL_WIDTH = 348
 
