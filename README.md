@@ -104,12 +104,15 @@ glass, and every gesture, button and default can be changed in Settings.
   Its items are yours to pick.
 - Undo and redo buttons you can hold or slide along to scrub through history,
   and a history panel to jump to (or delete) any step.
+- Size and opacity sliders on the canvas edge that show an example stroke
+  with your brush as you drag them.
 
 ### Yours to arrange
 <img src="docs/images/settings.jpg" alt="Settings: themes, layout and defaults" width="640">
 
 - Dark and light themes, accent colours and interface size.
-- Rearrange or hide the top bar's pills and the toolbar's tools.
+- Rearrange or hide the top bar's pills and the toolbar's tools; hidden tools
+  stay one tap away under More.
 - Remap every gesture, the pen's button and keyboard shortcuts.
 - Starting defaults for every tool: brushes, colour, selection shape, fill,
   gradient, shape, liquify and text options.
@@ -118,6 +121,8 @@ glass, and every gesture, button and default can be changed in Settings.
 <img src="docs/images/gallery.jpg" alt="The gallery" width="900">
 
 - A gallery of your artworks with folders, pins, time spent and stroke counts.
+  Long-press to drag artworks into any order, or drop one on another to make a
+  folder, as on a phone's home screen.
 - Export PNG, JPEG, WebP, PDF, Photoshop PSD (layers, groups and masks),
   OpenRaster (layers for Krita and others) or a
   **timelapse video** of the painting, with progress as it works.
