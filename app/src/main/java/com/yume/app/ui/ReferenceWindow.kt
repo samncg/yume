@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -57,8 +58,9 @@ private val OPACITY_STEPS = floatArrayOf(1f, 0.6f, 0.3f)
 /**
  * A floating reference picture over the canvas. Drag it anywhere to move it,
  * pinch it (or drag the corner grip) to resize it, tap the eye to fade the
- * whole window so the canvas shows through, tap the clear button to drop the
- * picture's flat background, and long-press the picture to pick a colour.
+ * whole window so the canvas shows through, tap the clear button to remove
+ * the picture's background (AI on the tablet; the plain colour key when the
+ * model is not there and is not wanted), and long-press to pick a colour.
  */
 @Composable
 fun ReferenceWindow(
@@ -72,8 +74,30 @@ fun ReferenceWindow(
     val image = remember(bitmap) { bitmap.asImageBitmap() }
     var clear by remember { mutableStateOf(false) }
     var keyed by remember(bitmap) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(bitmap, clear) {
-        if (clear && keyed == null) keyed = withContext(Dispatchers.Default) { keyOutBackground(bitmap).asImageBitmap() }
+    // The AI model this picture needs but the tablet does not have yet.
+    var needModel by remember(bitmap) { mutableStateOf<com.yume.app.ai.AiModel?>(null) }
+    // The user chose the plain colour key instead of downloading.
+    var simple by remember(bitmap) { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    val downloads by com.yume.app.ai.AiDownloads.status.collectAsState()
+    val installed = needModel?.let { downloads[it]?.installed } ?: 0
+    LaunchedEffect(bitmap, clear, simple, installed) {
+        if (!clear || keyed != null) return@LaunchedEffect
+        busy = true
+        val (img, missing) = withContext(Dispatchers.Default) {
+            if (simple) return@withContext keyOutBackground(bitmap).asImageBitmap() to null
+            val store = com.yume.app.ai.AiDownloads.storeOrNull()
+            val grid = com.yume.app.ai.CutOut.grid(bitmap)
+            val model = com.yume.app.ai.CutOut.modelFor(0, grid)
+            if (store == null || !store.isReady(model)) return@withContext null to model
+            val cut = runCatching { com.yume.app.ai.CutOut.cutOut(store, bitmap) }.getOrNull()
+            com.yume.app.ai.Onnx.closeIdle()
+            // If the model fails, the plain key still does something useful.
+            (cut ?: keyOutBackground(bitmap)).asImageBitmap() to null
+        }
+        keyed = img
+        needModel = missing
+        busy = false
     }
     val aspect = bitmap.height.toFloat() / bitmap.width.coerceAtLeast(1)
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -133,7 +157,7 @@ fun ReferenceWindow(
                     .padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Reference", style = MaterialTheme.typography.labelMedium, color = YumeColors.textDim)
+                Text(if (busy) "Cutting out…" else "Reference", style = MaterialTheme.typography.labelMedium, color = YumeColors.textDim)
                 Spacer(Modifier.weight(1f))
                 YumeIconButton(
                     Glyph.Sparkle, { clear = !clear },
@@ -166,6 +190,34 @@ fun ReferenceWindow(
                             })
                         }
                 )
+                // The AI model is not on the tablet yet: offer it, or the plain key.
+                val missing = needModel
+                if (clear && keyed == null && missing != null) {
+                    val st = downloads[missing]
+                    Column(
+                        Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(8.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xEE202024))
+                            .padding(10.dp)
+                    ) {
+                        Text(
+                            "Remove the background with AI: a one-time ${missing.megabytes} MB download, then it runs on this tablet.",
+                            style = MaterialTheme.typography.bodySmall, color = YumeColors.text
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        if (st?.running == true) {
+                            Text("Downloading… ${(st.fraction * 100).roundToInt()}%", style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim)
+                        } else {
+                            st?.error?.let { Text("Download failed: $it", style = MaterialTheme.typography.bodySmall, color = Color(0xFFE07070)) }
+                            Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
+                                SmallButton("Download") { com.yume.app.ai.AiDownloads.start(missing) }
+                                SmallButton("Simple") { simple = true }
+                            }
+                        }
+                    }
+                }
                 // Resize grip.
                 Box(
                     Modifier

@@ -51,13 +51,14 @@ import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-private val EFFECT_TABS = listOf("Adjust", "Effects", "Manga", "Frames", "Materials")
+private val EFFECT_TABS = listOf("Adjust", "Effects", "Manga", "Frames", "Materials", "AI")
 
 /** The tab last open, so the panel reopens where it was. */
 private var lastEffectsTab = 0
 
 /** Which tab a pending preview lives in (-1: none). */
 private fun pendingTab(state: EditorUiState): Int {
+    if (state.cutOutPhase != DrawingSession.CutOutPhase.None) return 5
     state.pendingAdjust?.let { k -> return if (ADJUST_GROUPS.take(3).any { k in it.second }) 0 else 1 }
     return when (state.pendingInsert) {
         InsertKind.FocusLines, InsertKind.SpeedLines -> 2
@@ -68,7 +69,7 @@ private fun pendingTab(state: EditorUiState): Int {
 }
 
 private fun pendingLabel(state: EditorUiState): String =
-    state.pendingAdjust?.label ?: state.pendingInsert?.let {
+    if (state.cutOutPhase != DrawingSession.CutOutPhase.None) "Background removal" else state.pendingAdjust?.label ?: state.pendingInsert?.let {
         if (it == InsertKind.Material) state.material.kind.label else it.label
     } ?: ""
 
@@ -79,7 +80,13 @@ private fun pendingLabel(state: EditorUiState): String =
  * reopening it goes back to it.
  */
 @Composable
-fun EffectsPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {
+fun EffectsPanel(
+    state: EditorUiState,
+    session: DrawingSession,
+    onClose: () -> Unit,
+    controller: EditorController? = null,
+    onOpenProject: (String) -> Unit = {}
+) {
     var tab by remember { mutableIntStateOf(pendingTab(state).takeIf { it >= 0 } ?: lastEffectsTab) }
     PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
         PanelHeader("Effects", onClose)
@@ -95,11 +102,11 @@ fun EffectsPanel(state: EditorUiState, session: DrawingSession, onClose: () -> U
                     softWrap = false,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     modifier = Modifier
-                        .weight(name.length + 3f)
+                        .weight(name.length + 1f)
                         .clip(RoundedCornerShape(50))
                         .background(if (sel) YumeColors.accentSoft else YumeColors.panelAlt)
                         .clickable { tab = i; lastEffectsTab = i }
-                        .padding(horizontal = 2.dp, vertical = 6.dp)
+                        .padding(horizontal = 0.dp, vertical = 6.dp)
                 )
             }
         }
@@ -114,7 +121,8 @@ fun EffectsPanel(state: EditorUiState, session: DrawingSession, onClose: () -> U
                 1 -> AdjustContent(state, session, ADJUST_GROUPS.drop(3))
                 2 -> MangaTab(state, session)
                 3 -> FramesTab(state, session)
-                else -> MaterialsTab(state, session)
+                4 -> MaterialsTab(state, session)
+                else -> AiTab(state, session, controller, onOpenProject)
             }
         }
     }
@@ -139,7 +147,7 @@ internal fun PreviewWaiting(text: String, onOpen: () -> Unit) {
 }
 
 @Composable
-private fun EditingTitle(title: String, onBack: () -> Unit) {
+internal fun EditingTitle(title: String, onBack: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         YumeIconButton(Glyph.ChevronDown, onBack, size = 32.dp, iconSize = 18.dp, label = "Back")
         Spacer(Modifier.width(6.dp))
@@ -181,7 +189,7 @@ private fun Hint(text: String) {
 
 /** A gallery button: a picture with its name under it. */
 @Composable
-private fun SampleTile(
+internal fun SampleTile(
     label: String, picture: Bitmap?, aspect: Float, modifier: Modifier, pending: Boolean,
     background: Color = Color.White, onClick: () -> Unit
 ) {

@@ -604,7 +604,33 @@ class SurfaceRenderer(
      * a resize dot, the selected one with a delete button, the panel being
      * dragged as a green or red ghost), or the focus lines' centre.
      */
+    private val markPath = android.graphics.Path()
+    private val markPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+
+    /** Background removal: the keep (green) and remove (red) marks. */
+    private fun drawCutOutMarks(canvas: Canvas, matrix: Matrix) {
+        val marks = session.cutOutMarks() ?: return
+        val scale = session.view.scale
+        for (m in marks) {
+            if (m.count == 0) continue
+            markPath.reset()
+            markPath.moveTo(m.points[0], m.points[1])
+            // A single tap still shows a dot.
+            if (m.count == 1) markPath.lineTo(m.points[0] + 0.01f, m.points[1])
+            for (i in 1 until m.count) markPath.lineTo(m.points[i * 2], m.points[i * 2 + 1])
+            markPath.transform(matrix)
+            markPaint.strokeWidth = m.radius * 2f * scale
+            markPaint.color = if (m.mode == 1) 0x6648C774 else 0x66E04848
+            canvas.drawPath(markPath, markPaint)
+        }
+    }
+
     private fun drawInsertEditor(canvas: Canvas, matrix: Matrix) {
+        drawCutOutMarks(canvas, matrix)
         session.focusCenterMarker()?.let { at ->
             val p = floatArrayOf(at[0], at[1])
             matrix.mapPoints(p)

@@ -234,6 +234,82 @@ class EditorController(
         }
     }
 
+    /** An upscale in progress (or just finished): progress 0..1, then the new canvas or an error. */
+    data class UpscaleProgress(
+        val fraction: Float,
+        val done: Boolean = false,
+        val error: String? = null,
+        val resultId: String? = null
+    )
+
+    private val _upscale = kotlinx.coroutines.flow.MutableStateFlow<UpscaleProgress?>(null)
+    val upscale: kotlinx.coroutines.flow.StateFlow<UpscaleProgress?> = _upscale
+    @Volatile private var upscaleCancelled = false
+
+    /**
+     * Saves an upscaled copy of the document as a new canvas (this one is
+     * not changed). The layers are copied first, so painting on meanwhile
+     * does not leak into the copy.
+     */
+    fun startUpscale(opts: com.yume.app.ai.UpscaleOptions) {
+        val session = _session.value ?: return
+        if (_upscale.value?.done == false) return
+        val f = opts.factor.coerceIn(2, 4)
+        upscaleCancelled = false
+        _upscale.value = UpscaleProgress(0f)
+        scope.launch {
+            var snap: com.yume.app.engine.DocumentSnapshot? = null
+            val copied = session.runOnOwner {
+                val s = session.snapshotNow()
+                fun copyOf(st: com.yume.app.engine.TileStore?, mask: Boolean): com.yume.app.engine.TileStore? {
+                    st ?: return null
+                    return if (st.isSparse) {
+                        val dst = if (mask) com.yume.app.engine.TileStoreFactory.mask(s.width, s.height, null, null)
+                        else com.yume.app.engine.TileStoreFactory.blank(s.width, s.height)
+                        com.yume.app.engine.TileOps.copyTiles(st, dst)
+                        dst
+                    } else {
+                        if (mask) com.yume.app.engine.TileStoreFactory.mask(s.width, s.height, st.copyAll(), null)
+                        else com.yume.app.engine.TileStoreFactory.create(s.width, s.height, st.copyAll(), null)
+                    }
+                }
+                snap = s.copy(layers = s.layers.map { it.copy(store = copyOf(it.store, false), maskStore = copyOf(it.maskStore, true)) })
+            }
+            val s = snap
+            if (!copied || s == null) {
+                _upscale.value = UpscaleProgress(0f, done = true, error = "The canvas was busy; try again")
+                return@launch
+            }
+            val result = runCatching {
+                val modelFile = opts.model?.let { m -> com.yume.app.ai.AiDownloads.storeOrNull()?.file(m) }
+                val job = com.yume.app.ai.UpscaleJob(s, opts, modelFile, { upscaleCancelled }) { p ->
+                    if (!upscaleCancelled) _upscale.value = UpscaleProgress(p)
+                }
+                store.createCanvasCopy(
+                    s, "${s.title} (${f}x)", s.width * f, s.height * f, true, 0, 0,
+                    bandRowsOverride = job.bandRows, fill = job::fill
+                )
+            }
+            com.yume.app.ai.Onnx.closeIdle()
+            val id = result.getOrNull()
+            _upscale.value = when {
+                upscaleCancelled -> null
+                id == null -> UpscaleProgress(0f, done = true, error = result.exceptionOrNull()?.let {
+                    if (it is OutOfMemoryError) "Not enough memory" else it.message
+                } ?: "Upscaling failed")
+                else -> UpscaleProgress(1f, done = true, resultId = id)
+            }
+        }
+    }
+
+    fun cancelUpscale() {
+        upscaleCancelled = true
+    }
+
+    fun clearUpscale() {
+        if (_upscale.value?.done != false) _upscale.value = null
+    }
+
     /**
      * Periodic / idle autosave. Sparse documents append only the changed tiles
      * to the crash-recovery journal (Stage 3c); dense documents, or a journal

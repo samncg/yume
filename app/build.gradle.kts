@@ -23,6 +23,8 @@ android {
         }.getOrDefault("unknown")
         buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
         buildConfigField("long", "BUILD_TIME", "${System.currentTimeMillis()}L")
+        // ONNX Runtime ships native code: tablets (arm64) and the x86_64 emulator.
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
     // Release signing comes from keystore.properties (never committed):
@@ -99,6 +101,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     // Liquid glass surfaces (Kyant0/AndroidLiquidGlass, Apache-2.0).
     implementation("io.github.kyant0:backdrop:1.0.6")
+    // On-device AI tools (background removal, upscaling): ONNX Runtime, MIT.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

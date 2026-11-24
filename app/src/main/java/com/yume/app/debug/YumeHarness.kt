@@ -213,6 +213,8 @@ object YumeHarness {
                 } else if (only == "previewdraw") {
                     out.append(scorePreviewDraw(true))
                     out.append(scorePreviewDraw(false))
+                } else if (only == "ai") {
+                    out.append(scoreAi(app))
                 } else if (only == "savecrash") {
                     out.append(scoreSaveCrash(app))
                 } else if (only == "inserts") {
@@ -8579,6 +8581,295 @@ object YumeHarness {
      * drops files nothing refers to. Reordering layers still on disk keeps
      * each layer's pixels (files are never overwritten under a live layer).
      */
+    /**
+     * On-device AI: both background models find a drawn subject; the matte
+     * refinement honours remove / keep marks and drops specks; the editor
+     * tool applies as a mask, an erase or a new layer and undoes; layer
+     * mask add / remove undo; upscaling is 4x, seamless and keeps alpha.
+     * Needs the models installed (copied in by adb, or downloaded in the app).
+     */
+    private fun scoreAi(app: YumeApp): String {
+        val out = StringBuilder()
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        val store = com.yume.app.ai.AiDownloads.storeOrNull() ?: return "ai: FAIL (no model store)\n"
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        try {
+            // A drawn subject: a flat-shaded figure on a light paper background.
+            fun subject(w: Int, h: Int): Bitmap {
+                val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                val c = Canvas(b)
+                c.drawColor(0xFFF4EFE6.toInt())
+                val ink = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF202020.toInt(); style = Paint.Style.STROKE; strokeWidth = w / 120f }
+                val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFE07A5F.toInt() }
+                val skin = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFF2CDAE.toInt() }
+                val cx = w / 2f
+                // Body, head, arms.
+                c.drawRoundRect(cx - w * 0.16f, h * 0.42f, cx + w * 0.16f, h * 0.9f, w * 0.05f, w * 0.05f, fill)
+                c.drawRoundRect(cx - w * 0.16f, h * 0.42f, cx + w * 0.16f, h * 0.9f, w * 0.05f, w * 0.05f, ink)
+                c.drawCircle(cx, h * 0.28f, h * 0.14f, skin)
+                c.drawCircle(cx, h * 0.28f, h * 0.14f, ink)
+                c.drawRect(cx - w * 0.28f, h * 0.45f, cx - w * 0.17f, h * 0.52f, fill)
+                c.drawRect(cx + w * 0.17f, h * 0.45f, cx + w * 0.28f, h * 0.52f, fill)
+                return b
+            }
+            // 1. Both models find the subject (centre kept, corners dropped).
+            for (model in listOf(com.yume.app.ai.AiModel.SegmentIllustration, com.yume.app.ai.AiModel.SegmentPhoto)) {
+                if (!store.isReady(model)) {
+                    out.append("ai ${model.name}: SKIP (not installed)\n")
+                    continue
+                }
+                val pic = subject(900, 1200)
+                val grid = com.yume.app.ai.CutOut.grid(pic)
+                val t0 = android.os.SystemClock.uptimeMillis()
+                val raw = com.yume.app.ai.Segmenter(store.file(model)).matte(grid)
+                val ms = android.os.SystemClock.uptimeMillis() - t0
+                val n = com.yume.app.ai.CutOut.N
+                fun at(fx: Float, fy: Float) = raw[(fy * n).toInt() * n + (fx * n).toInt()]
+                val body = at(0.5f, 0.66f)
+                val head = at(0.5f, 0.28f)
+                val corner = maxOf(at(0.05f, 0.05f), at(0.95f, 0.95f), at(0.05f, 0.95f), at(0.95f, 0.05f))
+                val ok = body > 0.8f && head > 0.8f && corner < 0.1f
+                out.append("ai ${model.name}: subject found ${pass(ok)} (body ${"%.2f".format(body)} head ${"%.2f".format(head)} corners ${"%.2f".format(corner)}, ${ms} ms)\n")
+                pic.recycle()
+            }
+            out.append("ai: drawn picture detected as drawn ${pass(com.yume.app.ai.Matte.looksDrawn(com.yume.app.ai.CutOut.grid(subject(600, 600)), com.yume.app.ai.CutOut.N))}\n")
+
+            // 2. Refinement rules on a made-up matte: two blobs and a speck.
+            run {
+                val n = com.yume.app.ai.CutOut.N
+                val raw = FloatArray(n * n)
+                val rgb = IntArray(n * n) { 0xFFFFFFFF.toInt() }
+                fun blob(x0: Int, y0: Int, x1: Int, y1: Int, v: Float, col: Int) {
+                    for (y in y0 until y1) for (x in x0 until x1) { raw[y * n + x] = v; rgb[y * n + x] = col }
+                }
+                blob(100, 100, 400, 400, 1f, 0xFF3060C0.toInt())
+                blob(600, 600, 900, 900, 1f, 0xFF3060C0.toInt())
+                blob(50, 900, 54, 904, 1f, 0xFF3060C0.toInt())
+                // Background patch the model missed, in one flat colour.
+                for (y in 600 until 700) for (x in 100 until 300) rgb[y * n + x] = 0xFFC03030.toInt()
+                val hints = ByteArray(n * n)
+                for (y in 740 until 760) for (x in 740 until 760) hints[y * n + x] = 2
+                for (y in 640 until 650) for (x in 150 until 160) hints[y * n + x] = 1
+                val m = com.yume.app.ai.Matte.refine(raw, rgb, hints, com.yume.app.ai.BgSettings(), 1f)
+                val kept = m[250 * n + 250] > 0.99f
+                val removed = m[750 * n + 750] < 0.01f && m[610 * n + 610] < 0.01f
+                val speck = m[902 * n + 52] < 0.01f
+                val grown = m[620 * n + 120] > 0.99f && m[690 * n + 290] > 0.99f && m[720 * n + 120] < 0.01f
+                val inv = com.yume.app.ai.Matte.refine(raw, rgb, null, com.yume.app.ai.BgSettings(invert = true), 1f)
+                val inverted = inv[250 * n + 250] < 0.01f && inv[10 * n + 10] > 0.99f
+                out.append("ai refine: kept ${pass(kept)}, remove mark drops its piece ${pass(removed)}, specks ${pass(speck)}, " +
+                    "keep mark takes its colour ${pass(grown)}, invert ${pass(inverted)}\n")
+            }
+
+            // 3. Layer mask add / remove undo (structural snapshots carry the mask).
+            run {
+                val e = DrawingEngine(400, 300)
+                e.backgroundColor = BG
+                e.newLayer("L", bitmap = subject(400, 300))
+                val s = DrawingSession("ai", "A", e, History())
+                s.addLayerMask(); s.runCommands()
+                val added = e.layers[0].hasMask
+                s.undo(); s.runCommands()
+                val undone = !e.layers[0].hasMask
+                s.redo(); s.runCommands()
+                val redone = e.layers[0].hasMask
+                s.removeLayerMask(); s.runCommands()
+                val removed = !e.layers[0].hasMask
+                s.undo(); s.runCommands()
+                val back = e.layers[0].hasMask
+                out.append("ai mask undo: add ${pass(added)}, undo add ${pass(undone)}, redo ${pass(redone)}, remove ${pass(removed)}, undo remove ${pass(back)}\n")
+            }
+
+            // 4. The editor tool: preview, apply three ways, undo.
+            if (store.isReady(com.yume.app.ai.AiModel.SegmentIllustration)) {
+                for (output in 0..2) {
+                    val w = 900
+                    val h = 1200
+                    val e = DrawingEngine(w, h)
+                    e.backgroundColor = BG
+                    e.newLayer("L", bitmap = subject(w, h))
+                    val s = DrawingSession("ai", "A", e, History())
+                    identityView(s, w, h)
+                    fun pixels(l: Layer): String {
+                        val b = l.tiles.copyAll()
+                        return hashBitmap(b).also { b.recycle() }
+                    }
+                    val before = pixels(e.layers[0])
+                    s.startCutOut(com.yume.app.ai.BgSettings(subject = 1))
+                    s.runCommands()
+                    val t0 = android.os.SystemClock.uptimeMillis()
+                    while (s.cutOutMatteForTest() == null && android.os.SystemClock.uptimeMillis() - t0 < 60_000) {
+                        Thread.sleep(50)
+                        s.runCommands()
+                    }
+                    val previewing = e.preview?.proxy != null && e.layers.size == 1 && pixels(e.layers[0]) == before
+                    // A remove mark over the head drops it.
+                    s.setCutOutBrush(2, 40f)
+                    s.pushInput(InputEvent.Down(0, w / 2f, h * 0.28f, 1f, 0f, false, false))
+                    s.pushInput(InputEvent.Move(0, floatArrayOf(w / 2f + 5f), floatArrayOf(h * 0.28f), floatArrayOf(1f), 0f))
+                    s.pushInput(InputEvent.Up(0))
+                    s.runInput(); s.runCommands()
+                    val t1 = android.os.SystemClock.uptimeMillis()
+                    var m = s.cutOutMatteForTest()
+                    while (android.os.SystemClock.uptimeMillis() - t1 < 10_000) {
+                        Thread.sleep(30); s.runCommands()
+                        m = s.cutOutMatteForTest()
+                        val n = com.yume.app.ai.CutOut.N
+                        if (m != null && m[(0.28f * n).toInt() * n + n / 2] < 0.5f) break
+                    }
+                    s.applyCutOut(output); s.runCommands()
+                    val target = e.layers.firstOrNull { it.visible } ?: e.layers[0]
+                    fun alphaAt(l: Layer, x: Int, y: Int): Int {
+                        val p = l.tiles.getPixel(x, y) ushr 24
+                        val mk = l.maskTiles?.getPixel(x, y)?.ushr(24) ?: 255
+                        return p * mk / 255
+                    }
+                    val bodyKept = alphaAt(target, w / 2, (h * 0.66f).toInt()) > 200
+                    val bgGone = alphaAt(target, 20, 20) < 30
+                    val headGone = alphaAt(target, w / 2, (h * 0.28f).toInt()) < 60
+                    val shape = when (output) {
+                        0 -> e.layers.size == 1 && e.layers[0].hasMask && pixels(e.layers[0]) == before
+                        1 -> e.layers.size == 1 && !e.layers[0].hasMask
+                        else -> e.layers.size == 2 && !e.layers[0].visible && pixels(e.layers[0]) == before
+                    }
+                    s.undo(); s.runCommands()
+                    val undone = e.layers.size == 1 && e.layers[0].visible && !e.layers[0].hasMask && pixels(e.layers[0]) == before
+                    val label = listOf("mask", "erase", "new layer")[output]
+                    out.append("ai tool ($label): preview ${pass(previewing)}, body kept ${pass(bodyKept)}, background gone ${pass(bgGone)}, " +
+                        "remove mark ${pass(headGone)}, result ${pass(shape)}, undo ${pass(undone)}\n")
+                }
+            }
+
+            // 5. Upscaling: 4x, seamless on flat colour, alpha kept.
+            for (model in listOf(com.yume.app.ai.AiModel.UpscaleFast, com.yume.app.ai.AiModel.UpscaleDetailed)) {
+                if (!store.isReady(model)) {
+                    out.append("ai ${model.name}: SKIP (not installed)\n")
+                    continue
+                }
+                val up = com.yume.app.ai.Upscaler(store.file(model))
+                val w = 230
+                val h = 170
+                val flat = IntArray(w * h) { 0xFF4A7AB0.toInt() }
+                val t0 = android.os.SystemClock.uptimeMillis()
+                var tiles = 0
+                val o = up.upscale4(flat, w, h) { d, _ -> tiles = d }
+                val ms = android.os.SystemClock.uptimeMillis() - t0
+                // Seams: a flat colour must come out flat (the detailed GAN may
+                // shift the colour a little overall; tile edges must not show).
+                var sr = 0L; var sg = 0L; var sb = 0L
+                for (p in o) { sr += (p shr 16) and 255; sg += (p shr 8) and 255; sb += p and 255 }
+                val mr = (sr / o.size).toInt(); val mg = (sg / o.size).toInt(); val mb = (sb / o.size).toInt()
+                var worst = 0
+                var worstInner = 0
+                val ow = w * 4
+                for ((i, p) in o.withIndex()) {
+                    val d = maxOf(kotlin.math.abs(((p shr 16) and 255) - mr), kotlin.math.abs(((p shr 8) and 255) - mg), kotlin.math.abs((p and 255) - mb))
+                    worst = maxOf(worst, d)
+                    val x = i % ow
+                    val y = i / ow
+                    if (x >= 32 && y >= 32 && x < ow - 32 && y < h * 4 - 32) worstInner = maxOf(worstInner, d)
+                }
+                out.append("ai ${model.name}: flat colour deviation max $worst, inside $worstInner\n")
+                val sized = o.size == w * 4 * h * 4
+                // A transparent picture with an opaque disc keeps its alpha.
+                val disc = IntArray(w * h) { i ->
+                    val x = i % w - w / 2
+                    val y = i / w - h / 2
+                    if (x * x + y * y < 60 * 60) 0xFFD04040.toInt() else 0
+                }
+                val od = up.upscale4(disc, w, h) { _, _ -> }
+                val inside = od[(h * 2) * (w * 4) + w * 2] ushr 24
+                val outside = od[10 * (w * 4) + 10] ushr 24
+                val alphaOk = inside > 240 && outside < 15
+                out.append("ai ${model.name}: 4x ${pass(sized)}, seamless ${pass(worst <= 6)} (max ${worst}), alpha ${pass(alphaOk)} " +
+                    "(${tiles} tiles in ${ms} ms, ${if (tiles > 0) ms / tiles else 0} ms/tile)\n")
+            }
+
+            // 6. A whole upscaled copy: right size, no seam between bands,
+            // transparency and the mask come through, the source untouched.
+            for ((method, factor) in listOf(0 to 2, 0 to 3, 2 to 2, 3 to 4)) {
+                val opts = com.yume.app.ai.UpscaleOptions(factor = factor, method = method)
+                val model = opts.model
+                if (model != null && !store.isReady(model)) {
+                    out.append("ai upscale copy (method $method): SKIP\n")
+                    continue
+                }
+                val w = 300
+                val h = 230
+                val e = DrawingEngine(w, h)
+                e.backgroundColor = BG
+                // An opaque gradient (bands must join without a step) and a
+                // transparent layer with a disc, plus a mask on it.
+                val grad = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                Canvas(grad).drawPaint(Paint().apply {
+                    shader = android.graphics.LinearGradient(0f, 0f, 0f, h.toFloat(), 0xFF203060.toInt(), 0xFFE0C080.toInt(), android.graphics.Shader.TileMode.CLAMP)
+                })
+                e.newLayer("Grad", bitmap = grad)
+                val discBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                Canvas(discBmp).drawCircle(150f, 115f, 70f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFD04040.toInt() })
+                val disc = e.newLayer("Disc", bitmap = discBmp)
+                e.addMask(disc)
+                disc.editMask = false
+                disc.maskTiles!!.fillRect(Rect(0, 0, 150, h), 0)
+                val s0 = DrawingSession("up", "U", e, History())
+                val before = e.layers.map { hashLayer(it) }
+                val snap = s0.snapshotNow()
+                val job = com.yume.app.ai.UpscaleJob(snap, opts, model?.let { store.file(it) }, { false }) { }
+                val ps = app.projectStore
+                val id = ps.createCanvasCopy(snap, "harness-upscale", w * factor, h * factor, true, 0, 0, job.bandRows, job::fill)
+                var ok = false
+                var note = "no copy"
+                if (id != null) {
+                    try {
+                        val loaded = ps.loadProject(id)
+                        if (loaded != null) {
+                            val ew = loaded.width
+                            val eh = loaded.height
+                            fun decode(f: java.io.File?): Bitmap? = f?.let {
+                                if (com.yume.app.engine.TileFile.isTileFile(it)) com.yume.app.engine.TileFile.decodeFull(it)
+                                else BitmapFactory.decodeFile(it.absolutePath)
+                            }
+                            val g = decode(loaded.layers[0].file)
+                            val d = decode(loaded.layers[1].file)
+                            val mk = decode(loaded.layers[1].maskFile)
+                            // Seam: the gradient changes smoothly down every column.
+                            var jump = 0
+                            if (g != null) {
+                                val col = IntArray(eh)
+                                g.getPixels(col, 0, 1, ew / 2, 0, 1, eh)
+                                for (y in 1 until eh) {
+                                    val a = col[y - 1]
+                                    val b = col[y]
+                                    jump = maxOf(jump, kotlin.math.abs(((a shr 16) and 255) - ((b shr 16) and 255)), kotlin.math.abs((a and 255) - (b and 255)))
+                                }
+                            }
+                            val discIn = d?.getPixel(150 * factor, 115 * factor)?.ushr(24) ?: -1
+                            val discOut = d?.getPixel(5 * factor, 5 * factor)?.ushr(24) ?: -1
+                            val maskLeft = mk?.getPixel(40 * factor, 115 * factor)?.ushr(24) ?: -1
+                            val maskRight = mk?.getPixel(260 * factor, 115 * factor)?.ushr(24) ?: -1
+                            val untouched = e.layers.map { hashLayer(it) } == before
+                            ok = ew == w * factor && eh == h * factor && jump <= 8 && discIn > 240 && discOut < 15 &&
+                                maskLeft < 15 && maskRight > 240 && untouched
+                            note = "${ew}x${eh}, max row step $jump, disc $discIn/$discOut, mask $maskLeft/$maskRight, source untouched $untouched"
+                            g?.recycle(); d?.recycle(); mk?.recycle()
+                        }
+                    } finally {
+                        ps.deleteProject(id)
+                    }
+                }
+                out.append("ai upscale copy (${listOf("AI fast", "AI detail", "smooth", "pixel")[method]} ${factor}x): ${pass(ok)} ($note)\n")
+            }
+        } catch (t: Throwable) {
+            out.append("ai: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e(TAG, "ai", t)
+        } finally {
+            com.yume.app.ai.Onnx.closeIdle()
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
     private fun scoreSaveCrash(app: YumeApp): String {
         val store = app.projectStore
         val out = StringBuilder()

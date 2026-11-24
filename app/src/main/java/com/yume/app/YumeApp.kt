@@ -26,6 +26,7 @@ class YumeApp : Application() {
         com.yume.app.engine.TileCache.removeStale(cacheDir)
         MemoryBudget.diskRoot = cacheDir
         projectStore = ProjectStore(this)
+        com.yume.app.ai.AiDownloads.init(com.yume.app.ai.ModelStore(this))
         presetStore = PresetStore(this)
         com.yume.app.data.AppSettings.init(this)
         com.yume.app.data.Customization.init(this)

@@ -119,7 +119,16 @@ data class EditorUiState(
      * Debug: whether documents opened from now on use sparse tile layers.
      * Only surfaced in debuggable builds (Actions panel).
      */
-    val sparseLayers: Boolean = false
+    val sparseLayers: Boolean = false,
+    /** AI background removal: where the tool is (None when closed). */
+    val cutOutPhase: DrawingSession.CutOutPhase = DrawingSession.CutOutPhase.None,
+    val cutOutModel: com.yume.app.ai.AiModel? = null,
+    val cutOutError: String? = null,
+    val cutOutNote: String? = null,
+    val cutOutSettings: com.yume.app.ai.BgSettings = com.yume.app.ai.BgSettings(),
+    val cutOutBrush: Int = 0,
+    val cutOutBrushSize: Float = 28f,
+    val cutOutMarks: Int = 0
 ) {
     /** The selected row: a layer or a group. */
     val activeNode: LayerUi? get() = layers.firstOrNull { it.id == activeLayerId }

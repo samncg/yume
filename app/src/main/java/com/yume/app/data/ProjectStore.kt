@@ -267,7 +267,15 @@ class ProjectStore(private val context: Context) {
         newH: Int,
         scale: Boolean,
         offsetX: Int,
-        offsetY: Int
+        offsetY: Int,
+        /** Rows per band when [fill] makes the bands (upscaling: one model tile row). */
+        bandRowsOverride: Int? = null,
+        /**
+         * Makes each band instead of plain scaling (AI upscaling): the
+         * layer's (or mask's) store, whether it is a mask, the band's first
+         * row and row count; writes unpremultiplied ARGB into the pixels.
+         */
+        fill: ((st: TileStore, mask: Boolean, y0: Int, rows: Int, px: IntArray) -> Unit)? = null
     ): String? {
         val id = UUID.randomUUID().toString()
         val dir = projectDir(id).apply { mkdirs() }
@@ -282,7 +290,7 @@ class ProjectStore(private val context: Context) {
             // Scaled bands read a source band (plus a 1 px halo) per few rows.
             val sy = srcH.toFloat() / newH
             val sx = srcW.toFloat() / newW
-            val bandRows = if (scale) maxOf(1, (256 / maxOf(1f, sy)).toInt()) else 256
+            val bandRows = bandRowsOverride ?: if (scale) maxOf(1, (256 / maxOf(1f, sy)).toInt()) else 256
             val band = Bitmap.createBitmap(newW, minOf(bandRows, newH), Bitmap.Config.ARGB_8888)
             val canvas = android.graphics.Canvas(band)
             val filter = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG).apply {
@@ -292,6 +300,10 @@ class ProjectStore(private val context: Context) {
             try {
                 java.io.BufferedOutputStream(FileOutputStream(file), 1 shl 16).use { out ->
                     com.yume.app.engine.BandedPng.encode(out, newW, newH, bandRows) { y0, rows, px ->
+                        if (fill != null) {
+                            fill(st, mask, y0, rows, px)
+                            return@encode
+                        }
                         band.eraseColor(def)
                         if (!scale) {
                             val src = Rect(offsetX, offsetY + y0, offsetX + newW, offsetY + y0 + rows)

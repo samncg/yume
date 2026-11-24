@@ -225,6 +225,19 @@ class DrawingSession(
     @Volatile private var insertRequested: InsertKind? = null
     @Volatile private var insertDirty = false
 
+    // Background removal state, read by buildState (so declared before _uiState).
+    private var cutOut: CutOutState? = null
+    @Volatile private var cutOutPhase = CutOutPhase.None
+    @Volatile private var cutOutModel: com.yume.app.ai.AiModel? = null
+    @Volatile private var cutOutError: String? = null
+    @Volatile private var cutOutNote: String? = null
+    @Volatile private var cutOutSettings = com.yume.app.ai.BgSettings()
+    /** 0 off (fingers pan), 1 paint keep marks, 2 paint remove marks. */
+    @Volatile var cutOutBrush = 0
+        private set
+    /** Mark brush radius in screen px. */
+    @Volatile var cutOutBrushSize = 28f
+        private set
     private val _uiState = MutableStateFlow(EditorUiState(loaded = true, title = title))
     val uiState: StateFlow<EditorUiState> = _uiState.asStateFlow()
 
@@ -1041,6 +1054,8 @@ class DrawingSession(
                     // A previewed insert takes one-finger touches (frames are
                     // laid out, focus lines aimed); two fingers still pan.
                     inserting -> insertDown(event.x, event.y, doc[0], doc[1])
+                    // Background removal: marks to keep or remove.
+                    cuttingOut -> cutOutDown(doc[0], doc[1])
                     tryHandleDrag(doc[0], doc[1]) -> Unit
                     tryGuideDrag(doc[0], doc[1]) -> Unit
                     tool == Tool.Selection -> beginSelectionOrMove(doc[0], doc[1])
@@ -1071,6 +1086,10 @@ class DrawingSession(
                     when {
                         centerDragging -> {
                             moveCenter(doc[0], doc[1])
+                            changed = true
+                        }
+                        cutOutStroke != null -> {
+                            cutOutMove(doc[0], doc[1])
                             changed = true
                         }
                         framesDrag != 0 -> {
@@ -1195,6 +1214,7 @@ class DrawingSession(
                 when {
                     centerDragging -> centerDragging = false
                     framesDrag != 0 -> framesUp()
+                    cutOutStroke != null -> cutOutUp()
                     draggingHandle != NO_HANDLE -> {
                         draggingHandle = NO_HANDLE
                         touchProperties()
@@ -1323,6 +1343,7 @@ class DrawingSession(
             InputEvent.CancelStroke -> {
                 // A touch that became a pan: an insert edit it began is dropped.
                 centerDragging = false
+                cutOutCancelStroke()
                 framesDrag = 0
                 framesGhost = null
                 if (painter.isActive) {
@@ -3163,6 +3184,7 @@ class DrawingSession(
         // One preview at a time: a pending adjustment goes, as when another
         // adjustment is chosen.
         if (adjusting) cancelAdjustmentInternal()
+        if (cuttingOut) cancelCutOutInternal()
         val art = buildInsertArt(kind) ?: run {
             // Nothing to show (frames that do not fit): nothing is pending
             // either, unless an earlier preview is still up.
@@ -3804,6 +3826,363 @@ class DrawingSession(
         }
     }
 
+    // ------------------------------------------------- AI background removal
+
+    /** The background-removal tool (render thread). */
+    private class CutOutState(
+        val layer: Layer,
+        /** The layer at most 2048 px, for the preview. */
+        val small: Bitmap,
+        /** The picture on the model's grid. */
+        val grid: IntArray
+    ) {
+        var model: com.yume.app.ai.AiModel? = null
+        var raw: FloatArray? = null
+        var refined: FloatArray? = null
+        val hints = ByteArray(com.yume.app.ai.CutOut.N * com.yume.app.ai.CutOut.N)
+        val strokes = ArrayList<CutOutStroke>()
+        var proxy: Bitmap? = null
+        var gen = 0
+        @Volatile var run: ai.onnxruntime.OrtSession.RunOptions? = null
+    }
+
+    /** A keep (1) or remove (2) mark, in document px. */
+    class CutOutStroke(val mode: Int, val radius: Float) {
+        var points = FloatArray(32)
+        var count = 0
+        fun add(x: Float, y: Float) {
+            if (count * 2 + 2 > points.size) points = points.copyOf(points.size * 2)
+            points[count * 2] = x
+            points[count * 2 + 1] = y
+            count++
+        }
+    }
+
+    enum class CutOutPhase { None, NeedsModel, Finding, Ready, Failed }
+
+    private var cutOutStroke: CutOutStroke? = null
+    private val aiExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "yume-ai").apply { isDaemon = true }
+    }
+
+    private val cuttingOut: Boolean get() = cutOut != null
+
+    /** Starts background removal on the active layer (or re-checks the model after a download). */
+    fun startCutOut(settings: com.yume.app.ai.BgSettings) = post {
+        cutOutSettings = settings
+        val st = cutOut
+        if (st != null) {
+            // After a download, or the subject changed: run the right model.
+            chooseCutOutModel(st)
+            return@post
+        }
+        if (inserting) cancelInsertInternal()
+        if (adjusting) cancelAdjustmentInternal()
+        val layer = engine.activeLayer ?: return@post
+        if (!editable(layer)) {
+            onMessage?.invoke("This layer is locked or hidden.")
+            return@post
+        }
+        if (layer.editMask && layer.hasMask) {
+            onMessage?.invoke("Background removal works on the layer’s pixels: switch off mask editing first.")
+            return@post
+        }
+        if (editBounds(layer.tiles).isEmpty) {
+            onMessage?.invoke("This layer is empty.")
+            return@post
+        }
+        val small = working { layerSmallCopy(layer) }
+        val next = CutOutState(layer, small, com.yume.app.ai.CutOut.grid(small))
+        cutOut = next
+        cutOutError = null
+        chooseCutOutModel(next)
+    }
+
+    private fun chooseCutOutModel(st: CutOutState) {
+        val model = com.yume.app.ai.CutOut.modelFor(cutOutSettings.subject, st.grid)
+        cutOutModel = model
+        val store = com.yume.app.ai.AiDownloads.storeOrNull()
+        if (store == null || !store.isReady(model)) {
+            cutOutPhase = CutOutPhase.NeedsModel
+            requestState()
+            return
+        }
+        if (st.model == model && st.raw != null) {
+            cutOutPhase = CutOutPhase.Ready
+            refineCutOut()
+            return
+        }
+        st.model = model
+        st.raw = null
+        cutOutPhase = CutOutPhase.Finding
+        val gen = ++st.gen
+        val opts = ai.onnxruntime.OrtSession.RunOptions()
+        st.run = opts
+        requestState()
+        val file = store.file(model)
+        aiExecutor.execute {
+            val seg = com.yume.app.ai.Segmenter(file)
+            val result = runCatching { seg.matte(st.grid, opts) }
+            val noSubject = result.isSuccess && seg.lastPeak < com.yume.app.ai.Segmenter.NO_SUBJECT
+            runCatching { opts.close() }
+            post {
+                if (cutOut !== st || st.gen != gen) return@post
+                st.run = null
+                result.onSuccess { raw ->
+                    // No clear subject: keep everything and let marks decide.
+                    st.raw = if (noSubject) FloatArray(raw.size) { 1f } else raw
+                    cutOutNote = if (noSubject) "No clear subject found. Mark what to remove (or keep) and the matching area follows." else null
+                    cutOutPhase = CutOutPhase.Ready
+                    refineCutOut()
+                }.onFailure { t ->
+                    android.util.Log.w("Yume", "background removal failed", t)
+                    cutOutError = if (t is OutOfMemoryError) "Not enough memory for the model" else (t.message ?: "The model could not run")
+                    cutOutPhase = CutOutPhase.Failed
+                    requestState()
+                }
+            }
+        }
+    }
+
+    /** New settings: the matte is refined again (fast) and the preview follows. */
+    fun setCutOutSettings(settings: com.yume.app.ai.BgSettings) = post {
+        val old = cutOutSettings
+        cutOutSettings = settings
+        val st = cutOut ?: return@post
+        if (settings.subject != old.subject) chooseCutOutModel(st) else refineCutOut()
+    }
+
+    fun setCutOutBrush(mode: Int, size: Float = cutOutBrushSize) {
+        cutOutBrush = mode.coerceIn(0, 2)
+        cutOutBrushSize = size.coerceIn(4f, 200f)
+        requestState()
+    }
+
+    fun clearCutOutMarks() = post {
+        val st = cutOut ?: return@post
+        st.strokes.clear()
+        st.hints.fill(0)
+        refineCutOut()
+    }
+
+    private fun refineCutOut() {
+        val st = cutOut ?: return
+        val raw = st.raw ?: run { requestState(); return }
+        val s = cutOutSettings
+        val hints = if (st.strokes.isEmpty()) null else st.hints.copyOf()
+        val gen = ++st.gen
+        val scale = com.yume.app.ai.CutOut.gridScale(engine.width, engine.height)
+        aiExecutor.execute {
+            val refined = runCatching { com.yume.app.ai.Matte.refine(raw, st.grid, hints, s, scale) }.getOrNull()
+            val proxy = refined?.let { r -> runCatching { com.yume.app.ai.CutOut.applied(st.small, r) }.getOrNull() }
+            post {
+                if (cutOut !== st || st.gen != gen || refined == null || proxy == null) {
+                    proxy?.recycle()
+                    return@post
+                }
+                st.refined = refined
+                val old = st.proxy
+                st.proxy = proxy
+                engine.applyPreview(LayerPreview(st.layer.id, null, proxy))
+                old?.recycle()
+                requestState()
+            }
+        }
+    }
+
+    /** Ends the tool without changing the layer. */
+    fun cancelCutOut() = post { cancelCutOutInternal() }
+
+    private fun cancelCutOutInternal() {
+        val st = cutOut ?: return
+        cutOut = null
+        st.gen++
+        runCatching { st.run?.setTerminate(true) }
+        if (engine.preview?.proxy === st.proxy && st.proxy != null) engine.applyPreview(null)
+        st.proxy?.recycle()
+        st.proxy = null
+        st.small.recycle()
+        cutOutStroke = null
+        cutOutPhase = CutOutPhase.None
+        cutOutError = null
+        cutOutNote = null
+        // The model's memory goes once nothing runs on it.
+        aiExecutor.execute { com.yume.app.ai.Onnx.closeIdle() }
+        engine.markDirtyAll()
+        requestState()
+    }
+
+    /**
+     * Applies the cut-out. [output]: 0 a layer mask (editable, undoable),
+     * 1 erase the background pixels, 2 copy the subject to a new layer (the
+     * original is hidden, not changed).
+     */
+    fun applyCutOut(output: Int) = post { working { applyCutOutWork(output) } }
+
+    private fun applyCutOutWork(output: Int) {
+        val st = cutOut ?: return
+        val m = st.refined ?: return
+        val layer = st.layer
+        if (!engine.layers.contains(layer)) {
+            cancelCutOutInternal()
+            return
+        }
+        cancelCutOutPreviewOnly(st)
+        val w = engine.width
+        val h = engine.height
+        when (output) {
+            0 -> {
+                val before = engine.snapshotState()
+                val added = !layer.hasMask && engine.addMask(layer)
+                layer.editMask = true
+                val store = layer.maskTiles ?: return
+                val patch = matteEdit(layer, store, Rect(0, 0, w, h), m, "Remove background")
+                if (added) {
+                    val structural = LayersAction(before, engine.snapshotState(), "Add layer mask", EditKind.LayerMask)
+                    history.push(
+                        if (patch != null) GroupAction(listOf(structural, patch), "Remove background", EditKind.LayerMask)
+                        else structural
+                    )
+                } else if (patch != null) {
+                    history.push(patch)
+                }
+            }
+            1 -> matteEdit(layer, layer.tiles, editBounds(layer.tiles), m, "Remove background")?.let { history.push(it) }
+            else -> {
+                if (!engine.canAfford(1)) {
+                    onMessage?.invoke("Not enough memory for another layer.")
+                    return
+                }
+                val before = engine.snapshotState()
+                val copy = engine.duplicateLayer(layer.id) ?: return
+                copy.name = layer.name + " (cut out)"
+                copy.editMask = false
+                val patch = matteEdit(copy, copy.tiles, editBounds(copy.tiles), m, "Remove background")
+                layer.visible = false
+                engine.selectLayer(copy.id)
+                val structural = LayersAction(before, engine.snapshotState(), "Cut out to new layer", EditKind.LayerDuplicate)
+                history.push(if (patch != null) GroupAction(listOf(structural, patch), "Cut out to new layer", EditKind.LayerDuplicate) else structural)
+            }
+        }
+        layer.touch()
+        cancelCutOutInternal()
+        engine.markDirtyAll()
+        requestState()
+    }
+
+    /** Ends the preview of [st] (before writing the result). */
+    private fun cancelCutOutPreviewOnly(st: CutOutState) {
+        if (engine.preview?.proxy === st.proxy && st.proxy != null) engine.applyPreview(null)
+    }
+
+    /** Multiplies the alpha of [store] over [bounds] by the matte; the undo step. */
+    private fun matteEdit(layer: Layer, store: TileStore, bounds: Rect, m: FloatArray, label: String): HistoryAction? {
+        if (bounds.isEmpty) return null
+        val w = engine.width
+        val h = engine.height
+        val capture = TileOps.capture(store, bounds)
+        TileOps.forEachTile(store, bounds, 0) { patch, pad, tile ->
+            val pw = pad.width()
+            val ph = pad.height()
+            val px = IntArray(pw * ph)
+            patch.getPixels(px, 0, pw, 0, 0, pw, ph)
+            com.yume.app.ai.CutOut.multiply(px, pad, w, h, m)
+            patch.setPixels(px, 0, pw, 0, 0, pw, ph)
+            TileOps.writePart(store, patch, pad, tile)
+        }
+        return engine.makeTilePatch(layer, capture, bounds, label, EditKind.Adjust)
+    }
+
+    /** The layer drawn at most 2048 px (the preview's size). */
+    private fun layerSmallCopy(layer: Layer): Bitmap {
+        val scale = minOf(1f, 2048f / maxOf(engine.width, engine.height))
+        val w = max(1, (engine.width * scale).toInt())
+        val h = max(1, (engine.height * scale).toInt())
+        val small = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(small)
+        c.scale(w.toFloat() / engine.width, h.toFloat() / engine.height)
+        layer.tiles.drawInto(c, Paint(Paint.FILTER_BITMAP_FLAG))
+        return small
+    }
+
+    // Marks painted on the canvas while the tool is open.
+
+    private fun cutOutDown(x: Float, y: Float) {
+        val st = cutOut ?: return
+        if (cutOutBrush == 0) {
+            onMessage?.invoke("Choose Keep or Remove to mark the picture, or use two fingers to move it.")
+            return
+        }
+        if (st.raw == null) return
+        val s = CutOutStroke(cutOutBrush, cutOutBrushSize / view.scale.coerceAtLeast(1e-3f))
+        s.add(x, y)
+        st.strokes.add(s)
+        cutOutStroke = s
+        stampCutOut(st, s.mode, s.radius, x, y, x, y)
+    }
+
+    private fun cutOutMove(x: Float, y: Float) {
+        val st = cutOut ?: return
+        val s = cutOutStroke ?: return
+        val px = s.points[(s.count - 1) * 2]
+        val py = s.points[(s.count - 1) * 2 + 1]
+        s.add(x, y)
+        stampCutOut(st, s.mode, s.radius, px, py, x, y)
+    }
+
+    private fun cutOutUp() {
+        if (cutOutStroke == null) return
+        cutOutStroke = null
+        refineCutOut()
+    }
+
+    private fun cutOutCancelStroke() {
+        val st = cutOut ?: return
+        val s = cutOutStroke ?: return
+        cutOutStroke = null
+        st.strokes.remove(s)
+        st.hints.fill(0)
+        for (k in st.strokes) {
+            for (i in 0 until k.count) {
+                val j = max(0, i - 1)
+                stampCutOut(st, k.mode, k.radius, k.points[j * 2], k.points[j * 2 + 1], k.points[i * 2], k.points[i * 2 + 1])
+            }
+        }
+        requestState()
+    }
+
+    /** Fills the mark's discs from (x0, y0) to (x1, y1) on the grid. */
+    private fun stampCutOut(st: CutOutState, mode: Int, radius: Float, x0: Float, y0: Float, x1: Float, y1: Float) {
+        val n = com.yume.app.ai.CutOut.N
+        val sx = n.toFloat() / engine.width
+        val sy = n.toFloat() / engine.height
+        val rx = max(0.6f, radius * sx)
+        val ry = max(0.6f, radius * sy)
+        val steps = max(1, (hypot((x1 - x0) * sx, (y1 - y0) * sy) / (min(rx, ry) * 0.5f)).toInt())
+        for (k in 0..steps) {
+            val t = k.toFloat() / steps
+            val cx = (x0 + (x1 - x0) * t) * sx
+            val cy = (y0 + (y1 - y0) * t) * sy
+            val gx0 = max(0, (cx - rx).toInt())
+            val gx1 = min(n - 1, (cx + rx).toInt())
+            val gy0 = max(0, (cy - ry).toInt())
+            val gy1 = min(n - 1, (cy + ry).toInt())
+            for (gy in gy0..gy1) for (gx in gx0..gx1) {
+                val dx = (gx + 0.5f - cx) / rx
+                val dy = (gy + 0.5f - cy) / ry
+                if (dx * dx + dy * dy <= 1f) st.hints[gy * n + gx] = mode.toByte()
+            }
+        }
+        requestState()
+    }
+
+    /** The marks to draw over the canvas: (mode, radius, points) in document px. */
+    fun cutOutMarks(): List<CutOutStroke>? = cutOut?.strokes?.toList()
+
+    /** Harness: the refined matte now (null until ready). */
+    fun cutOutMatteForTest(): FloatArray? = cutOut?.refined
+    fun cutOutPhaseForTest(): CutOutPhase = cutOutPhase
+
     // ----------------------------------------------------------- masks
 
     fun addLayerMask() = post {
@@ -4197,6 +4576,10 @@ class DrawingSession(
             cancelInsertInternal()
             return
         }
+        if (cuttingOut) {
+            cancelCutOutInternal()
+            return
+        }
         if (transform != null) cancelTransformInternal()
         cancelAdjustmentInternal()
         val action = history.peekUndo() ?: return
@@ -4232,6 +4615,10 @@ class DrawingSession(
         if (painter.isActive) return
         if (inserting) {
             cancelInsertInternal()
+            return
+        }
+        if (cuttingOut) {
+            cancelCutOutInternal()
             return
         }
         val action = history.peekRedo() ?: return
@@ -4436,6 +4823,10 @@ class DrawingSession(
             onMessage?.invoke("Apply or cancel the adjustment preview first (Effects).")
             return true
         }
+        if (cuttingOut) {
+            onMessage?.invoke("Apply or cancel the background removal first (Effects).")
+            return true
+        }
         val k = insertKind ?: insertRequested ?: return false
         onMessage?.invoke("Apply or cancel the ${k.label.lowercase()} preview first (Effects).")
         return true
@@ -4444,6 +4835,7 @@ class DrawingSession(
     private fun applyPreviewInternal(kind: AdjustmentKind, amount: Float) {
         // One preview at a time: a pending insert goes.
         if (inserting) cancelInsertInternal()
+        if (cuttingOut) cancelCutOutInternal()
         val layer = (if (adjusting) adjustLayer?.takeIf { engine.layers.contains(it) } else null)
             ?: engine.activeLayer ?: return
         if (!adjusting) {
@@ -5728,6 +6120,14 @@ class DrawingSession(
             manga = mangaParams,
             material = materialParams,
             frames = framesLayout,
+            cutOutPhase = cutOutPhase,
+            cutOutModel = cutOutModel,
+            cutOutError = cutOutError,
+            cutOutNote = cutOutNote,
+            cutOutSettings = cutOutSettings,
+            cutOutBrush = cutOutBrush,
+            cutOutBrushSize = cutOutBrushSize,
+            cutOutMarks = cutOut?.strokes?.size ?: 0,
             colorMode = colorMode,
             harmony = harmony,
             eyedropperLayerOnly = eyedropperLayerOnly,

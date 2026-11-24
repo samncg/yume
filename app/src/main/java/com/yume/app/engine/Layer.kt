@@ -80,7 +80,9 @@ class Layer(
         clipping = clipping,
         maskEnabled = maskEnabled,
         groupId = groupId,
-        editMask = editMask
+        editMask = editMask,
+        mask = maskTiles,
+        maskKnown = true
     )
 
     fun applyProps(p: LayerProps) {
@@ -94,7 +96,8 @@ class Layer(
         clipping = p.clipping
         maskEnabled = p.maskEnabled
         groupId = p.groupId
-        editMask = p.editMask
+        if (p.maskKnown) maskTiles = p.mask
+        editMask = p.editMask && maskTiles != null
     }
 
     companion object {
@@ -130,7 +133,15 @@ data class LayerProps(
     val clipping: Boolean = false,
     val maskEnabled: Boolean = true,
     val groupId: Long = 0L,
-    val editMask: Boolean = false
+    val editMask: Boolean = false,
+    /**
+     * The layer's mask store, so undoing "Add / Remove layer mask" (and
+     * anything else structural) puts the mask back as it was. Only states
+     * made in this session carry it ([maskKnown]); states read back from a
+     * saved history leave the mask alone.
+     */
+    val mask: TileStore? = null,
+    val maskKnown: Boolean = false
 )
 
 /**
