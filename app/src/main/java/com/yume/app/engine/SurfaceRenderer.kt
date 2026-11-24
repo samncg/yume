@@ -73,6 +73,59 @@ class SurfaceRenderer(
      * The document rectangle the surface currently shows, so a sparse composite
      * only reads the tiles the user can actually see.
      */
+    private val repeatShade = Paint().apply { color = 0x1F000000 }
+    private val repeatRect = Rect()
+
+    /**
+     * Pattern mode: the tile drawn again at each lattice step that shows on
+     * screen (only the visible part of each), lightly shaded so the real
+     * canvas stands out. The canvas is already transformed to document space.
+     */
+    private fun drawPatternRepeats(canvas: Canvas) {
+        val engine = session.engine
+        val w = engine.width
+        val h = engine.height
+        // The whole view in document space (not clipped to the canvas).
+        invView.set(session.view.matrix)
+        if (!invView.invert(invView)) return
+        val c = floatArrayOf(0f, 0f, surfaceW.toFloat(), 0f, surfaceW.toFloat(), surfaceH.toFloat(), 0f, surfaceH.toFloat())
+        invView.mapPoints(c)
+        val minX = minOf(c[0], c[2], c[4], c[6])
+        val maxX = maxOf(c[0], c[2], c[4], c[6])
+        val minY = minOf(c[1], c[3], c[5], c[7])
+        val maxY = maxOf(c[1], c[3], c[5], c[7])
+        val b = engine.patternBasis()
+        // Enough steps to cover the view, capped (zoomed far out).
+        val reach = (maxOf(maxX - minX, maxY - minY) / minOf(w, h).coerceAtLeast(1)).toInt() + 2
+        val n = reach.coerceAtMost(8)
+        val zoomedOut = session.view.scale < MIP_ZOOM_THRESHOLD && engine.compositeIsSparse && engine.mipDrawable()
+        for (j in -n..n) for (i in -n..n) {
+            if (i == 0 && j == 0) continue
+            val ox = i * b[0] + j * b[2]
+            val oy = i * b[1] + j * b[3]
+            // The view in this repeat's own coordinates, clipped to the tile.
+            val l = maxOf(0f, minX - ox)
+            val t = maxOf(0f, minY - oy)
+            val r = minOf(w.toFloat(), maxX - ox)
+            val btm = minOf(h.toFloat(), maxY - oy)
+            if (l >= r || t >= btm) continue
+            repeatRect.set(kotlin.math.floor(l).toInt(), kotlin.math.floor(t).toInt(), kotlin.math.ceil(r).toInt(), kotlin.math.ceil(btm).toInt())
+            val save = canvas.save()
+            canvas.translate(ox, oy)
+            canvas.clipRect(0, 0, w, h)
+            if (engine.isTransparentBackground) {
+                canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), checkerPaint)
+            }
+            when {
+                !engine.compositeIsSparse -> canvas.drawBitmap(engine.composite, 0f, 0f, blitPaint)
+                zoomedOut -> engine.drawMip(canvas)
+                else -> engine.drawComposite(canvas, repeatRect)
+            }
+            canvas.drawRect(repeatRect, repeatShade)
+            canvas.restoreToCount(save)
+        }
+    }
+
     private fun documentViewport(view: ViewTransform, w: Int, h: Int): Rect {
         invView.set(view.matrix)
         if (!invView.invert(invView)) return Rect(0, 0, w, h)
@@ -411,6 +464,7 @@ class SurfaceRenderer(
             } else {
                 canvas.drawBitmap(engine.composite, 0f, 0f, blitPaint)
             }
+            if (engine.patternMode != 0) drawPatternRepeats(canvas)
 
             canvas.restore()
 
@@ -528,6 +582,89 @@ class SurfaceRenderer(
                     g.rulerX[0] - dx / l * far, g.rulerY[0] - dy / l * far,
                     g.rulerX[0] + dx / l * far, g.rulerY[0] + dy / l * far, guidePaint
                 )
+            }
+            com.yume.app.engine.GuideMode.Isometric -> {
+                // Lines at 30 and 150 degrees plus verticals, one cell apart.
+                val step = g.gridSize
+                var k = 1
+                while (step * k * scale < 10f * density) k *= 2
+                val sp = step * k
+                val far = (w + h).toFloat() * 2f
+                for (deg in listOf(30.0, 150.0, 90.0)) {
+                    val a = Math.toRadians(deg)
+                    val dx = kotlin.math.cos(a).toFloat()
+                    val dy = kotlin.math.sin(a).toFloat()
+                    // Offsets along the normal cover the canvas.
+                    val nx = -dy
+                    val ny = dx
+                    val reach = (kotlin.math.abs(nx) * w + kotlin.math.abs(ny) * h)
+                    // Equilateral lattice: every family is sp * sin 60 apart
+                    // and passes through the canvas centre, so they meet.
+                    val gap = sp * 0.8660254f
+                    var o = -kotlin.math.ceil(reach / gap) * gap
+                    while (o <= reach) {
+                        val ox = w / 2f + nx * o
+                        val oy = h / 2f + ny * o
+                        canvas.drawLine(ox - dx * far, oy - dy * far, ox + dx * far, oy + dy * far, guidePaint)
+                        o += gap
+                    }
+                }
+            }
+            com.yume.app.engine.GuideMode.Fisheye -> {
+                val p = g.fishPoints()
+                val r = g.fishR
+                // Arcs through left/right and through top/bottom.
+                for (fam in 0..1) {
+                    val ax = p[fam * 4]; val ay = p[fam * 4 + 1]
+                    val bx = p[fam * 4 + 2]; val by = p[fam * 4 + 3]
+                    for (k in -10..10) {
+                        val t = k / 10f * r * 1.6f
+                        val px = if (fam == 0) g.fishX else g.fishX + t
+                        val py = if (fam == 0) g.fishY + t else g.fishY
+                        when (val sn = com.yume.app.engine.GuideSnap.through(ax, ay, bx, by, px, py)) {
+                            is com.yume.app.engine.GuideSnap.Circle -> canvas.drawCircle(sn.cx, sn.cy, sn.r, guidePaint)
+                            is com.yume.app.engine.GuideSnap.Line -> {
+                                val far = maxOf(w, h) * 4f
+                                canvas.drawLine(sn.ox - sn.ux * far, sn.oy - sn.uy * far, sn.ox + sn.ux * far, sn.oy + sn.uy * far, guidePaint)
+                            }
+                            else -> Unit
+                        }
+                    }
+                }
+                if (g.fishCount == 5) {
+                    val far = maxOf(w, h) * 4f
+                    for (k in 0 until 32) {
+                        val a = 2.0 * Math.PI * k / 32
+                        canvas.drawLine(g.fishX, g.fishY, g.fishX + far * kotlin.math.cos(a).toFloat(), g.fishY + far * kotlin.math.sin(a).toFloat(), guidePaint)
+                    }
+                }
+                guidePaint.color = 0xAAE9A13B.toInt()
+                guidePaint.strokeWidth = 1.6f * density / scale
+                canvas.drawCircle(g.fishX, g.fishY, r, guidePaint)
+            }
+            com.yume.app.engine.GuideMode.Ellipse -> {
+                val save2 = canvas.save()
+                canvas.translate(g.ellX, g.ellY)
+                canvas.rotate(Math.toDegrees(g.ellAngle.toDouble()).toFloat())
+                for (k in listOf(0.25f, 0.5f, 0.75f, 1.5f, 2f, 3f)) {
+                    canvas.drawOval(-g.ellRx * k, -g.ellRy * k, g.ellRx * k, g.ellRy * k, guidePaint)
+                }
+                canvas.drawLine(-g.ellRx * 3f, 0f, g.ellRx * 3f, 0f, guidePaint)
+                canvas.drawLine(0f, -g.ellRy * 3f, 0f, g.ellRy * 3f, guidePaint)
+                guidePaint.color = 0xCCE9A13B.toInt()
+                guidePaint.strokeWidth = 2f * density / scale
+                canvas.drawOval(-g.ellRx, -g.ellRy, g.ellRx, g.ellRy, guidePaint)
+                canvas.restoreToCount(save2)
+            }
+            com.yume.app.engine.GuideMode.Curve -> {
+                val pts = g.curvePoints()
+                guidePaint.color = 0xCCE9A13B.toInt()
+                guidePaint.strokeWidth = 2f * density / scale
+                val path = android.graphics.Path()
+                path.moveTo(pts[0], pts[1])
+                var i = 2
+                while (i < pts.size) { path.lineTo(pts[i], pts[i + 1]); i += 2 }
+                canvas.drawPath(path, guidePaint)
             }
             com.yume.app.engine.GuideMode.Off -> Unit
         }

@@ -76,6 +76,25 @@ class DrawingEngine(val width: Int, val height: Int) {
      * every segment is also mirrored (a kaleidoscope).
      */
     @Volatile var symmetryRadial: Int = 0
+
+    /**
+     * Pattern mode: the canvas is one tile of a repeating pattern. Strokes
+     * wrap across its edges and the view shows the repeats around it.
+     * 0 off, 1 tile (square grid), 2 brick (rows shifted by half), 3 half
+     * drop (columns shifted by half).
+     */
+    @Volatile var patternMode: Int = 0
+
+    /** The repeat lattice of [patternMode]: (x, y) of the two basis steps. */
+    fun patternBasis(): FloatArray {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        return when (patternMode) {
+            2 -> floatArrayOf(w, 0f, w / 2f, h)
+            3 -> floatArrayOf(w, h / 2f, 0f, h)
+            else -> floatArrayOf(w, 0f, 0f, h)
+        }
+    }
     @Volatile var symmetryMirror: Boolean = false
 
     /** Drawing guides (grid, perspective, ruler). */
@@ -91,6 +110,7 @@ class DrawingEngine(val width: Int, val height: Int) {
     fun extrasJson(): String = org.json.JSONObject().apply {
         put("guides", guides.toJson())
         put("radial", symmetryRadial)
+        if (patternMode != 0) put("pattern", patternMode)
         put("mirror", symmetryMirror)
         put("strokes", strokeCount)
         put("timeMs", activeMs)
@@ -101,6 +121,7 @@ class DrawingEngine(val width: Int, val height: Int) {
         val o = runCatching { org.json.JSONObject(json) }.getOrNull() ?: return
         guides.load(o.optJSONObject("guides"))
         symmetryRadial = o.optInt("radial", 0).let { if (it < 2) 0 else it.coerceAtMost(32) }
+        patternMode = o.optInt("pattern", 0).coerceIn(0, 3)
         symmetryMirror = o.optBoolean("mirror", false)
         strokeCount = o.optLong("strokes", 0L).coerceAtLeast(0L)
         activeMs = o.optLong("timeMs", 0L).coerceAtLeast(0L)

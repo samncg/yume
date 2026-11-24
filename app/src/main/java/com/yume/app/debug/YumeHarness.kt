@@ -215,6 +215,8 @@ object YumeHarness {
                     out.append(scorePreviewDraw(false))
                 } else if (only == "ai") {
                     out.append(scoreAi(app))
+                } else if (only == "guides") {
+                    out.append(scoreGuides())
                 } else if (only == "savecrash") {
                     out.append(scoreSaveCrash(app))
                 } else if (only == "inserts") {
@@ -8865,6 +8867,151 @@ object YumeHarness {
             Log.e(TAG, "ai", t)
         } finally {
             com.yume.app.ai.Onnx.closeIdle()
+            TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /**
+     * New guides: an assisted stroke drawn as a straight drag lands on the
+     * guide's curve (isometric line, fisheye arc, concentric ellipse, French
+     * curve). Pattern mode wraps strokes across the tile's edges (tile and
+     * brick). Guide and pattern settings survive a save.
+     */
+    private fun scoreGuides(): String {
+        val out = StringBuilder()
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        val oldS = TileStoreConfig.useSparseLayers
+        TileStoreConfig.useSparseLayers = true
+        try {
+            val w = 600
+            val h = 400
+            fun doc(): Pair<DrawingSession, DrawingEngine> {
+                val e = DrawingEngine(w, h)
+                e.backgroundColor = BG
+                e.newLayer("L")
+                val s = DrawingSession("g", "G", e, History())
+                identityView(s, w, h)
+                s.presets = com.yume.app.engine.BrushLibrary.defaults
+                s.assist = 0f
+                s.quickShapeEnabled = false
+                val pen = s.presets.first { it.id == "technical-pen" }
+                pick(s, pen, pen.category)
+                s.setBrushSize(6f)
+                s.runCommands()
+                return s to e
+            }
+            fun drag(s: DrawingSession, x0: Float, y0: Float, x1: Float, y1: Float) {
+                s.pushInput(InputEvent.Down(0, x0, y0, 1f, 0f, false, false))
+                for (i in 1..40) s.pushInput(InputEvent.Move(0, floatArrayOf(x0 + (x1 - x0) * i / 40f), floatArrayOf(y0 + (y1 - y0) * i / 40f), floatArrayOf(1f), 0f))
+                s.pushInput(InputEvent.Up(0))
+                s.runInput()
+                s.runCommands()
+            }
+            fun painted(e: DrawingEngine): List<Pair<Int, Int>> {
+                val b = e.layers[0].tiles.copyAll()
+                val px = IntArray(w * h)
+                b.getPixels(px, 0, w, 0, 0, w, h)
+                b.recycle()
+                val pts = ArrayList<Pair<Int, Int>>()
+                for (i in px.indices) if ((px[i] ushr 24) > 128) pts.add((i % w) to (i / w))
+                return pts
+            }
+            // Every painted pixel within [tol] of the expected curve, and enough of them.
+            fun check(name: String, e: DrawingEngine, minCount: Int, tol: Float, dist: (Float, Float) -> Float) {
+                val pts = painted(e)
+                var worst = 0f
+                for ((x, y) in pts) worst = maxOf(worst, dist(x + 0.5f, y + 0.5f))
+                val ok = pts.size >= minCount && worst <= tol
+                out.append("guides $name: on the guide ${pass(ok)} (${pts.size} px, farthest ${"%.1f".format(worst)} px)\n")
+            }
+            // Isometric: a drag near 30 degrees runs exactly at 30.
+            run {
+                val (s, e) = doc()
+                s.setGuideMode(com.yume.app.engine.GuideMode.Isometric); s.runCommands()
+                drag(s, 100f, 100f, 400f, 270f)
+                val ux = kotlin.math.cos(Math.toRadians(30.0)).toFloat()
+                val uy = kotlin.math.sin(Math.toRadians(30.0)).toFloat()
+                check("isometric", e, 600, 5f) { x, y -> kotlin.math.abs(-(x - 100f) * uy + (y - 100f) * ux) }
+            }
+            // Fisheye: a level drag above the centre bends into the arc through
+            // the left and right points.
+            run {
+                val (s, e) = doc()
+                val g = e.guides
+                g.fishX = 300f; g.fishY = 200f; g.fishR = 180f
+                s.setGuideMode(com.yume.app.engine.GuideMode.Fisheye); s.runCommands()
+                drag(s, 300f, 110f, 420f, 110f)
+                // Circle through (120,200), (480,200), (300,110): centre (300,335), r 225.
+                check("fisheye arc", e, 300, 5f) { x, y -> kotlin.math.abs(kotlin.math.hypot(x - 300f, y - 335f) - 225f) }
+                val bent = painted(e).any { (x, y) -> x in 398..412 && y in 128..146 }
+                out.append("guides fisheye: the arc bends towards the side points ${pass(bent)}\n")
+            }
+            // Ellipse: a chord drag from the right end follows the ellipse.
+            run {
+                val (s, e) = doc()
+                val g = e.guides
+                g.ellX = 300f; g.ellY = 200f; g.ellRx = 150f; g.ellRy = 80f; g.ellAngle = 0f
+                s.setGuideMode(com.yume.app.engine.GuideMode.Ellipse); s.runCommands()
+                drag(s, 450f, 200f, 400f, 280f)
+                check("ellipse", e, 300, 5f) { x, y ->
+                    // Distance to the ellipse, near enough: scale the radial gap.
+                    val u = (x - 300f) / 150f
+                    val v = (y - 200f) / 80f
+                    kotlin.math.abs(kotlin.math.sqrt(u * u + v * v) - 1f) * 80f
+                }
+            }
+            // Curve: a drag starting on the curve follows it.
+            run {
+                val (s, e) = doc()
+                val g = e.guides
+                s.setGuideMode(com.yume.app.engine.GuideMode.Curve); s.runCommands()
+                val pts = g.curvePoints()
+                drag(s, g.curveX[1], g.curveY[1], g.curveX[2], g.curveY[2])
+                val path = com.yume.app.engine.GuideSnap.Path(pts, 0f)
+                check("curve", e, 300, 5f) { x, y -> kotlin.math.abs(path.sideOf(x, y)) }
+            }
+            // Pattern: tile wraps left-right, brick wraps top-bottom with a half shift.
+            run {
+                val (s, e) = doc()
+                s.setPatternMode(1); s.runCommands()
+                drag(s, 560f, 100f, 640f, 100f)
+                val p = painted(e)
+                val wrapped = p.any { (x, y) -> x in 0..30 && y in 96..104 }
+                val stays = p.none { (x, y) -> y !in 90..110 }
+                out.append("guides pattern tile: wraps across the edge ${pass(wrapped)}, nowhere else ${pass(stays)}\n")
+            }
+            run {
+                val (s, e) = doc()
+                s.setPatternMode(2); s.runCommands()
+                drag(s, 100f, 370f, 100f, 430f)
+                val p = painted(e)
+                // Brick: the row above is shifted by half the width.
+                val wrapped = p.any { (x, y) -> x in 396..404 && y in 0..25 }
+                val notStraight = p.none { (x, y) -> x in 90..110 && y in 0..25 }
+                out.append("guides pattern brick: wraps with a half shift ${pass(wrapped && notStraight)}\n")
+            }
+            // Settings survive a save (the extras JSON).
+            run {
+                val e = DrawingEngine(w, h)
+                val g = e.guides
+                g.mode = com.yume.app.engine.GuideMode.Ellipse
+                g.ellX = 11f; g.ellRx = 77f; g.ellAngle = 0.5f
+                g.fishCount = 5; g.fishR = 123f
+                g.curveX[2] = 222f
+                e.patternMode = 3
+                val json = e.extrasJson()
+                val e2 = DrawingEngine(w, h)
+                e2.loadExtras(json)
+                val g2 = e2.guides
+                val ok = g2.mode == g.mode && g2.ellX == 11f && g2.ellRx == 77f && kotlin.math.abs(g2.ellAngle - 0.5f) < 1e-6f &&
+                    g2.fishCount == 5 && g2.fishR == 123f && g2.curveX[2] == 222f && e2.patternMode == 3
+                out.append("guides: settings survive a save ${pass(ok)}\n")
+            }
+        } catch (t: Throwable) {
+            out.append("guides: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e(TAG, "guides", t)
+        } finally {
             TileStoreConfig.useSparseLayers = oldS
         }
         return out.toString()

@@ -613,6 +613,23 @@ class StrokePainter(private val engine: DrawingEngine) {
     @Volatile var liveSize = 0f
         private set
 
+    /** A stamp, plus its repeats across the tile's edges in pattern mode. */
+    private fun stampWrap(x: Float, y: Float, size: Float, alpha: Float, ang: Float) {
+        stampInternal(x, y, size, alpha, ang)
+        if (engine.patternMode == 0) return
+        val b = engine.patternBasis()
+        val r = size * 0.75f + 2f
+        val w = engine.width.toFloat()
+        val h = engine.height.toFloat()
+        for (j in -1..1) for (i in -1..1) {
+            if (i == 0 && j == 0) continue
+            val ox = x + i * b[0] + j * b[2]
+            val oy = y + i * b[1] + j * b[3]
+            if (ox + r < 0f || oy + r < 0f || ox - r > w || oy - r > h) continue
+            stampInternal(ox, oy, size, alpha, ang)
+        }
+    }
+
     private fun stampAt(x: Float, y: Float, size0: Float, alpha0: Float) {
         lastStampSize = size0
         lastStampAlpha = alpha0
@@ -630,15 +647,15 @@ class StrokePainter(private val engine: DrawingEngine) {
         liveY = y
         liveSize = sized
         val ang = stampAngle()
-        stampInternal(x, y, sized, alpha, ang)
+        stampWrap(x, y, sized, alpha, ang)
         if (engine.symmetryX) {
-            stampInternal(engine.symmetryXPos * 2f - x, y, sized, alpha, if (ang == 0f) 0f else 180f - ang)
+            stampWrap(engine.symmetryXPos * 2f - x, y, sized, alpha, if (ang == 0f) 0f else 180f - ang)
         }
         if (engine.symmetryY) {
-            stampInternal(x, engine.symmetryYPos * 2f - y, sized, alpha, -ang)
+            stampWrap(x, engine.symmetryYPos * 2f - y, sized, alpha, -ang)
         }
         if (engine.symmetryX && engine.symmetryY) {
-            stampInternal(
+            stampWrap(
                 engine.symmetryXPos * 2f - x,
                 engine.symmetryYPos * 2f - y,
                 sized,
@@ -660,10 +677,10 @@ class StrokePainter(private val engine: DrawingEngine) {
                 val c = kotlin.math.cos(a).toFloat()
                 val s = kotlin.math.sin(a).toFloat()
                 val turn = (360f / radial) * k
-                if (k > 0) stampInternal(cx + dx * c - dy * s, cy + dx * s + dy * c, sized, alpha, if (ang == 0f) 0f else ang + turn)
+                if (k > 0) stampWrap(cx + dx * c - dy * s, cy + dx * s + dy * c, sized, alpha, if (ang == 0f) 0f else ang + turn)
                 if (engine.symmetryMirror) {
                     // Reflect across the horizontal axis, then rotate.
-                    stampInternal(cx + dx * c + dy * s, cy + dx * s - dy * c, sized, alpha, if (ang == 0f) 0f else turn - ang)
+                    stampWrap(cx + dx * c + dy * s, cy + dx * s - dy * c, sized, alpha, if (ang == 0f) 0f else turn - ang)
                 }
             }
         }

@@ -2756,13 +2756,19 @@ fun LiquifyPanel(state: EditorUiState, session: DrawingSession, onClose: () -> U
 fun GuidesPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Unit) {
     PanelCard(Modifier.width(PANEL_WIDTH.dp), scrollable = true) {
         PanelHeader("Guides", onClose)
-        SegmentedRow(
-            options = com.yume.app.engine.GuideMode.entries.map { it.label },
-            selectedIndex = state.guideMode.ordinal,
-            onSelect = { session.setGuideMode(com.yume.app.engine.GuideMode.entries[it]) }
-        )
+        // Eight guides: two rows of four.
+        val modes = com.yume.app.engine.GuideMode.entries
+        for (row in 0..1) {
+            val part = modes.subList(row * 4, row * 4 + 4)
+            SegmentedRow(
+                options = part.map { it.label },
+                selectedIndex = part.indexOf(state.guideMode),
+                onSelect = { session.setGuideMode(part[it]) }
+            )
+            if (row == 0) Spacer(Modifier.height(6.dp))
+        }
         when (state.guideMode) {
-            com.yume.app.engine.GuideMode.Grid -> {
+            com.yume.app.engine.GuideMode.Grid, com.yume.app.engine.GuideMode.Isometric -> {
                 Spacer(Modifier.height(10.dp))
                 YumeSlider(
                     value = state.gridSize,
@@ -2783,6 +2789,16 @@ fun GuidesPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                     onSelect = { session.setVanishingPoints(it + 1) }
                 )
             }
+            com.yume.app.engine.GuideMode.Fisheye -> {
+                Spacer(Modifier.height(10.dp))
+                SectionLabel("Vanishing points")
+                Spacer(Modifier.height(6.dp))
+                SegmentedRow(
+                    options = listOf("4 points", "5 points"),
+                    selectedIndex = state.fisheyePoints - 4,
+                    onSelect = { session.setFisheyePoints(it + 4) }
+                )
+            }
             else -> Unit
         }
         if (state.guideMode != com.yume.app.engine.GuideMode.Off) {
@@ -2798,6 +2814,15 @@ fun GuidesPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                     "Drag the vanishing points while this panel is open. Assisted strokes head to the nearest point, or run vertically."
                 com.yume.app.engine.GuideMode.Ruler ->
                     "Drag the ruler's ends while this panel is open. Strokes that start on the ruler follow it; others run parallel."
+                com.yume.app.engine.GuideMode.Isometric ->
+                    "An isometric grid: assisted strokes run at 30°, 150° or straight up."
+                com.yume.app.engine.GuideMode.Fisheye ->
+                    "Curvilinear perspective: drag the centre, and the right point to size it. Assisted strokes bend into arcs through opposite points" +
+                        if (state.fisheyePoints == 5) ", or run straight from the centre." else "."
+                com.yume.app.engine.GuideMode.Ellipse ->
+                    "Drag the centre and the two axis handles. Assisted strokes draw ellipses of this shape around the centre, or spokes through it."
+                com.yume.app.engine.GuideMode.Curve ->
+                    "A French curve through four points you can drag. Strokes that start on it follow it; others run alongside it."
             },
             style = MaterialTheme.typography.bodySmall,
             color = YumeColors.textDim
@@ -2844,6 +2869,21 @@ fun GuidesPanel(state: EditorUiState, session: DrawingSession, onClose: () -> Un
                 color = YumeColors.textDim
             )
         }
+        Spacer(Modifier.height(8.dp))
+        SectionLabel("Pattern")
+        Spacer(Modifier.height(6.dp))
+        SegmentedRow(
+            options = listOf("Off", "Tile", "Brick", "Half drop"),
+            selectedIndex = state.patternMode,
+            onSelect = { session.setPatternMode(it) }
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = if (state.patternMode == 0) "Turn the canvas into one tile of a seamless pattern."
+            else "Strokes wrap across the edges and the canvas repeats around itself, so the tile joins without a seam. Export the canvas to use it as a pattern.",
+            style = MaterialTheme.typography.bodySmall,
+            color = YumeColors.textDim
+        )
     }
 }
 

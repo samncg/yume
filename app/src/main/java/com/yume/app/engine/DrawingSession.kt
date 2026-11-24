@@ -1462,9 +1462,9 @@ class DrawingSession(
         private set
     private var draggingHandle = NO_HANDLE
     private var assistLocked = false
-    private var assistDx = 0f
-    private var assistDy = 0f
-    private var assistOnRuler = false
+    /** What the assisted stroke follows once locked (a line, circle, ellipse or curve). */
+    private var assistSnap: GuideSnap? = null
+    private val assistTmp = FloatArray(2)
 
     fun setGuideEditing(value: Boolean) = post {
         guideEditing = value
@@ -1510,46 +1510,43 @@ class DrawingSession(
         engine.guides.visible && engine.guides.assist && strokePreset?.category != BrushCategory.Smudge
 
     /**
-     * Assisted drawing: the stroke waits until it has moved a little, picks the
-     * guide direction closest to that movement, and from then on every point
-     * is projected onto the line through the stroke's start along it. A
-     * stroke that starts on the ruler is drawn on the ruler itself.
+     * Assisted drawing: the stroke waits until it has moved a little, picks
+     * the guide family whose direction at the start is closest to that
+     * movement (a line, a fisheye arc, a concentric ellipse, the curve or a
+     * curve alongside it), and from then on every point is projected onto it.
+     * A stroke that starts on the ruler or the curve is drawn on it.
      */
     private fun assistedMove(x: Float, y: Float, pressure: Float, tilt: Float) {
         val g = engine.guides
         if (!assistLocked) {
             val moved = hypot(x - strokeStartX, y - strokeStartY)
             if (moved * view.scale < 14f) return
-            val dirs = g.directionsFrom(strokeStartX, strokeStartY)
-            if (dirs.isEmpty()) {
+            val snaps = g.snapsFrom(strokeStartX, strokeStartY, 40f / view.scale.coerceAtLeast(1e-3f))
+            if (snaps.isEmpty()) {
                 painter.move(x, y, pressure, tilt)
                 return
             }
             val mx = (x - strokeStartX) / moved
             val my = (y - strokeStartY) / moved
-            var best = 0
+            var best: GuideSnap? = null
             var bestDot = -1f
-            for (k in 0 until dirs.size / 2) {
-                val d = abs(mx * dirs[k * 2] + my * dirs[k * 2 + 1])
-                if (d > bestDot) { bestDot = d; best = k }
+            for (sn in snaps) {
+                // The family's direction where the stroke starts (on it).
+                sn.project(strokeStartX, strokeStartY, assistTmp)
+                sn.tangent(assistTmp[0], assistTmp[1], assistTmp)
+                val d = abs(mx * assistTmp[0] + my * assistTmp[1])
+                if (d > bestDot) { bestDot = d; best = sn }
             }
-            assistDx = dirs[best * 2]
-            assistDy = dirs[best * 2 + 1]
-            assistOnRuler = g.mode == GuideMode.Ruler &&
-                g.rulerDistance(strokeStartX, strokeStartY) * view.scale < 40f
+            assistSnap = best
             assistLocked = true
         }
-        val ox: Float
-        val oy: Float
-        if (assistOnRuler) {
-            ox = engine.guides.rulerX[0]
-            oy = engine.guides.rulerY[0]
-        } else {
-            ox = strokeStartX
-            oy = strokeStartY
+        val sn = assistSnap
+        if (sn == null) {
+            painter.move(x, y, pressure, tilt)
+            return
         }
-        val t = (x - ox) * assistDx + (y - oy) * assistDy
-        painter.move(ox + assistDx * t, oy + assistDy * t, pressure, tilt)
+        sn.project(x, y, assistTmp)
+        painter.move(assistTmp[0], assistTmp[1], pressure, tilt)
     }
 
     fun setGuideMode(mode: GuideMode) = post {
@@ -1583,6 +1580,20 @@ class DrawingSession(
                 g.vpY[i] = g.vpY[i].coerceIn(engine.height * 0.05f, engine.height * 0.95f)
             }
         }
+        touchProperties()
+        requestState()
+    }
+
+    /** Pattern mode (0 off, 1 tile, 2 brick, 3 half drop): see [DrawingEngine.patternMode]. */
+    fun setPatternMode(mode: Int) = post {
+        engine.patternMode = mode.coerceIn(0, 3)
+        touchProperties()
+        engine.markDirtyAll()
+        requestState()
+    }
+
+    fun setFisheyePoints(count: Int) = post {
+        engine.guides.fishCount = if (count == 5) 5 else 4
         touchProperties()
         requestState()
     }
@@ -1670,6 +1681,7 @@ class DrawingSession(
         qsPressureCount = 0
         recordStrokePoint(x, y, pressure)
         assistLocked = false
+        assistSnap = null
         val cloning = tool == Tool.Clone && !cloneSourceX.isNaN() && brush.category == BrushCategory.Brush
         if (cloning && cloneDx.isNaN()) {
             // Aligned: the first stroke after setting the source fixes the
@@ -6102,6 +6114,8 @@ class DrawingSession(
             guideAssist = engine.guides.assist,
             gridSize = engine.guides.gridSize,
             vanishingPoints = engine.guides.vpCount,
+            fisheyePoints = engine.guides.fishCount,
+            patternMode = engine.patternMode,
             soloLayerId = engine.soloLayerId ?: -1L,
             assist = assist,
             quickShape = quickShapeEnabled,

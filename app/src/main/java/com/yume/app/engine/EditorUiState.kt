@@ -60,6 +60,9 @@ data class EditorUiState(
     val guideAssist: Boolean = true,
     val gridSize: Float = 128f,
     val vanishingPoints: Int = 2,
+    val fisheyePoints: Int = 4,
+    /** Pattern mode: 0 off, 1 tile, 2 brick, 3 half drop. */
+    val patternMode: Int = 0,
     val symmetryLocked: Boolean = false,
     val soloLayerId: Long = -1L,
     val assist: Float = 0.3f,
