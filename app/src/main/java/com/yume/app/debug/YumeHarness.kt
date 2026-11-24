@@ -215,6 +215,8 @@ object YumeHarness {
                     out.append(scorePreviewDraw(false))
                 } else if (only == "ai") {
                     out.append(scoreAi(app))
+                } else if (only == "folders") {
+                    out.append(scoreFolders(app))
                 } else if (only == "guides") {
                     out.append(scoreGuides())
                 } else if (only == "savecrash") {
@@ -9064,6 +9066,49 @@ object YumeHarness {
             Log.e(TAG, "guides", t)
         } finally {
             TileStoreConfig.useSparseLayers = oldS
+        }
+        return out.toString()
+    }
+
+    /**
+     * Gallery folders (their own prefs file, so the user's folders are not
+     * touched): create, move in and out, rename, delete keeps the artworks,
+     * moves to a missing folder are refused, and it all survives a reload.
+     */
+    private fun scoreFolders(app: YumeApp): String {
+        val out = StringBuilder()
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        val name = "harness_folders"
+        app.getSharedPreferences(name, android.content.Context.MODE_PRIVATE).edit().clear().commit()
+        try {
+            val f = com.yume.app.data.FolderStore(app, name)
+            val a = f.create("  Sketches  ")
+            Thread.sleep(5)
+            val b = f.create("")
+            val created = f.folders().map { it.name } == listOf("Folder", "Sketches")
+            f.move("p1", a.id)
+            f.move("p2", a.id)
+            f.move("p3", b.id)
+            f.move("p4", "missing")
+            val moved = f.folderOf("p1") == a.id && f.folderOf("p3") == b.id && f.folderOf("p4") == null
+            f.move("p2", null)
+            val out1 = f.folderOf("p2") == null
+            f.rename(b.id, "Studies")
+            val renamed = f.folder(b.id)?.name == "Studies"
+            // A fresh store reads the same (SharedPreferences cache).
+            val g = com.yume.app.data.FolderStore(app, name)
+            val reloaded = g.folders().map { it.name } == listOf("Studies", "Sketches") && g.folderOf("p1") == a.id && g.folderOf("p3") == b.id
+            g.delete(a.id)
+            val deleted = g.folders().size == 1 && g.folderOf("p1") == null && g.folderOf("p3") == b.id
+            val h = com.yume.app.data.FolderStore(app, name)
+            val deletedReloaded = h.folders().size == 1 && h.folderOf("p1") == null
+            out.append("folders: create ${pass(created)}, move ${pass(moved)}, move out ${pass(out1)}, rename ${pass(renamed)}, " +
+                "survives reload ${pass(reloaded)}, delete keeps artworks ${pass(deleted && deletedReloaded)}\n")
+        } catch (t: Throwable) {
+            out.append("folders: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
+            Log.e(TAG, "folders", t)
+        } finally {
+            app.getSharedPreferences(name, android.content.Context.MODE_PRIVATE).edit().clear().commit()
         }
         return out.toString()
     }

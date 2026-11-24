@@ -121,6 +121,35 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
     val savingIds by store.saving.collectAsState()
     // A save that finishes after we came back (8K) refreshes its card.
     LaunchedEffect(store) { store.saved.collect { refresh++ } }
+    val pinContext = androidx.compose.ui.platform.LocalContext.current
+    val pins = remember { com.yume.app.data.PinStore(pinContext) }
+    var pinTick by remember { mutableIntStateOf(0) }
+    // Pinned projects first; the rest keep the store's (most recent) order.
+    val shownProjects = remember(projects, pinTick) { pins.order(projects) { it.id } }
+    // Folders: one level, kept beside the pins. [openFolder] is the folder
+    // being shown (null: the top of the gallery).
+    val folders = remember { com.yume.app.data.FolderStore(pinContext) }
+    var folderTick by remember { mutableIntStateOf(0) }
+    var openFolder by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+    val folderList = remember(folderTick) { folders.folders() }
+    val currentFolder = remember(openFolder, folderTick) { folders.folder(openFolder) }
+    LaunchedEffect(openFolder, currentFolder) { if (openFolder != null && currentFolder == null) openFolder = null }
+    val byFolder = remember(shownProjects, folderTick) { shownProjects.groupBy { folders.folderOf(it.id) } }
+    val inView = byFolder[openFolder].orEmpty()
+    var folderMenu by remember { mutableStateOf<com.yume.app.data.GalleryFolder?>(null) }
+    var folderRename by remember { mutableStateOf<com.yume.app.data.GalleryFolder?>(null) }
+    var newFolderFor by remember { mutableStateOf<ProjectMeta?>(null) }
+    var newFolder by remember { mutableStateOf(false) }
+    var moveTarget by remember { mutableStateOf<ProjectMeta?>(null) }
+    androidx.activity.compose.BackHandler(enabled = openFolder != null) { openFolder = null }
+    /** A new artwork made while a folder is open goes into it. */
+    fun fileNew(id: String?) {
+        val f = openFolder ?: return
+        if (id != null) {
+            folders.move(id, f)
+            folderTick++
+        }
+    }
     var backupTarget by remember { mutableStateOf<ProjectMeta?>(null) }
     val backupLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/zip")
@@ -158,13 +187,15 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                         val title = displayName(restoreContext, uri)
                             ?.substringBeforeLast('.')?.ifBlank { null } ?: "Imported PSD"
                         try {
-                            com.yume.app.data.Psd.importAsProject(store, tmp, title)
+                            val id = com.yume.app.data.Psd.importAsProject(store, tmp, title)
+                            withContext(Dispatchers.Main) { fileNew(id) }
                             "Opened “$title”"
                         } catch (e: com.yume.app.data.PsdException) {
                             e.message ?: "That PSD could not be opened"
                         }
                     } else {
                         val id = runCatching { tmp.inputStream().use { store.restoreProject(it) } }.getOrNull()
+                        if (id != null) withContext(Dispatchers.Main) { fileNew(id) }
                         if (id != null) "Project restored" else "That file is not a Yume backup or a PSD"
                     }
                 } finally {
@@ -175,11 +206,6 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
             refresh++
         }
     }
-    val pinContext = androidx.compose.ui.platform.LocalContext.current
-    val pins = remember { com.yume.app.data.PinStore(pinContext) }
-    var pinTick by remember { mutableIntStateOf(0) }
-    // Pinned projects first; the rest keep the store's (most recent) order.
-    val shownProjects = remember(projects, pinTick) { pins.order(projects) { it.id } }
 
     LaunchedEffect(refresh) {
         val list = withContext(Dispatchers.IO) { store.listProjects() }
@@ -201,20 +227,24 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
     val compact = isCompact()
     val edge = if (compact) 16.dp else 32.dp
     Box(Modifier.fillMaxSize().background(YumeColors.bg)) {
-        if (projects.isEmpty()) {
+        if (inView.isEmpty() && (openFolder != null || folderList.isEmpty())) {
             Box(
                 Modifier.fillMaxSize().padding(top = headerDp).navigationBarsPadding(),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = "Start your first painting",
+                        text = if (openFolder != null) "This folder is empty" else "Start your first painting",
                         style = MaterialTheme.typography.titleMedium,
                         color = YumeColors.text
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        text = if (compact) "Tap New to pick a size." else "Tap New canvas to pick a size.",
+                        text = when {
+                            openFolder != null -> "Move artworks here from their ⋯ menu, or make a new canvas."
+                            compact -> "Tap New to pick a size."
+                            else -> "Tap New canvas to pick a size."
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = YumeColors.textDim
                     )
@@ -232,8 +262,22 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     .navigationBarsPadding()
                     .then(GalleryEdge.blurModifier(headerPx.toFloat()))
             ) {
-                items(shownProjects.size, key = { shownProjects[it].id }) { idx ->
-                    val meta = shownProjects[idx]
+                // Folders first, at the top of the gallery only.
+                val shownFolders = if (openFolder == null) folderList else emptyList()
+                items(shownFolders.size, key = { "folder:" + shownFolders[it].id }) { idx ->
+                    val folder = shownFolders[idx]
+                    val inside = byFolder[folder.id].orEmpty()
+                    FolderCard(
+                        folder = folder,
+                        count = inside.size,
+                        thumbs = inside.take(4).mapNotNull { thumbs[it.id] },
+                        modifier = Modifier.animateItem(),
+                        onOpen = { openFolder = folder.id },
+                        onMenu = { folderMenu = folder }
+                    )
+                }
+                items(inView.size, key = { inView[it].id }) { idx ->
+                    val meta = inView[idx]
                     ProjectCard(
                         meta = meta,
                         thumb = thumbs[meta.id],
@@ -275,20 +319,20 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
             if (compact) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        androidx.compose.foundation.Image(
-                            bitmap = androidx.compose.ui.graphics.ImageBitmap.imageResource(com.yume.app.R.drawable.yume_banner),
-                            contentDescription = "Yume",
-                            filterQuality = androidx.compose.ui.graphics.FilterQuality.None,
-                            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-                            modifier = Modifier.height(30.dp)
-                        )
+                        if (currentFolder != null) {
+                            FolderTitle(currentFolder.name, compact = true) { openFolder = null }
+                        } else {
+                            androidx.compose.foundation.Image(
+                                bitmap = androidx.compose.ui.graphics.ImageBitmap.imageResource(com.yume.app.R.drawable.yume_banner),
+                                contentDescription = "Yume",
+                                filterQuality = androidx.compose.ui.graphics.FilterQuality.None,
+                                contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                                modifier = Modifier.height(30.dp)
+                            )
+                        }
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = galleryNote ?: when (projects.size) {
-                                0 -> "No artworks yet"
-                                1 -> "1 artwork"
-                                else -> "${projects.size} artworks"
-                            },
+                            text = galleryNote ?: countText(if (currentFolder != null) inView.size else projects.size),
                             style = MaterialTheme.typography.bodySmall,
                             color = YumeColors.textDim
                         )
@@ -310,25 +354,28 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     PressableRow(onClick = { restoreLauncher.launch(IMPORT_TYPES) }) {
                         Text("Import…", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
                     }
+                    if (openFolder == null) PressableRow(onClick = { newFolder = true }) {
+                        Text("Folder", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
+                    }
                 }
             } else
             Row(verticalAlignment = Alignment.Bottom) {
                 Column {
-                    androidx.compose.foundation.Image(
-                        bitmap = androidx.compose.ui.graphics.ImageBitmap.imageResource(com.yume.app.R.drawable.yume_banner),
-                        contentDescription = "Yume",
-                        // Pixel letters: scale without smoothing so the cells stay crisp.
-                        filterQuality = androidx.compose.ui.graphics.FilterQuality.None,
-                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-                        modifier = Modifier.height(40.dp)
-                    )
+                    if (currentFolder != null) {
+                        FolderTitle(currentFolder.name, compact = false) { openFolder = null }
+                    } else {
+                        androidx.compose.foundation.Image(
+                            bitmap = androidx.compose.ui.graphics.ImageBitmap.imageResource(com.yume.app.R.drawable.yume_banner),
+                            contentDescription = "Yume",
+                            // Pixel letters: scale without smoothing so the cells stay crisp.
+                            filterQuality = androidx.compose.ui.graphics.FilterQuality.None,
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                            modifier = Modifier.height(40.dp)
+                        )
+                    }
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        text = galleryNote ?: when (projects.size) {
-                            0 -> "No artworks yet"
-                            1 -> "1 artwork"
-                            else -> "${projects.size} artworks"
-                        },
+                        text = galleryNote ?: countText(if (currentFolder != null) inView.size else projects.size),
                         style = MaterialTheme.typography.bodyMedium,
                         color = YumeColors.textDim
                     )
@@ -358,6 +405,18 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     )
                 }
                 Spacer(Modifier.width(10.dp))
+                if (openFolder == null) {
+                    PressableRow(onClick = { newFolder = true }) {
+                        GlyphIcon(Glyph.Folder, YumeColors.textDim, size = 16.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "New folder",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = YumeColors.textDim
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                }
                 PressableRow(onClick = { showNewDialog = true }) {
                     GlyphIcon(Glyph.Plus, YumeColors.text, size = 16.dp)
                     Spacer(Modifier.width(8.dp))
@@ -398,7 +457,10 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                         withContext(Dispatchers.IO) { store.createProject(name, width, height, 0xFFFFFFFF.toInt()) }
                     }.getOrNull()
                     creating = false
-                    if (created != null) onOpenProject(created.id) else galleryNote = "Could not create that canvas"
+                    if (created != null) {
+                        fileNew(created.id)
+                        onOpenProject(created.id)
+                    } else galleryNote = "Could not create that canvas"
                 }
             }
         )
@@ -423,16 +485,25 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     backupTarget = meta
                     backupLauncher.launch(meta.name.replace(Regex("[^A-Za-z0-9 _-]"), "").ifBlank { "Yume" } + ".yume.zip")
                 }
+                MenuRow(Glyph.Folder, "Move to folder…") {
+                    menuTarget = null
+                    moveTarget = meta
+                }
                 MenuRow(Glyph.Copy, "Duplicate") {
                     menuTarget = null
                     scope.launch {
-                        withContext(Dispatchers.IO) { store.duplicateProject(meta.id) }
+                        val copy = withContext(Dispatchers.IO) { store.duplicateProject(meta.id) }
+                        // The copy sits beside the original.
+                        folders.folderOf(meta.id)?.let { f -> if (copy != null) folders.move(copy, f) }
+                        folderTick++
                         refresh++
                     }
                 }
                 MenuRow(Glyph.Trash, "Delete", danger = true) {
                     menuTarget = null
                     pins.setPinned(meta.id, false)
+                    folders.move(meta.id, null)
+                    folderTick++
                     scope.launch {
                         withContext(Dispatchers.IO) { store.deleteProject(meta.id) }
                         refresh++
@@ -440,6 +511,88 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                 }
             }
         }
+    }
+
+    moveTarget?.let { meta ->
+        val current = folders.folderOf(meta.id)
+        Dialog(onDismissRequest = { moveTarget = null }) {
+            PanelCard(Modifier.width(320.dp)) {
+                PanelHeader("Move “${meta.name}”", onClose = { moveTarget = null })
+                Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                    MenuRow(Glyph.Gallery, "No folder", trailing = if (current == null) "Here" else null) {
+                        moveTarget = null
+                        folders.move(meta.id, null)
+                        folderTick++
+                    }
+                    for (f in folderList) {
+                        MenuRow(Glyph.Folder, f.name, trailing = if (current == f.id) "Here" else null) {
+                            moveTarget = null
+                            folders.move(meta.id, f.id)
+                            folderTick++
+                        }
+                    }
+                }
+                MenuRow(Glyph.Plus, "New folder…") {
+                    moveTarget = null
+                    newFolderFor = meta
+                    newFolder = true
+                }
+            }
+        }
+    }
+
+    if (newFolder) {
+        NameDialog(
+            title = "New folder",
+            initial = "",
+            action = "Create",
+            onDismiss = { newFolder = false; newFolderFor = null },
+            onDone = { name ->
+                val f = folders.create(name)
+                newFolderFor?.let { folders.move(it.id, f.id) }
+                newFolder = false
+                newFolderFor = null
+                folderTick++
+            }
+        )
+    }
+
+    folderMenu?.let { folder ->
+        Dialog(onDismissRequest = { folderMenu = null }) {
+            PanelCard(Modifier.width(300.dp)) {
+                PanelHeader(folder.name, onClose = { folderMenu = null })
+                MenuRow(Glyph.Sliders, "Rename") {
+                    folderMenu = null
+                    folderRename = folder
+                }
+                MenuRow(Glyph.Trash, "Delete folder", danger = true) {
+                    folderMenu = null
+                    folders.delete(folder.id)
+                    folderTick++
+                    galleryNote = "Folder deleted; its artworks are back in the gallery"
+                }
+                Text(
+                    "Deleting a folder keeps its artworks.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YumeColors.textDim,
+                    modifier = Modifier.padding(start = 8.dp, top = 4.dp)
+                )
+            }
+        }
+    }
+
+    folderRename?.let { folder ->
+        NameDialog(
+            title = "Rename folder",
+            initial = folder.name,
+            action = "Save",
+            onDismiss = { folderRename = null },
+            onDone = { name ->
+                folders.rename(folder.id, name)
+                folderRename = null
+                folderTick++
+            }
+        )
     }
 
     renameTarget?.let { meta ->
@@ -475,6 +628,146 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     }
                 }
             }
+        }
+    }
+}
+
+private fun countText(n: Int) = when (n) {
+    0 -> "No artworks yet"
+    1 -> "1 artwork"
+    else -> "$n artworks"
+}
+
+/** Inside a folder: a way back to the whole gallery, then the folder's name. */
+@Composable
+private fun FolderTitle(name: String, compact: Boolean, onBack: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        PressableRow(onClick = onBack) {
+            Text("‹  Gallery", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = name,
+            style = if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+            color = YumeColors.text,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/** A name field with one button (new folder, rename folder). */
+@Composable
+private fun NameDialog(title: String, initial: String, action: String, onDismiss: () -> Unit, onDone: (String) -> Unit) {
+    var name by remember { mutableStateOf(initial) }
+    Dialog(onDismissRequest = onDismiss) {
+        PanelCard(Modifier.width(320.dp)) {
+            PanelHeader(title, onClose = onDismiss)
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                singleLine = true,
+                placeholder = { Text("Folder", color = YumeColors.textDim) },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(12.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(YumeColors.accent)
+                    .clickable { onDone(name) }
+                    .padding(vertical = 11.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(action, color = Color(0xFF1A1206), style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+}
+
+/** A folder in the gallery: up to four of its artworks, its name and count. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FolderCard(
+    folder: com.yume.app.data.GalleryFolder,
+    count: Int,
+    thumbs: List<ImageBitmap>,
+    onOpen: () -> Unit,
+    onMenu: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val source = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val scale = pressScale(source)
+    Column(modifier.graphicsLayer { scaleX = scale; scaleY = scale }) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .graphicsLayer {
+                    shadowElevation = 18.dp.toPx()
+                    shape = RoundedCornerShape(12.dp)
+                    clip = true
+                }
+                .background(YumeColors.panelAlt)
+                .combinedClickable(
+                    interactionSource = source,
+                    indication = null,
+                    onClick = onOpen,
+                    onLongClick = onMenu
+                )
+                .padding(8.dp)
+        ) {
+            if (thumbs.isEmpty()) {
+                GlyphIcon(Glyph.Folder, YumeColors.textDim, Modifier.align(Alignment.Center), size = 48.dp)
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for (r in 0..1) {
+                        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            for (c in 0..1) {
+                                val t = thumbs.getOrNull(r * 2 + c)
+                                Box(
+                                    Modifier
+                                        .weight(1f)
+                                        .fillMaxSize()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (t != null) Color.White else Color.White.copy(alpha = 0.04f))
+                                ) {
+                                    if (t != null) {
+                                        Image(
+                                            bitmap = t,
+                                            contentDescription = null,
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            GlyphIcon(Glyph.Folder, YumeColors.accent, size = 16.dp)
+            Spacer(Modifier.width(6.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = folder.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = YumeColors.text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = if (count == 1) "1 artwork" else "$count artworks",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YumeColors.textDim,
+                    maxLines = 1
+                )
+            }
+            YumeIconButton(Glyph.More, onMenu, size = 32.dp, iconSize = 15.dp, tint = YumeColors.textDim, label = "More")
         }
     }
 }
