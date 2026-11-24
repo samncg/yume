@@ -88,6 +88,9 @@ glass, and every gesture, button and default can be changed in Settings.
     remove parts. It keeps the result as a mask, erases, or makes a new layer.
   - Upscaling 2× to 4×: fast, detailed (AI), smooth, or crisp pixel art.
   - The reference window removes backgrounds with the same AI.
+  - On a Snapdragon 8 Gen 2 or newer they run on the NPU: a cut-out in about
+    a tenth of a second, upscaling 6 to 40 times faster than on the CPU. Each
+    model is prepared for the NPU once, in the background.
 - One **Effects** panel with tabs: Adjust, Effects, Manga, Frames, Materials
   and AI. Everything previews live on the canvas (pan and zoom freely)
   until you apply or cancel.

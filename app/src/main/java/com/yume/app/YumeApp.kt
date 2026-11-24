@@ -26,7 +26,12 @@ class YumeApp : Application() {
         com.yume.app.engine.TileCache.removeStale(cacheDir)
         MemoryBudget.diskRoot = cacheDir
         projectStore = ProjectStore(this)
-        com.yume.app.ai.AiDownloads.init(com.yume.app.ai.ModelStore(this))
+        com.yume.app.ai.Onnx.prepare(this)
+        com.yume.app.ai.ModelStore(this).let { models ->
+            com.yume.app.ai.AiDownloads.init(models)
+            // Installed models get their NPU copies made in the background.
+            com.yume.app.ai.Onnx.warmUp(com.yume.app.ai.AiModel.entries.filter { models.isReady(it) }.map { models.file(it) })
+        }
         presetStore = PresetStore(this)
         com.yume.app.data.AppSettings.init(this)
         com.yume.app.data.Customization.init(this)

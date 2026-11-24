@@ -78,6 +78,8 @@ class MainActivity : ComponentActivity() {
 
         // Debug-only golden-hash harness; never reachable in a release build.
         if (debuggable && intent?.getBooleanExtra("yume_harness", false) == true) {
+            // Measurements need the NPU to themselves.
+            com.yume.app.ai.Onnx.holdWarmUp = true
             YumeHarness.runAsync(
                 applicationContext as YumeApp,
                 intent?.getStringExtra("yume_harness_only")

@@ -1,5 +1,6 @@
 package com.yume.app.ui
 
+import androidx.compose.foundation.layout.padding
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -108,9 +109,40 @@ private fun AiHome(state: EditorUiState, session: DrawingSession, canUpscale: Bo
         }
         Spacer(Modifier.height(6.dp))
     }
+    if (com.yume.app.ai.Onnx.npuSupported) {
+        Spacer(Modifier.height(4.dp))
+        NpuRow()
+        Spacer(Modifier.height(6.dp))
+    }
     Text(
         "Models: IS-Net (Apache-2.0), Real-ESRGAN (BSD-3-Clause). Nothing you draw leaves the tablet.",
         style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim
+    )
+}
+
+/** The Snapdragon NPU: on or off, and what it is doing. */
+@Composable
+private fun NpuRow() {
+    var on by remember { mutableStateOf(com.yume.app.ai.Onnx.npuWanted && !com.yume.app.ai.Onnx.npuStruckOut) }
+    val preparing by com.yume.app.ai.Onnx.preparing.collectAsState()
+    ToggleRow(Glyph.Sparkle, "Use the NPU (much faster)", on) {
+        on = it
+        com.yume.app.ai.Onnx.setNpu(it)
+        if (it) {
+            val store = AiDownloads.storeOrNull()
+            if (store != null) com.yume.app.ai.Onnx.warmUp(AiModel.entries.filter { m -> store.isReady(m) }.map { m -> store.file(m) })
+        }
+    }
+    val model = preparing?.let { name -> AiModel.entries.firstOrNull { it.name == name } }
+    Text(
+        when {
+            model != null -> "Preparing ${model.label} for the NPU. This happens once per model and can take up to a minute."
+            com.yume.app.ai.Onnx.npuStruckOut -> "Turned off after a problem with the NPU. Turn it on to try again."
+            on -> "The tools run on this tablet's Snapdragon NPU, many times faster than the CPU."
+            else -> "The tools run on the CPU."
+        },
+        style = MaterialTheme.typography.bodySmall, color = YumeColors.textDim,
+        modifier = Modifier.padding(start = 8.dp)
     )
 }
 
@@ -349,7 +381,8 @@ private fun UpscalePage(state: EditorUiState, controller: EditorController, onOp
     if (model != null) {
         val stride = 104f
         val tiles = (kotlin.math.ceil(state.width / stride) * kotlin.math.ceil(state.height / stride) * state.layers.size.coerceAtLeast(1)).toInt()
-        val secs = tiles * UpscaleJob.secondsPerTile(opts.method)
+        val onNpu = remember(model) { AiDownloads.storeOrNull()?.let { com.yume.app.ai.Onnx.npuReady(it.file(model)) } == true }
+        val secs = tiles * UpscaleJob.secondsPerTile(opts.method, onNpu)
         Text(
             "Takes up to about ${formatDuration(secs)} (empty areas are quick)" +
                 if (opts.method == 1 && secs > 600) ". AI fast is much quicker." else ".",

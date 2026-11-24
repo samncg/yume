@@ -81,6 +81,18 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            // Qualcomm's NPU (HTP) libraries must be real files on disk: the
+            // NPU loads its half of them by path.
+            useLegacyPackaging = true
+            // Only the NPU backend is used: not the older DSP or the GPU one,
+            // and not the NPU code for 2021 chips (Snapdragon 888 / 8 Gen 1,
+            // HTP v68 / v69), which run the models on the CPU instead.
+            excludes += listOf(
+                "**/libQnnDsp*.so", "**/libQnnGpu.so",
+                "**/libQnnHtpV68*.so", "**/libQnnHtpV69*.so"
+            )
+        }
     }
 }
 
@@ -101,8 +113,11 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     // Liquid glass surfaces (Kyant0/AndroidLiquidGlass, Apache-2.0).
     implementation("io.github.kyant0:backdrop:1.0.6")
-    // On-device AI tools (background removal, upscaling): ONNX Runtime, MIT.
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
+    // On-device AI tools (background removal, upscaling): ONNX Runtime (MIT),
+    // built with Qualcomm's QNN so Snapdragon NPUs can run the models. It
+    // brings Qualcomm's QNN runtime (Qualcomm AI Hub Model License); other
+    // devices run the same models on the CPU.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android-qnn:1.29.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

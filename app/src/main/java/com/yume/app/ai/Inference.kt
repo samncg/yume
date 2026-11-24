@@ -10,46 +10,186 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** One ONNX Runtime session per model file, made on first use (CPU). */
+/**
+ * One ONNX Runtime session per model file, made on first use.
+ *
+ * On a Snapdragon with an NPU (Qualcomm HTP) the models run there, many
+ * times faster than on the CPU; anything the NPU cannot take runs on the
+ * CPU. The first time, a model is compiled for the NPU (seconds, up to a
+ * minute for the largest) and the result is cached beside the model, so it
+ * happens once per model (again after a system update). If the NPU ever
+ * takes the app down twice in a row, it is left off and the CPU is used.
+ */
 object Onnx {
     val env: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
     private val sessions = HashMap<String, OrtSession>()
     private val users = HashMap<String, Int>()
+
+    /** The app's native library folder (where Qualcomm's NPU libraries are). */
+    @Volatile var nativeLibDir: String? = null
+        private set
+    private var prefs: android.content.SharedPreferences? = null
+
+    /** This device has a Snapdragon NPU the app can reach. */
+    @Volatile var npuSupported = false
+        private set
+
+    /** Sessions on the NPU that have not finished a run yet (the crash guard watches them). */
+    private val unproven = HashSet<String>()
+
+    /** A model being compiled for the NPU (for the AI tab), or null. */
+    val preparing = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+
+    /**
+     * Before ONNX Runtime loads: the NPU finds its half of Qualcomm's
+     * libraries through ADSP_LIBRARY_PATH, which must include the app's own
+     * library folder. Also reads the crash guard.
+     */
+    fun prepare(context: android.content.Context) {
+        val p = context.getSharedPreferences("yume_ai", android.content.Context.MODE_PRIVATE)
+        prefs = p
+        // The app went down while the NPU was busy: one strike.
+        if (p.getBoolean(KEY_TRYING, false)) {
+            p.edit().putBoolean(KEY_TRYING, false).putInt(KEY_STRIKES, p.getInt(KEY_STRIKES, 0) + 1).apply()
+        }
+        val dir = context.applicationInfo.nativeLibraryDir ?: return
+        nativeLibDir = dir
+        npuSupported = File(dir, "libQnnHtp.so").exists() && File("/vendor/lib64/libcdsprpc.so").exists()
+        runCatching {
+            android.system.Os.setenv(
+                "ADSP_LIBRARY_PATH",
+                "$dir;/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/system/lib/rfsa/adsp;/system/vendor/lib/rfsa/adsp;/dsp",
+                true
+            )
+        }
+    }
+
+    /** The user's choice (on unless turned off). */
+    val npuWanted: Boolean get() = prefs?.getBoolean(KEY_NPU, true) ?: true
+
+    /** Left off by the crash guard. */
+    val npuStruckOut: Boolean get() = (prefs?.getInt(KEY_STRIKES, 0) ?: 0) >= 2
+
+    /** Models run on the NPU. */
+    val npuOn: Boolean get() = npuSupported && npuWanted && !npuStruckOut
+
+    /** Turning it back on also clears the crash guard. */
+    fun setNpu(on: Boolean) {
+        prefs?.edit()?.putBoolean(KEY_NPU, on)?.putInt(KEY_STRIKES, 0)?.apply()
+        // Off the caller's thread: a model may be compiling (holding the lock).
+        Thread({ closeIdle() }, "yume-npu-close").apply { isDaemon = true }.start()
+    }
+
+    /** The model's compiled NPU copy (named for this runtime and system build). */
+    fun npuCache(model: File): File {
+        val tag = "${env.version}-${android.os.Build.FINGERPRINT.hashCode().toUInt().toString(16)}"
+        return File(model.parentFile, "npu-$tag.onnx")
+    }
+
+    /** The model is compiled for the NPU and will run there. */
+    fun npuReady(model: File): Boolean = npuOn && npuCache(model).exists()
+
+    private fun setTrying(on: Boolean) {
+        prefs?.edit()?.putBoolean(KEY_TRYING, on)?.commit()
+    }
 
     /**
      * Runs [block] with the model's session. Sessions in use are never
      * closed (closing one mid-run would crash in native code).
      */
     fun <T> use(file: File, block: (OrtSession) -> T): T {
-        val s = synchronized(this) {
-            users[file.path] = (users[file.path] ?: 0) + 1
+        val (key, s) = synchronized(this) {
+            val k = file.path + if (npuOn) "#npu" else "#cpu"
+            users[k] = (users[k] ?: 0) + 1
             try {
-                session(file)
+                k to session(file, k)
             } catch (t: Throwable) {
-                users[file.path] = (users[file.path] ?: 1) - 1
+                users[k] = (users[k] ?: 1) - 1
                 throw t
             }
         }
+        val watch = synchronized(this) { key in unproven }
+        if (watch) setTrying(true)
         try {
-            return block(s)
+            val r = block(s)
+            if (watch) {
+                synchronized(this) { unproven.remove(key) }
+                setTrying(false)
+                // A first run went through: the NPU works here.
+                prefs?.edit()?.putInt(KEY_STRIKES, 0)?.apply()
+            }
+            return r
+        } catch (t: Throwable) {
+            if (watch) setTrying(false)
+            throw t
         } finally {
-            synchronized(this) { users[file.path] = (users[file.path] ?: 1) - 1 }
+            synchronized(this) { users[key] = (users[key] ?: 1) - 1 }
         }
     }
 
+    private fun baseOptions() = OrtSession.SessionOptions().apply {
+        setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+        // All cores (one tile at a time on all of them was measured fastest).
+        setIntraOpNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(1, 8))
+    }
+
+    private fun qnnOptions() = mapOf(
+        "backend_path" to "libQnnHtp.so",
+        "htp_performance_mode" to "burst",
+        "enable_htp_fp16_precision" to "1",
+        "htp_graph_finalization_optimization_mode" to "3"
+    )
+
     @Synchronized
-    private fun session(file: File): OrtSession {
-        sessions[file.path]?.let { return it }
-        val threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
-        // Plain CPU execution, all cores. (The XNNPACK provider aborted the
-        // process while loading IS-Net: a native abort cannot be caught.)
-        val options = OrtSession.SessionOptions().apply {
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            setIntraOpNumThreads(threads)
-        }
-        val s = env.createSession(file.path, options)
-        sessions[file.path] = s
+    private fun session(file: File, key: String): OrtSession {
+        sessions[key]?.let { return it }
+        val s = (if (key.endsWith("#npu")) npuSession(file) else null)
+            ?: env.createSession(file.path, baseOptions())
+        sessions[key] = s
+        if (key.endsWith("#npu")) unproven.add(key)
         return s
+    }
+
+    /** The model on the NPU: the cached compiled copy, or compiled now (and cached). */
+    private fun npuSession(file: File): OrtSession? {
+        val cache = npuCache(file)
+        setTrying(true)
+        try {
+            if (cache.exists()) {
+                val opts = baseOptions().apply { addQnn(qnnOptions()) }
+                return runCatching { env.createSession(cache.path, opts) }
+                    .onFailure { android.util.Log.w("YumeAI", "NPU cache unusable, compiling again", it); cache.delete() }
+                    .getOrNull() ?: compile(file, cache)
+            }
+            return compile(file, cache)
+        } finally {
+            setTrying(false)
+        }
+    }
+
+    private fun compile(file: File, cache: File): OrtSession? {
+        // Copies made for another runtime or system build are of no use now.
+        file.parentFile?.listFiles()?.forEach { if (it.name.startsWith("npu-") && it != cache) it.delete() }
+        val tmp = File(cache.path + ".part")
+        tmp.delete()
+        preparing.value = file.parentFile?.name
+        try {
+            val opts = baseOptions().apply {
+                addQnn(qnnOptions())
+                addConfigEntry("ep.context_enable", "1")
+                addConfigEntry("ep.context_file_path", tmp.path)
+            }
+            val t0 = android.os.SystemClock.uptimeMillis()
+            val s = runCatching { env.createSession(file.path, opts) }
+                .onFailure { android.util.Log.w("YumeAI", "NPU unavailable for ${file.name}", it) }
+                .getOrNull() ?: return null
+            android.util.Log.i("YumeAI", "compiled ${file.parentFile?.name} for the NPU in ${android.os.SystemClock.uptimeMillis() - t0} ms")
+            // No compiled copy: the NPU took nothing (it is not there after all).
+            if (tmp.exists()) tmp.renameTo(cache)
+            return s
+        } finally {
+            preparing.value = null
+        }
     }
 
     /** Frees the sessions nobody is using (their memory) after a tool closes. */
@@ -60,9 +200,42 @@ object Onnx {
             val e = it.next()
             if ((users[e.key] ?: 0) > 0) continue
             runCatching { e.value.close() }
+            unproven.remove(e.key)
             it.remove()
         }
     }
+
+    /**
+     * Compiles installed models for the NPU ahead of time, one after another
+     * on a background thread, so a tool's first use does not wait for it.
+     */
+    fun warmUp(files: List<File>) {
+        if (!npuOn) return
+        val todo = files.filter { it.exists() && !npuCache(it).exists() }
+        if (todo.isEmpty()) return
+        synchronized(this) { if (warming) return; warming = true }
+        Thread({
+            try {
+                // Let the app finish starting first.
+                Thread.sleep(8000)
+                for (f in todo) {
+                    if (!npuOn || holdWarmUp) break
+                    runCatching { use(f) { } }
+                }
+                closeIdle()
+            } finally {
+                synchronized(this) { warming = false }
+            }
+        }, "yume-npu-warm").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
+    }
+    private var warming = false
+
+    /** Test runs: no background compiling (it would skew their timings). */
+    @Volatile var holdWarmUp = false
+
+    private const val KEY_NPU = "npu"
+    private const val KEY_STRIKES = "npu_strikes"
+    private const val KEY_TRYING = "npu_trying"
 }
 
 /** Thrown when the user cancels a long AI job. */

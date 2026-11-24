@@ -38,6 +38,9 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <!-- Snapdragon NPU for the AI tools: its driver library is reachable
+             only when declared. Optional, so other devices still install. -->
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
     </application>
 
 </manifest>

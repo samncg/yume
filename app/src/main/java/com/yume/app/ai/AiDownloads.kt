@@ -52,6 +52,7 @@ object AiDownloads {
                     set(model) { it.copy(done = done, total = total) }
                 }
                 set(model) { it.copy(running = false, done = model.bytes, installed = it.installed + 1) }
+                Onnx.warmUp(listOf(s.file(model)))
             } catch (c: ModelStore.Cancelled) {
                 set(model) { it.copy(running = false, error = null) }
             } catch (t: Throwable) {

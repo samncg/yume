@@ -215,6 +215,10 @@ object YumeHarness {
                     out.append(scorePreviewDraw(false))
                 } else if (only == "ai") {
                     out.append(scoreAi(app))
+                } else if (only == "npuguard") {
+                    out.append(scoreNpuGuard(app))
+                } else if (only == "npubench") {
+                    out.append(scoreNpuBench(app))
                 } else if (only == "upbench") {
                     out.append(scoreUpBench(app))
                 } else if (only == "folders") {
@@ -9222,6 +9226,165 @@ object YumeHarness {
             Log.e(TAG, "folders", t)
         } finally {
             app.getSharedPreferences(name, android.content.Context.MODE_PRIVATE).edit().clear().commit()
+        }
+        return out.toString()
+    }
+
+    /**
+     * The NPU crash guard: the app going down while the NPU is busy is a
+     * strike; two in a row leave the NPU off; turning it on clears them. The
+     * user's own setting is put back afterwards.
+     */
+    private fun scoreNpuGuard(app: YumeApp): String {
+        fun pass(ok: Boolean) = if (ok) "PASS" else "FAIL"
+        val prefs = app.getSharedPreferences("yume_ai", android.content.Context.MODE_PRIVATE)
+        val saved = prefs.all.toMap()
+        val O = com.yume.app.ai.Onnx
+        return try {
+            prefs.edit().clear().commit()
+            O.prepare(app)
+            val startsOn = O.npuOn == O.npuSupported && !O.npuStruckOut
+            prefs.edit().putBoolean("npu_trying", true).commit()
+            O.prepare(app)
+            val oneStrike = !O.npuStruckOut && prefs.getInt("npu_strikes", 0) == 1 && !prefs.getBoolean("npu_trying", true)
+            prefs.edit().putBoolean("npu_trying", true).commit()
+            O.prepare(app)
+            val off = O.npuStruckOut && !O.npuOn
+            O.setNpu(true)
+            val back = !O.npuStruckOut && O.npuOn == O.npuSupported
+            O.setNpu(false)
+            val userOff = !O.npuOn && !O.npuWanted
+            "npu guard: starts on ${pass(startsOn)}, one strike stays on ${pass(oneStrike)}, two strikes turn it off ${pass(off)}, " +
+                "turning on clears ${pass(back)}, switch off ${pass(userOff)} (NPU on this device: ${O.npuSupported})\n"
+        } finally {
+            val e = prefs.edit().clear()
+            for ((k, v) in saved) when (v) {
+                is Boolean -> e.putBoolean(k, v)
+                is Int -> e.putInt(k, v)
+                is String -> e.putString(k, v)
+                is Long -> e.putLong(k, v)
+                is Float -> e.putFloat(k, v)
+            }
+            e.commit()
+        }
+    }
+
+    /**
+     * Each AI model on the CPU and on the Snapdragon NPU (QNN HTP, fp16):
+     * load time, time per run, and how far the NPU's output is from the CPU's.
+     */
+    private fun scoreNpuBench(app: YumeApp): String {
+        val out = StringBuilder()
+        val store = com.yume.app.ai.ModelStore(app)
+        val env = com.yume.app.ai.Onnx.env
+        for (model in com.yume.app.ai.AiModel.entries) {
+            if (!store.isReady(model)) { out.append("npubench ${model.name}: SKIP (not installed)\n"); continue }
+            val seg = model == com.yume.app.ai.AiModel.SegmentIllustration || model == com.yume.app.ai.AiModel.SegmentPhoto
+            val n = if (seg) 1024 else com.yume.app.ai.Upscaler.TILE
+            val rnd = java.util.Random(3)
+            // A smooth picture with edges and a little noise, like real art.
+            val input = FloatArray(3 * n * n) { i ->
+                val k = i % (n * n); val x = k % n; val y = k / n; val c = i / (n * n)
+                val v = 0.5f + 0.35f * kotlin.math.sin(x * 6.3f / n * 3f + c) * kotlin.math.cos(y * 6.3f / n * 2f) +
+                    (if (((x * 8 / n) + (y * 8 / n)) % 2 == 0) 0.08f else -0.08f) + rnd.nextFloat() * 0.02f
+                if (seg) v - 0.45f else v.coerceIn(0f, 1f)
+            }
+            val runs = when {
+                model == com.yume.app.ai.AiModel.UpscaleFast -> 12
+                seg -> 3
+                else -> 3
+            }
+            var ref: FloatArray? = null
+            val ctx = java.io.File(app.cacheDir, "npubench-${model.name}.onnx").also { it.delete() }
+            for (cfg in listOf("cpu", "npu", "npu-cached")) {
+                val opts = ai.onnxruntime.OrtSession.SessionOptions().apply {
+                    setOptimizationLevel(ai.onnxruntime.OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                    setIntraOpNumThreads(8)
+                    val q = mutableMapOf(
+                        "backend_path" to "libQnnHtp.so",
+                        "htp_performance_mode" to "burst",
+                        "enable_htp_fp16_precision" to "1",
+                        "htp_graph_finalization_optimization_mode" to "3"
+                    )
+                    if (cfg != "cpu") addQnn(q)
+                    // The first NPU load compiles and saves; the second loads that copy.
+                    if (cfg == "npu") {
+                        addConfigEntry("ep.context_enable", "1")
+                        addConfigEntry("ep.context_file_path", ctx.path)
+                    }
+                }
+                try {
+                    val t0 = android.os.SystemClock.uptimeMillis()
+                    val session = env.createSession(if (cfg == "npu-cached") ctx.path else store.file(model).path, opts)
+                    val load = android.os.SystemClock.uptimeMillis() - t0
+                    try {
+                        val name = session.inputNames.first()
+                        fun one(): FloatArray =
+                            ai.onnxruntime.OnnxTensor.createTensor(env, java.nio.FloatBuffer.wrap(input), longArrayOf(1, 3, n.toLong(), n.toLong())).use { x ->
+                                session.run(mapOf(name to x)).use { r ->
+                                    val fb = (r.get(0) as ai.onnxruntime.OnnxTensor).floatBuffer
+                                    FloatArray(fb.remaining()).also { fb.get(it) }
+                                }
+                            }
+                        val first = one()
+                        val t1 = android.os.SystemClock.uptimeMillis()
+                        repeat(runs) { one() }
+                        val ms = (android.os.SystemClock.uptimeMillis() - t1) / runs
+                        if (ref == null) ref = first
+                        val r0 = ref!!
+                        var worst = 0f
+                        var sum = 0.0
+                        for (i in r0.indices) { val d = kotlin.math.abs(r0[i] - first[i]); worst = maxOf(worst, d); sum += d }
+                        // In 0..255 levels (the outputs are 0..1).
+                        out.append("npubench ${model.name} $cfg: load $load ms, $ms ms/run, vs cpu max ${"%.1f".format(worst * 255)} mean ${"%.2f".format(sum / r0.size * 255)} levels\n")
+                    } finally {
+                        session.close()
+                    }
+                } catch (t: Throwable) {
+                    out.append("npubench ${model.name} $cfg: FAIL ${t.javaClass.simpleName}: ${t.message?.take(200)}\n")
+                } finally {
+                    opts.close()
+                }
+            }
+        }
+        // Whole jobs through the app's own code: a 4x upscale of a detailed
+        // 520 x 520 picture (25 model tiles) and a background cut-out.
+        val w = 520
+        val h = 520
+        val pic = IntArray(w * h) { i ->
+            val x = i % w; val y = i / w
+            val r = (128 + 110 * kotlin.math.sin(x * 0.05) * kotlin.math.cos(y * 0.031)).toInt().coerceIn(0, 255)
+            val g = (128 + 110 * kotlin.math.sin(y * 0.07 + 1)).toInt().coerceIn(0, 255)
+            val bb = ((x xor y) and 255)
+            (0xFF shl 24) or (r shl 16) or (g shl 8) or bb
+        }
+        val wasOn = com.yume.app.ai.Onnx.npuWanted
+        try {
+            for (npu in listOf(false, true)) {
+                com.yume.app.ai.Onnx.setNpu(npu)
+                com.yume.app.ai.Onnx.closeIdle()
+                val tag = if (npu) "npu" else "cpu"
+                for (model in listOf(com.yume.app.ai.AiModel.UpscaleFast, com.yume.app.ai.AiModel.UpscaleDetailed)) {
+                    if (!store.isReady(model)) continue
+                    val up = com.yume.app.ai.Upscaler(store.file(model))
+                    up.upscale4(IntArray(16 * 16) { 0xFF808080.toInt() }, 16, 16) { _, _ -> } // load
+                    val t0 = android.os.SystemClock.uptimeMillis()
+                    up.upscale4(pic, w, h) { _, _ -> }
+                    out.append("npujob upscale ${model.name} $tag: ${android.os.SystemClock.uptimeMillis() - t0} ms for 520x520 -> 2080x2080\n")
+                }
+                for (model in listOf(com.yume.app.ai.AiModel.SegmentIllustration, com.yume.app.ai.AiModel.SegmentPhoto)) {
+                    if (!store.isReady(model)) continue
+                    val seg = com.yume.app.ai.Segmenter(store.file(model))
+                    val grid = IntArray(1024 * 1024) { pic[(it / 1024 % h) * w + (it % 1024 % w)] }
+                    seg.matte(grid) // load
+                    val t0 = android.os.SystemClock.uptimeMillis()
+                    seg.matte(grid)
+                    out.append("npujob cutout ${model.name} $tag: ${android.os.SystemClock.uptimeMillis() - t0} ms\n")
+                }
+            }
+        } finally {
+            com.yume.app.ai.Onnx.setNpu(wasOn)
+            com.yume.app.ai.Onnx.closeIdle()
         }
         return out.toString()
     }

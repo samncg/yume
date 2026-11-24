@@ -145,10 +145,13 @@ class UpscaleJob(
             return per * snapshot.layers.size
         }
 
-        /** Rough seconds per tile on this tablet class (measured). */
-        fun secondsPerTile(method: Int): Float = when (method) {
-            0 -> 0.18f
-            1 -> 3f
+        /**
+         * Rough seconds per tile (measured on a Snapdragon 8 Elite): on the
+         * CPU, or on the NPU ([npu]), which is 25 to 65 times faster.
+         */
+        fun secondsPerTile(method: Int, npu: Boolean = false): Float = when (method) {
+            0 -> if (npu) 0.012f else 0.18f
+            1 -> if (npu) 0.06f else 3f
             else -> 0f
         }
     }
