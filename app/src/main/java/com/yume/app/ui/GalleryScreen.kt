@@ -1,6 +1,18 @@
 package com.yume.app.ui
 
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.zIndex
 
 import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.unit.sp
@@ -142,6 +154,20 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
     var newFolder by remember { mutableStateOf(false) }
     var moveTarget by remember { mutableStateOf<ProjectMeta?>(null) }
     androidx.activity.compose.BackHandler(enabled = openFolder != null) { openFolder = null }
+    // Arranging: a long press lifts a card (see [GalleryDrag]).
+    val drag = remember { GalleryDrag() }
+    val gridState = androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState()
+    val metaById = remember(projects) { projects.associateBy { it.id } }
+    val folderById = remember(folderList) { folderList.associateBy { it.id } }
+    // The screen as arranged: folders and artworks in the order you dragged
+    // them into (before any drag, folders first, then pinned, then recent).
+    val arranged = remember(shownProjects, folderTick, openFolder, pinTick) {
+        val default = (if (openFolder == null) folderList.map { com.yume.app.data.FolderStore.folderKey(it.id) } else emptyList()) + inView.map { it.id }
+        com.yume.app.data.FolderStore.arrange(default, folders.order(openFolder)) { pins.isPinned(it) }
+    }
+    // While a card is dragged, the order it is being dragged into.
+    val keys = drag.working ?: arranged
+    var backBounds by remember { mutableStateOf<Rect?>(null) }
     /** A new artwork made while a folder is open goes into it. */
     fun fileNew(id: String?) {
         val f = openFolder ?: return
@@ -226,8 +252,96 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
     // Phones: two columns, narrower margins, and the header on two rows.
     val compact = isCompact()
     val edge = if (compact) 16.dp else 32.dp
+    var gridBounds by remember { mutableStateOf<Rect?>(null) }
+    /** The lifted card was let go: arrange, or group, or move in or out. */
+    fun dropDragged() {
+        val k = drag.key ?: return
+        val list = drag.working ?: arranged
+        val m = drag.mergeKey
+        when {
+            drag.overBack && !com.yume.app.data.FolderStore.isFolderKey(k) -> {
+                folders.takeOut(k)
+                galleryNote = "Moved out of the folder"
+            }
+            m != null && com.yume.app.data.FolderStore.isFolderKey(m) -> {
+                val fid = com.yume.app.data.FolderStore.folderIdOf(m)
+                folders.drop(k, fid, list)
+                galleryNote = "Moved into “${folderById[fid]?.name ?: "the folder"}”"
+            }
+            m != null -> {
+                val f = folders.group(m, k, list)
+                galleryNote = "Made “${f.name}”. Long-press it to rename"
+            }
+            // Only a real change arranges the screen (one never arranged
+            // keeps showing the most recent first).
+            list != arranged -> folders.setOrder(openFolder, list)
+        }
+        drag.reset()
+        folderTick++
+    }
+    // While a card is lifted: what it is over (another card's middle to
+    // group, its edge to take its place, the Gallery button to move out),
+    // and the grid scrolls when the card nears the top or bottom.
+    LaunchedEffect(drag.key) {
+        val k = drag.key ?: return@LaunchedEffect
+        val zone = with(density) { 72.dp.toPx() }
+        while (drag.key == k) {
+            val f = drag.finger
+            val list = drag.working ?: break
+            drag.overBack = openFolder != null && !com.yume.app.data.FolderStore.isFolderKey(k) && backBounds?.contains(f) == true
+            val hit = if (drag.overBack || f.y < headerPx) null
+                else list.firstOrNull { it != k && drag.bounds[it]?.contains(f) == true }
+            if (hit == null) {
+                drag.hover = null
+                drag.mergeKey = null
+                drag.edgeHover = null
+                if (drag.bounds[k]?.contains(f) == true) drag.lastSwap = null
+            } else {
+                val b = drag.bounds.getValue(hit)
+                val middle = Rect(b.left + b.width * 0.22f, b.top + b.height * 0.12f, b.right - b.width * 0.22f, b.top + b.height * 0.68f)
+                val canGroup = !com.yume.app.data.FolderStore.isFolderKey(k) && (com.yume.app.data.FolderStore.isFolderKey(hit) || openFolder == null)
+                val now = android.os.SystemClock.uptimeMillis()
+                if (canGroup && middle.contains(f)) {
+                    drag.edgeHover = null
+                    if (drag.hover != hit) {
+                        drag.hover = hit
+                        drag.hoverSince = now
+                    }
+                    // A short hold first, so passing over a card does not group.
+                    drag.mergeKey = if (now - drag.hoverSince >= 280) hit else null
+                } else {
+                    drag.hover = null
+                    drag.mergeKey = null
+                    // Taking a card's place needs a moment over its edge, so
+                    // passing through the edge on the way to its middle (to
+                    // group) moves nothing.
+                    if (hit != drag.lastSwap) {
+                        if (drag.edgeHover != hit) {
+                            drag.edgeHover = hit
+                            drag.edgeSince = now
+                        } else if (now - drag.edgeSince >= (if (canGroup) 260 else 120)) {
+                            drag.working = com.yume.app.data.FolderStore.moved(list, k, list.indexOf(hit))
+                            drag.lastSwap = hit
+                            drag.edgeHover = null
+                        }
+                    }
+                }
+            }
+            gridBounds?.let { g ->
+                val top = g.top + headerPx + zone
+                val bottom = g.bottom - zone
+                val speed = when {
+                    f.y < top -> -((top - f.y) / zone).coerceAtMost(1f) * 26f
+                    f.y > bottom -> ((f.y - bottom) / zone).coerceAtMost(1f) * 26f
+                    else -> 0f
+                }
+                if (speed != 0f) gridState.dispatchRawDelta(speed)
+            }
+            androidx.compose.runtime.withFrameMillis { }
+        }
+    }
     Box(Modifier.fillMaxSize().background(YumeColors.bg)) {
-        if (inView.isEmpty() && (openFolder != null || folderList.isEmpty())) {
+        if (keys.isEmpty()) {
             Box(
                 Modifier.fillMaxSize().padding(top = headerDp).navigationBarsPadding(),
                 contentAlignment = Alignment.Center
@@ -241,7 +355,7 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                     Spacer(Modifier.height(6.dp))
                     Text(
                         text = when {
-                            openFolder != null -> "Move artworks here from their ⋯ menu, or make a new canvas."
+                            openFolder != null -> "Drag artworks onto this folder, or make a new canvas."
                             compact -> "Tap New to pick a size."
                             else -> "Tap New canvas to pick a size."
                         },
@@ -254,40 +368,85 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
             // Staggered, so every thumbnail keeps its document's shape.
             androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid(
                 columns = androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells.Adaptive(if (compact) 140.dp else 230.dp),
+                state = gridState,
                 contentPadding = PaddingValues(start = edge, end = edge, top = headerDp + 20.dp, bottom = 40.dp),
                 horizontalArrangement = Arrangement.spacedBy(if (compact) 14.dp else 28.dp),
                 verticalItemSpacing = if (compact) 20.dp else 30.dp,
                 modifier = Modifier
                     .fillMaxSize()
                     .navigationBarsPadding()
+                    .onGloballyPositioned { c -> gridBounds = Rect(c.positionInRoot(), Size(c.size.width.toFloat(), c.size.height.toFloat())) }
                     .then(GalleryEdge.blurModifier(headerPx.toFloat()))
             ) {
-                // Folders first, at the top of the gallery only.
-                val shownFolders = if (openFolder == null) folderList else emptyList()
-                items(shownFolders.size, key = { "folder:" + shownFolders[it].id }) { idx ->
-                    val folder = shownFolders[idx]
-                    val inside = byFolder[folder.id].orEmpty()
-                    FolderCard(
-                        folder = folder,
-                        count = inside.size,
-                        thumbs = inside.take(4).mapNotNull { thumbs[it.id] },
-                        modifier = Modifier.animateItem(),
-                        onOpen = { openFolder = folder.id },
-                        onMenu = { folderMenu = folder }
+                items(keys.size, key = { keys[it] }) { idx ->
+                    val key = keys[idx]
+                    val lifted = drag.key == key
+                    val target = drag.mergeKey == key
+                    DisposableEffect(key) { onDispose { drag.bounds.remove(key) } }
+                    if (lifted) {
+                        // The lifted card stays alive while the grid scrolls under it.
+                        val pinnable = androidx.compose.ui.layout.LocalPinnableContainer.current
+                        DisposableEffect(Unit) {
+                            val handle = pinnable?.pin()
+                            onDispose { handle?.release() }
+                        }
+                    }
+                    val itemModifier = (if (lifted) Modifier else Modifier.animateItem())
+                        .onGloballyPositioned { c ->
+                            val at = c.positionInRoot()
+                            drag.bounds[key] = Rect(at, Size(c.size.width.toFloat(), c.size.height.toFloat()))
+                            if (lifted) drag.layoutTopLeft = at
+                        }
+                        .zIndex(if (lifted) 1f else 0f)
+                        .graphicsLayer {
+                            if (lifted) {
+                                // Under the finger, wherever the card's place in the grid is now.
+                                translationX = drag.finger.x - drag.grab.x - drag.layoutTopLeft.x
+                                translationY = drag.finger.y - drag.grab.y - drag.layoutTopLeft.y
+                                scaleX = 1.05f
+                                scaleY = 1.05f
+                                alpha = 0.92f
+                            } else if (target) {
+                                scaleX = 1.07f
+                                scaleY = 1.07f
+                            }
+                        }
+                    val folder = if (com.yume.app.data.FolderStore.isFolderKey(key)) folderById[com.yume.app.data.FolderStore.folderIdOf(key)] else null
+                    val meta = if (folder == null) metaById[key] else null
+                    val lift = rememberLift(
+                        key = key,
+                        drag = drag,
+                        onLift = { at -> drag.begin(key, at, keys) },
+                        onTap = { if (folder != null) openFolder = folder.id else if (meta != null) onOpenProject(meta.id) },
+                        onMenu = { if (folder != null) folderMenu = folder else if (meta != null) menuTarget = meta },
+                        onDrop = { dropDragged() }
                     )
-                }
-                items(inView.size, key = { inView[it].id }) { idx ->
-                    val meta = inView[idx]
-                    ProjectCard(
-                        meta = meta,
-                        thumb = thumbs[meta.id],
-                        saving = meta.id in savingIds,
-                        pinned = pins.isPinned(meta.id).also { pinTick },
-                        // Pinning slides cards to their new places.
-                        modifier = Modifier.animateItem(),
-                        onOpen = { onOpenProject(meta.id) },
-                        onMenu = { menuTarget = meta }
-                    )
+                    if (folder != null) {
+                        val inside = byFolder[folder.id].orEmpty()
+                        val order = com.yume.app.data.FolderStore.arrange(inside.map { it.id }, folders.order(folder.id)) { pins.isPinned(it) }
+                        FolderCard(
+                            folder = folder,
+                            count = inside.size,
+                            thumbs = order.take(4).mapNotNull { thumbs[it] },
+                            modifier = itemModifier,
+                            gesture = lift.modifier,
+                            pressed = lift.pressed,
+                            target = target,
+                            onMenu = { folderMenu = folder }
+                        )
+                    } else if (meta != null) {
+                        ProjectCard(
+                            meta = meta,
+                            thumb = thumbs[meta.id],
+                            saving = meta.id in savingIds,
+                            pinned = pins.isPinned(meta.id).also { pinTick },
+                            modifier = itemModifier,
+                            gesture = lift.modifier,
+                            pressed = lift.pressed,
+                            target = target,
+                            onMenu = { menuTarget = meta }
+                        )
+                    }
                 }
             }
         }
@@ -320,7 +479,7 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         if (currentFolder != null) {
-                            FolderTitle(currentFolder.name, compact = true) { openFolder = null }
+                            FolderTitle(currentFolder.name, compact = true, highlight = drag.overBack, onBackBounds = { backBounds = it }) { openFolder = null }
                         } else {
                             androidx.compose.foundation.Image(
                                 bitmap = androidx.compose.ui.graphics.ImageBitmap.imageResource(com.yume.app.R.drawable.yume_banner),
@@ -362,7 +521,7 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
             Row(verticalAlignment = Alignment.Bottom) {
                 Column {
                     if (currentFolder != null) {
-                        FolderTitle(currentFolder.name, compact = false) { openFolder = null }
+                        FolderTitle(currentFolder.name, compact = false, highlight = drag.overBack, onBackBounds = { backBounds = it }) { openFolder = null }
                     } else {
                         androidx.compose.foundation.Image(
                             bitmap = androidx.compose.ui.graphics.ImageBitmap.imageResource(com.yume.app.R.drawable.yume_banner),
@@ -474,6 +633,13 @@ fun GalleryScreen(store: ProjectStore, onOpenProject: (String) -> Unit) {
                 MenuRow(Glyph.Pin, if (isPinned) "Unpin" else "Pin to top") {
                     menuTarget = null
                     pins.setPinned(meta.id, !isPinned)
+                    if (!isPinned) {
+                        // An arranged screen: pinning puts it first.
+                        val where = folders.folderOf(meta.id)
+                        val o = folders.order(where)
+                        if (o.isNotEmpty()) folders.setOrder(where, listOf(meta.id) + (o - meta.id))
+                        folderTick++
+                    }
                     pinTick++
                 }
                 MenuRow(Glyph.Sliders, "Rename") {
@@ -640,10 +806,28 @@ private fun countText(n: Int) = when (n) {
 
 /** Inside a folder: a way back to the whole gallery, then the folder's name. */
 @Composable
-private fun FolderTitle(name: String, compact: Boolean, onBack: () -> Unit) {
+private fun FolderTitle(
+    name: String,
+    compact: Boolean,
+    highlight: Boolean = false,
+    onBackBounds: (Rect) -> Unit = {},
+    onBack: () -> Unit
+) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        PressableRow(onClick = onBack) {
-            Text("‹  Gallery", style = MaterialTheme.typography.labelLarge, color = YumeColors.textDim)
+        // Also where an artwork is dropped to take it out of the folder.
+        Box(
+            Modifier
+                .onGloballyPositioned { c -> onBackBounds(Rect(c.positionInRoot(), Size(c.size.width.toFloat(), c.size.height.toFloat()))) }
+                .clip(RoundedCornerShape(50))
+                .background(if (highlight) YumeColors.accent.copy(alpha = 0.45f) else Color.Transparent)
+        ) {
+            PressableRow(onClick = onBack) {
+                Text(
+                    if (highlight) "‹  Move out" else "‹  Gallery",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (highlight) YumeColors.text else YumeColors.textDim
+                )
+            }
         }
         Spacer(Modifier.width(12.dp))
         Text(
@@ -693,12 +877,13 @@ private fun FolderCard(
     folder: com.yume.app.data.GalleryFolder,
     count: Int,
     thumbs: List<ImageBitmap>,
-    onOpen: () -> Unit,
     onMenu: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    gesture: Modifier = Modifier,
+    pressed: Boolean = false,
+    target: Boolean = false
 ) {
-    val source = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-    val scale = pressScale(source)
+    val scale = pressScaleOf(pressed)
     Column(modifier.graphicsLayer { scaleX = scale; scaleY = scale }) {
         Box(
             Modifier
@@ -709,13 +894,8 @@ private fun FolderCard(
                     shape = RoundedCornerShape(12.dp)
                     clip = true
                 }
-                .background(YumeColors.panelAlt)
-                .combinedClickable(
-                    interactionSource = source,
-                    indication = null,
-                    onClick = onOpen,
-                    onLongClick = onMenu
-                )
+                .background(if (target) YumeColors.accent.copy(alpha = 0.35f) else YumeColors.panelAlt)
+                .then(gesture)
                 .padding(8.dp)
         ) {
             if (thumbs.isEmpty()) {
@@ -772,6 +952,144 @@ private fun FolderCard(
     }
 }
 
+/**
+ * A card being dragged in the gallery. [bounds] are where each card is laid
+ * out (window px, before the lift's own offset); [working] is the order the
+ * lifted card is being dragged into.
+ */
+private class GalleryDrag {
+    var key by mutableStateOf<String?>(null)
+    var working by mutableStateOf<List<String>?>(null)
+    var finger by mutableStateOf(Offset.Zero)
+    var layoutTopLeft by mutableStateOf(Offset.Zero)
+    var mergeKey by mutableStateOf<String?>(null)
+    var overBack by mutableStateOf(false)
+    /** Where in the card the finger took hold. */
+    var grab = Offset.Zero
+    var hover: String? = null
+    var hoverSince = 0L
+    var edgeHover: String? = null
+    var edgeSince = 0L
+    /** The card last swapped with: not again until the finger leaves it. */
+    var lastSwap: String? = null
+    val bounds = HashMap<String, Rect>()
+
+    fun begin(k: String, at: Offset, keys: List<String>) {
+        layoutTopLeft = bounds[k]?.topLeft ?: at
+        grab = at - layoutTopLeft
+        finger = at
+        working = keys
+        hover = null
+        edgeHover = null
+        lastSwap = null
+        mergeKey = null
+        overBack = false
+        key = k
+    }
+
+    fun reset() {
+        key = null
+        working = null
+        mergeKey = null
+        overBack = false
+        hover = null
+        edgeHover = null
+        lastSwap = null
+    }
+}
+
+private class Lift(val modifier: Modifier, val pressed: Boolean)
+
+private enum class PressEnd { Tap, Cancel }
+
+/**
+ * A card's touch: a tap opens it; a long press lifts it (with a tick) to be
+ * dragged, and letting go without moving opens its menu. A touch that moves
+ * before the long press is the grid's scroll.
+ */
+@Composable
+private fun rememberLift(
+    key: String,
+    drag: GalleryDrag,
+    onLift: (Offset) -> Unit,
+    onTap: () -> Unit,
+    onMenu: () -> Unit,
+    onDrop: () -> Unit
+): Lift {
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    var pressed by remember { mutableStateOf(false) }
+    val holder = remember { arrayOfNulls<LayoutCoordinates>(1) }
+    val lift = rememberUpdatedState(onLift)
+    val tap = rememberUpdatedState(onTap)
+    val menu = rememberUpdatedState(onMenu)
+    val drop = rememberUpdatedState(onDrop)
+    val modifier = Modifier
+        .onGloballyPositioned { holder[0] = it }
+        .pointerInput(key) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = true)
+                if (drag.key != null) return@awaitEachGesture
+                pressed = true
+                val end: PressEnd? = try {
+                    withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                        var r = PressEnd.Cancel
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            if (ev.changes.count { it.pressed } > 1) break
+                            val c = ev.changes.firstOrNull { it.id == down.id } ?: break
+                            if (c.isConsumed) break
+                            if (!c.pressed) {
+                                r = PressEnd.Tap
+                                break
+                            }
+                            if ((c.position - down.position).getDistance() > viewConfiguration.touchSlop) break
+                        }
+                        r
+                    }
+                } finally {
+                    pressed = false
+                }
+                when (end) {
+                    PressEnd.Tap -> tap.value()
+                    PressEnd.Cancel -> Unit
+                    null -> {
+                        val start = holder[0]?.localToRoot(down.position) ?: return@awaitEachGesture
+                        haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                        lift.value(start)
+                        var moved = false
+                        try {
+                            while (true) {
+                                val ev = awaitPointerEvent()
+                                val c = ev.changes.firstOrNull { it.id == down.id } ?: break
+                                c.consume()
+                                if (!c.pressed) break
+                                val at = holder[0]?.localToRoot(c.position) ?: continue
+                                if (!moved && (at - start).getDistance() > viewConfiguration.touchSlop) moved = true
+                                drag.finger = at
+                            }
+                        } finally {
+                            if (moved) drop.value() else {
+                                drag.reset()
+                                menu.value()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    return Lift(modifier, pressed)
+}
+
+@Composable
+private fun pressScaleOf(pressed: Boolean): Float {
+    val scale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 600f),
+        label = "press"
+    )
+    return scale
+}
+
 /** Shrinks a little on touch-down and springs back: immediate feedback. */
 @Composable
 private fun pressScale(source: androidx.compose.foundation.interaction.MutableInteractionSource): Float {
@@ -805,14 +1123,15 @@ private fun PressableRow(onClick: () -> Unit, content: @Composable androidx.comp
 private fun ProjectCard(
     meta: ProjectMeta,
     thumb: ImageBitmap?,
-    onOpen: () -> Unit,
     onMenu: () -> Unit,
     pinned: Boolean = false,
     modifier: Modifier = Modifier,
-    saving: Boolean = false
+    saving: Boolean = false,
+    gesture: Modifier = Modifier,
+    pressed: Boolean = false,
+    target: Boolean = false
 ) {
-    val source = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-    val scale = pressScale(source)
+    val scale = pressScaleOf(pressed)
     // The card is the document's own shape (clamped so extreme strips stay usable).
     val ratio = (meta.width.toFloat() / meta.height.coerceAtLeast(1)).coerceIn(0.45f, 2.4f)
     Column(modifier.graphicsLayer { scaleX = scale; scaleY = scale }) {
@@ -826,13 +1145,12 @@ private fun ProjectCard(
                     clip = true
                 }
                 .background(YumeColors.panelAlt)
-                .combinedClickable(
-                    interactionSource = source,
-                    indication = null,
-                    onClick = onOpen,
-                    onLongClick = onMenu
-                )
+                .then(gesture)
         ) {
+            if (target) {
+                // Held over: let go to put both in a folder.
+                Box(Modifier.fillMaxSize().background(YumeColors.accent.copy(alpha = 0.30f)).zIndex(1f))
+            }
             if (thumb != null) {
                 Image(
                     bitmap = thumb,

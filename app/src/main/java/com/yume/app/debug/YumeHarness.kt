@@ -9180,6 +9180,43 @@ object YumeHarness {
             val deletedReloaded = h.folders().size == 1 && h.folderOf("p1") == null
             out.append("folders: create ${pass(created)}, move ${pass(moved)}, move out ${pass(out1)}, rename ${pass(renamed)}, " +
                 "survives reload ${pass(reloaded)}, delete keeps artworks ${pass(deleted && deletedReloaded)}\n")
+            // Arranging (dragging in the gallery).
+            run {
+                val FS = com.yume.app.data.FolderStore
+                h.setOrder(null, emptyList())
+                val pinned = setOf("p9")
+                // Never arranged: the default order as it is.
+                val def = listOf("f:x", "p9", "p5", "p4", "p3")
+                val untouched = FS.arrange(def, emptyList()) { it in pinned } == def
+                // Arranged: saved order kept; something new goes after the pinned lead.
+                val saved = listOf("p9", "p3", "f:x", "p4", "p5", "gone")
+                val withNew = FS.arrange(listOf("p6") + def, saved) { it in pinned }
+                val arrangedOk = withNew == listOf("p9", "p6", "p3", "f:x", "p4", "p5")
+                val movedOk = FS.moved(listOf("a", "b", "c", "d"), "a", 2) == listOf("b", "c", "a", "d") &&
+                    FS.moved(listOf("a", "b", "c", "d"), "d", 0) == listOf("d", "a", "b", "c")
+                // Dropping one artwork on another: a folder of both in the target's place.
+                val top = listOf("q1", "q2", "q3", "q4")
+                val g = h.group("q2", "q4", top)
+                val grouped = h.folderOf("q2") == g.id && h.folderOf("q4") == g.id &&
+                    h.order(null) == listOf("q1", FS.folderKey(g.id), "q3") && h.order(g.id) == listOf("q2", "q4")
+                val g2 = h.group("q1", "q3", h.order(null))
+                val named = g.name != g2.name
+                // Onto a folder: in, last.
+                h.setOrder(null, listOf("q5", FS.folderKey(g.id), FS.folderKey(g2.id)))
+                h.drop("q5", g.id, h.order(null))
+                val dropped = h.folderOf("q5") == g.id && h.order(g.id) == listOf("q2", "q4", "q5") && "q5" !in h.order(null)
+                // Out of a folder: gone from it, and new at the top.
+                h.takeOut("q4")
+                val tookOut = h.folderOf("q4") == null && h.order(g.id) == listOf("q2", "q5")
+                // The order survives a reload; deleting a folder drops its key.
+                val r = com.yume.app.data.FolderStore(app, name)
+                val orderReloaded = r.order(g.id) == listOf("q2", "q5") && r.order(null) == h.order(null)
+                r.delete(g.id)
+                val delOk = FS.folderKey(g.id) !in r.order(null) && r.order(g.id).isEmpty() && r.folderOf("q2") == null
+                out.append("folders arrange: untouched ${pass(untouched)}, saved order + new near top ${pass(arrangedOk)}, move ${pass(movedOk)}, " +
+                    "group two ${pass(grouped)}, unique names ${pass(named)}, drop into folder ${pass(dropped)}, take out ${pass(tookOut)}, " +
+                    "survives reload ${pass(orderReloaded)}, delete folder ${pass(delOk)}\n")
+            }
         } catch (t: Throwable) {
             out.append("folders: FAIL (${t.javaClass.simpleName}: ${t.message})\n")
             Log.e(TAG, "folders", t)
