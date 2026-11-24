@@ -380,7 +380,9 @@ fun RailSlider(
     valueText: String,
     modifier: Modifier = Modifier,
     bubbleOnRight: Boolean = true,
-    onDragEnd: () -> Unit = {}
+    onDragEnd: () -> Unit = {},
+    /** Shown in the value bubble while dragging (an example stroke). */
+    sample: (@Composable () -> Unit)? = null
 ) {
     val current = androidx.compose.runtime.rememberUpdatedState(fraction)
     val change = androidx.compose.runtime.rememberUpdatedState(onFraction)
@@ -478,6 +480,10 @@ fun RailSlider(
                 ) {
                     Text(label, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, color = YumeColors.textDim)
                     Text(valueText, style = androidx.compose.material3.MaterialTheme.typography.titleMedium, color = YumeColors.text)
+                    if (sample != null) {
+                        Spacer(Modifier.height(6.dp))
+                        sample()
+                    }
                 }
             }
         }

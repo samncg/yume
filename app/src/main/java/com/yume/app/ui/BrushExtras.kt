@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -77,6 +78,34 @@ fun BrushStrokePreview(preset: BrushPreset, color: Int) {
             .background(Color(0xFFF1EFEA))
     ) {
         image?.let { Image(it, contentDescription = "Brush preview", modifier = Modifier.fillMaxSize()) }
+    }
+}
+
+/**
+ * The example stroke beside the size and opacity sliders while they move:
+ * the current brush at [screenSize] px (its size on screen at this zoom, as
+ * far as the box allows) and [opacity].
+ */
+@Composable
+fun RailStrokeSample(preset: BrushPreset, color: Int, screenSize: Float, opacity: Float) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val wPx = with(density) { 200.dp.roundToPx() }
+    val hPx = with(density) { 76.dp.roundToPx() }
+    var image by remember { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(preset, color, screenSize, opacity) {
+        // Renders follow the finger; a newer value cancels a waiting one.
+        kotlinx.coroutines.delay(16)
+        val p = preset.copy(size = screenSize.coerceAtLeast(1f), opacity = opacity.coerceIn(0.02f, 1f))
+        image = withContext(Dispatchers.Default) { renderStroke(p, color, wPx, hPx).asImageBitmap() }
+    }
+    Box(
+        Modifier
+            .width(200.dp)
+            .height(76.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xFFF1EFEA))
+    ) {
+        image?.let { Image(it, contentDescription = "Example stroke", modifier = Modifier.fillMaxSize()) }
     }
 }
 

@@ -350,6 +350,12 @@ fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f
             } else {
                 // Size above opacity.
                 val onRight = ox.value + railSize.width / 2f < maxW / 2f
+                // While either moves, an example stroke with the brush as it
+                // will paint: its size as it looks on the canvas at this zoom.
+                val preset = state.presets.firstOrNull { it.id == state.activePresetId }
+                val sample: (@Composable () -> Unit)? = preset?.let { p ->
+                    { RailStrokeSample(p, state.color, state.brushSize * state.zoom, state.brushOpacity) }
+                }
                 // Size on a curve (1..900 px): small sizes get most of the
                 // track, where fine control matters.
                 RailSlider(
@@ -358,6 +364,7 @@ fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f
                     label = "Size",
                     valueText = "${state.brushSize.roundToInt()} px",
                     bubbleOnRight = onRight,
+                    sample = sample,
                     modifier = Modifier.height(railSliderH)
                 )
                 Spacer(Modifier.height(8.dp))
@@ -367,6 +374,7 @@ fun SideRail(state: EditorUiState, session: DrawingSession, topInset: Float = 0f
                     label = "Opacity",
                     valueText = formatPercent(state.brushOpacity),
                     bubbleOnRight = onRight,
+                    sample = sample,
                     modifier = Modifier.height(railSliderH)
                 )
                 Spacer(Modifier.height(8.dp))
