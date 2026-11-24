@@ -389,6 +389,14 @@ class History(
         return true
     }
 
+    /** Forgets [action] if it is the next redo: a preview that was taken back. */
+    fun dropRedo(action: HistoryAction) {
+        if (redoStack.lastOrNull() !== action) return
+        redoStack.removeLast()
+        action.releaseBitmaps()
+        changed()
+    }
+
     /** Moves to the state right after [appliedCount] edits. */
     fun revertTo(engine: DrawingEngine, appliedCount: Int) {
         val target = appliedCount.coerceIn(0, totalCount)

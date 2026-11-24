@@ -1116,6 +1116,7 @@ class DrawingSession(
                                 tapPending = false
                                 fillAdjusting = true
                                 fillAdjustBase = fillTolerance
+                                dropActive = true
                                 dropX = tapX
                                 dropY = tapY
                                 dropFill = color
@@ -1195,6 +1196,7 @@ class DrawingSession(
             is InputEvent.Up -> {
                 if (fillAdjusting) {
                     fillAdjusting = false
+                    dropActive = false
                     dropVersion = -1
                     onMessage?.invoke("Fill threshold ${(fillTolerance * 100 + TOLERANCE_MAX / 2) / TOLERANCE_MAX}%")
                 }
@@ -1375,7 +1377,13 @@ class DrawingSession(
                 if (fillAdjusting) {
                     // Became a two-finger gesture: the preview fill goes.
                     fillAdjusting = false
-                    if (dropVersion >= 0 && dropVersion == history.version) doUndo()
+                    dropActive = false
+                    // Taken back without leaving a step to redo.
+                    if (dropVersion >= 0 && dropVersion == history.version) working {
+                        val fill = history.peekUndo()
+                        doUndoWork()
+                        if (fill != null) history.dropRedo(fill)
+                    }
                     dropVersion = -1
                     fillTolerance = fillAdjustBase
                 }
@@ -2617,6 +2625,12 @@ class DrawingSession(
     private var dropX = 0f
     private var dropY = 0f
     private var dropVersion = -1
+    /**
+     * A drop or bucket drag is being adjusted. Refills queued by the slide
+     * run only while it is: after the finger lifts or the touch turns into a
+     * pan, a late one would fill again.
+     */
+    private var dropActive = false
     @Volatile private var dropPendingTolerance = -1
     /** The colour and sampling of the fill being adjusted. */
     private var dropFill = 0
@@ -2630,6 +2644,7 @@ class DrawingSession(
         dropY = doc[1]
         dropFill = dropColor()
         dropComposite = true
+        dropActive = true
         val before = history.version
         fillAtInternal(dropX, dropY, dropFill, true)
         dropVersion = if (history.version != before) history.version else -1
@@ -2647,7 +2662,7 @@ class DrawingSession(
         post {
             val t = dropPendingTolerance
             dropPendingTolerance = -1
-            if (t < 0 || t == fillTolerance && dropVersion == history.version) return@post
+            if (!dropActive || t < 0 || t == fillTolerance && dropVersion == history.version) return@post
             if (dropVersion >= 0 && dropVersion == history.version) doUndo()
             fillTolerance = t
             val before = history.version
@@ -2675,6 +2690,7 @@ class DrawingSession(
 
     /** The finger lifted: keep the last fill (and its tolerance for next time). */
     fun colorDropEnd() = post {
+        dropActive = false
         dropVersion = -1
         requestState()
     }
