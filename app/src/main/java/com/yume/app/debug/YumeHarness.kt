@@ -8991,6 +8991,57 @@ object YumeHarness {
                 val notStraight = p.none { (x, y) -> x in 90..110 && y in 0..25 }
                 out.append("guides pattern brick: wraps with a half shift ${pass(wrapped && notStraight)}\n")
             }
+            // Editable shapes: placed, adjusted, then drawn once as one step.
+            run {
+                val (s, e) = doc()
+                s.chooseTool(Tool.Shape)
+                s.setShapeKind(com.yume.app.engine.ShapeKind.Rectangle)
+                s.runCommands()
+                val history0 = s.history.appliedCount
+                fun shapeDrag(x0: Float, y0: Float, x1: Float, y1: Float) {
+                    s.pushInput(InputEvent.Down(0, x0, y0, 1f, 0f, false, false))
+                    for (i in 1..8) s.pushInput(InputEvent.Move(0, floatArrayOf(x0 + (x1 - x0) * i / 8f), floatArrayOf(y0 + (y1 - y0) * i / 8f), floatArrayOf(1f), 0f))
+                    s.pushInput(InputEvent.Up(0))
+                    s.runInput(); s.runCommands()
+                }
+                shapeDrag(100f, 100f, 300f, 200f)
+                val placed = s.editShapeForTest() != null && painted(e).isEmpty() && s.history.appliedCount == history0
+                // Bottom-right corner out to (400, 300): the top-left stays.
+                shapeDrag(300f, 200f, 400f, 300f)
+                val es = s.editShapeForTest()
+                val resized = es != null && kotlin.math.abs(es.cx - 250f) < 1f && kotlin.math.abs(es.cy - 200f) < 1f &&
+                    kotlin.math.abs(es.hw - 150f) < 1f && kotlin.math.abs(es.hh - 100f) < 1f
+                // Move it right by 50 (drag inside).
+                shapeDrag(250f, 200f, 300f, 200f)
+                val moved = es != null && kotlin.math.abs(es.cx - 300f) < 1f
+                s.applyEditShape(); s.runCommands()
+                val p = painted(e)
+                // Left edge now at x = 150, top at 100; nothing at the old left edge (100).
+                val drawn = s.editShapeForTest() == null && s.history.appliedCount == history0 + 1 &&
+                    p.any { (x, y) -> x in 147..153 && y in 150..250 } && p.none { (x, y) -> x in 97..103 && y in 150..250 }
+                s.undo(); s.runCommands()
+                val undone = painted(e).isEmpty()
+                // Rotate: the dot above the top edge turns it.
+                shapeDrag(200f, 150f, 400f, 250f)
+                val e2 = s.editShapeForTest()
+                val handles = s.editShapeHandles()
+                var turned = false
+                if (e2 != null && handles != null) {
+                    // Drag the rotate dot round to the right of the centre: a quarter turn.
+                    shapeDrag(handles[8], handles[9], e2.cx + 200f, e2.cy)
+                    turned = kotlin.math.abs(e2.angle - (Math.PI / 2).toFloat()) < 0.02f
+                }
+                // Undo while editing drops the shape (nothing drawn, no step).
+                s.undo(); s.runCommands()
+                val dropped = s.editShapeForTest() == null && painted(e).isEmpty()
+                // Switching tools applies it.
+                shapeDrag(120f, 120f, 220f, 220f)
+                s.chooseTool(Tool.Brush); s.runCommands()
+                val appliedOnSwitch = s.editShapeForTest() == null && painted(e).isNotEmpty()
+                out.append("shapes editable: placed not drawn ${pass(placed)}, corner resize ${pass(resized)}, move ${pass(moved)}, " +
+                    "apply draws once ${pass(drawn)}, undo ${pass(undone)}, rotate ${pass(turned)}, undo while editing ${pass(dropped)}, " +
+                    "tool change applies ${pass(appliedOnSwitch)}\n")
+            }
             // Settings survive a save (the extras JSON).
             run {
                 val e = DrawingEngine(w, h)

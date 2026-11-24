@@ -2910,20 +2910,44 @@ fun ShapePanel(state: EditorUiState, session: DrawingSession, onClose: () -> Uni
                 max = 12f
             )
         }
-        if (kind == com.yume.app.engine.ShapeKind.Rectangle || kind == com.yume.app.engine.ShapeKind.Ellipse) {
+        if (kind == com.yume.app.engine.ShapeKind.Rectangle) {
             Spacer(Modifier.height(6.dp))
-            ToggleRow(Glyph.Shape, "Perfect square / circle", state.shapePerfect) { session.setShapePerfect(it) }
+            YumeSlider(
+                value = state.shapeRoundness,
+                onChange = { session.setShapeRoundness(it) },
+                label = "Rounded corners",
+                valueLabel = "${(state.shapeRoundness * 100).roundToInt()}%",
+                resetTo = 0f
+            )
+        }
+        if (kind != com.yume.app.engine.ShapeKind.Line) {
+            Spacer(Modifier.height(6.dp))
+            ToggleRow(Glyph.Shape, "Keep proportions even", state.shapePerfect) { session.setShapePerfect(it) }
         }
         Spacer(Modifier.height(8.dp))
-        Text(
-            text = when (kind) {
-                com.yume.app.engine.ShapeKind.Polygon, com.yume.app.engine.ShapeKind.Star ->
-                    "Press at the centre and drag out: the distance sets the size, the direction turns it."
-                else -> "Drag across the canvas. The shape is drawn with the current brush and colour."
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = YumeColors.textDim
-        )
+        if (state.shapeEditing != null) {
+            Text(
+                text = "Editing: drag a corner to resize, the top dot to turn it, inside to move it. " +
+                    "Change the colour, kind or settings freely. Tap outside it to draw it and start another.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YumeColors.accent
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallButton("Apply") { session.applyEditShape() }
+                SmallButton("Cancel") { session.cancelEditShape() }
+            }
+        } else {
+            Text(
+                text = when (kind) {
+                    com.yume.app.engine.ShapeKind.Polygon, com.yume.app.engine.ShapeKind.Star ->
+                        "Press at the centre and drag out. The shape stays editable until you apply it or start another."
+                    else -> "Drag across the canvas. The shape stays editable (corners, turn, position) until you apply it or start another."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = YumeColors.textDim
+            )
+        }
     }
 }
 

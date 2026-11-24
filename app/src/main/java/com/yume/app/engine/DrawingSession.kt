@@ -1068,7 +1068,7 @@ class DrawingSession(
                         tapY = doc[1]
                     }
                     tool == Tool.Gradient -> gradientGuide = floatArrayOf(doc[0], doc[1], doc[0], doc[1])
-                    tool == Tool.Shape -> beginShape(doc[0], doc[1], event.pressure)
+                    tool == Tool.Shape -> shapeDown(doc[0], doc[1], event.pressure)
                     tool == Tool.Liquify -> beginLiquify(doc[0], doc[1])
                     tool == Tool.Clone && cloneSourceX.isNaN() && !event.eraserButton -> {
                         setCloneSource(doc[0], doc[1])
@@ -1168,6 +1168,10 @@ class DrawingSession(
                             dragLastDocY = doc[1]
                             changed = true
                         }
+                        editDrag != 0 -> {
+                            editShapeMove(doc[0], doc[1])
+                            changed = true
+                        }
                         shapeDragging || quickShaping -> {
                             // Shapes follow the pen as a light preview; the brush
                             // stamps them once, when the pen lifts.
@@ -1215,6 +1219,7 @@ class DrawingSession(
                 }
                 when {
                     centerDragging -> centerDragging = false
+                    editDrag != 0 -> editDrag = 0
                     framesDrag != 0 -> framesUp()
                     cutOutStroke != null -> cutOutUp()
                     draggingHandle != NO_HANDLE -> {
@@ -1345,6 +1350,11 @@ class DrawingSession(
             InputEvent.CancelStroke -> {
                 // A touch that became a pan: an insert edit it began is dropped.
                 centerDragging = false
+                if (editDrag != 0) {
+                    editDrag = 0
+                    editShape?.restore(editDragFrom)
+                    updateEditPreview()
+                }
                 cutOutCancelStroke()
                 framesDrag = 0
                 framesGhost = null
@@ -1827,10 +1837,261 @@ class DrawingSession(
             FrameLogger.strokeActive = false
             return
         }
-        if (shapeDragging) engine.beginStrokeCache()
-        paintShape(shape, if (quickShaping) qsPressure else shapePressure, fresh = shapeDragging)
+        if (shapeDragging) {
+            startEditShape()
+            return
+        }
+        paintShape(shape, qsPressure, fresh = false)
         endStroke()
     }
+
+    // ------------------------------------------------------ editable shapes
+
+    /**
+     * A shape that was placed but not stamped yet: its corners, rotation and
+     * position stay adjustable (and the colour, sides and roundness follow
+     * the panel) until it is applied.
+     */
+    class EditShape(
+        var kind: ShapeKind,
+        var cx: Float, var cy: Float, var hw: Float, var hh: Float, var angle: Float,
+        var sides: Int, var roundness: Float,
+        val layer: Layer, val brush: BrushPreset
+    ) {
+        fun path(): ShapePath = ShapeGeometry.editable(kind, cx, cy, hw, hh, angle, sides, roundness)
+        fun copy(): FloatArray = floatArrayOf(cx, cy, hw, hh, angle)
+        fun restore(f: FloatArray?) {
+            f ?: return
+            cx = f[0]; cy = f[1]; hw = f[2]; hh = f[3]; angle = f[4]
+        }
+        /** Document position of box corner [k] (0 top-left, clockwise). */
+        fun corner(k: Int, out: FloatArray) {
+            val sx = if (k == 1 || k == 2) 1f else -1f
+            val sy = if (k >= 2) 1f else -1f
+            local(sx * hw, sy * hh, out)
+        }
+        fun local(x: Float, y: Float, out: FloatArray) {
+            val c = kotlin.math.cos(angle)
+            val s = kotlin.math.sin(angle)
+            out[0] = cx + x * c - y * s
+            out[1] = cy + x * s + y * c
+        }
+    }
+
+    private var editShape: EditShape? = null
+    /** 0 none, 1..4 a corner, 5 rotate, 6 move. */
+    private var editDrag = 0
+    private var editDragFrom: FloatArray? = null
+    private var editGrabX = 0f
+    private var editGrabY = 0f
+    @Volatile var shapeRoundness = 0f
+        private set
+
+    private fun startEditShape() {
+        val layer = strokeLayer
+        val brush = strokePreset
+        shapeDragging = false
+        FrameLogger.strokeActive = false
+        strokeLayer = null
+        strokePreset = null
+        if (layer == null || brush == null) return
+        val x0 = shapeStartX
+        val y0 = shapeStartY
+        val x1 = strokeLastX
+        val y1 = strokeLastY
+        val e = when (shapeKind) {
+            ShapeKind.Line -> {
+                val len = hypot(x1 - x0, y1 - y0)
+                EditShape(shapeKind, (x0 + x1) / 2f, (y0 + y1) / 2f, len / 2f, 0f,
+                    kotlin.math.atan2(y1 - y0, x1 - x0), shapeSides, shapeRoundness, layer, brush)
+            }
+            ShapeKind.Polygon, ShapeKind.Star -> {
+                // Dragged from the centre to a corner, as before.
+                val r = hypot(x1 - x0, y1 - y0)
+                EditShape(shapeKind, x0, y0, r, r, kotlin.math.atan2(y1 - y0, x1 - x0) + (Math.PI / 2).toFloat(),
+                    shapeSides, shapeRoundness, layer, brush)
+            }
+            else -> {
+                var w = (x1 - x0) / 2f
+                var h = (y1 - y0) / 2f
+                if (shapePerfect) {
+                    val m = max(abs(w), abs(h))
+                    w = if (w < 0) -m else m
+                    h = if (h < 0) -m else m
+                }
+                EditShape(shapeKind, x0 + w, y0 + h, abs(w).coerceAtLeast(1f), abs(h).coerceAtLeast(1f), 0f,
+                    shapeSides, shapeRoundness, layer, brush)
+            }
+        }
+        editShape = e
+        updateEditPreview()
+        requestState()
+    }
+
+    private fun updateEditPreview() {
+        val e = editShape ?: return
+        val brush = e.brush
+        val width = max(1.5f, brush.size)
+        val a = (brush.opacity * 255f).toInt().coerceIn(40, 255)
+        val tint = if (brush.category == BrushCategory.Eraser) 0x99A6A6AE.toInt() else (a shl 24) or (color and 0x00FFFFFF)
+        val p = e.path()
+        shapePreview = ShapePreview(p.xs, p.ys, p.closed, width, tint)
+    }
+
+    /** A touch with the shape tool: edit the shape being placed, or start a new one. */
+    private fun shapeDown(x: Float, y: Float, pressure: Float) {
+        val e = editShape
+        if (e != null) {
+            val hit = editShapeHit(e, x, y)
+            if (hit != 0) {
+                editDrag = hit
+                editDragFrom = e.copy()
+                editGrabX = x - e.cx
+                editGrabY = y - e.cy
+                return
+            }
+            // Outside it: the shape is done; a new one starts here.
+            applyEditShapeInternal()
+        }
+        beginShape(x, y, pressure)
+    }
+
+    private fun editShapeHit(e: EditShape, x: Float, y: Float): Int {
+        val reach = 46f / view.scale.coerceAtLeast(1e-3f)
+        val p = FloatArray(2)
+        if (e.kind == ShapeKind.Line) {
+            // The two ends resize and turn it; anywhere along it moves it.
+            for (k in 0..1) {
+                e.local(if (k == 0) -e.hw else e.hw, 0f, p)
+                if (hypot(x - p[0], y - p[1]) < reach) return if (k == 0) 1 else 3
+            }
+        } else {
+            for (k in 0..3) {
+                e.corner(k, p)
+                if (hypot(x - p[0], y - p[1]) < reach) return k + 1
+            }
+            rotateHandle(e, p)
+            if (hypot(x - p[0], y - p[1]) < reach) return 5
+        }
+        // Inside the box (or near a line): move.
+        val c = kotlin.math.cos(-e.angle)
+        val s = kotlin.math.sin(-e.angle)
+        val lx = (x - e.cx) * c - (y - e.cy) * s
+        val ly = (x - e.cx) * s + (y - e.cy) * c
+        val pad = reach * 0.5f
+        return if (abs(lx) <= e.hw + pad && abs(ly) <= e.hh + pad) 6 else 0
+    }
+
+    /** The rotate handle: above the box's top edge (in screen terms, a fixed gap). */
+    private fun rotateHandle(e: EditShape, out: FloatArray) {
+        e.local(0f, -e.hh - 44f / view.scale.coerceAtLeast(1e-3f), out)
+    }
+
+    private fun editShapeMove(x: Float, y: Float) {
+        val e = editShape ?: return
+        when (editDrag) {
+            6 -> {
+                e.cx = x - editGrabX
+                e.cy = y - editGrabY
+            }
+            5 -> {
+                var a = kotlin.math.atan2(y - e.cy, x - e.cx) + (Math.PI / 2).toFloat()
+                // Snap to 15 degree steps when close.
+                val step = (Math.PI / 12).toFloat()
+                val snapped = kotlin.math.round(a / step) * step
+                if (abs(a - snapped) < 0.06f) a = snapped
+                e.angle = a
+            }
+            in 1..4 -> {
+                if (e.kind == ShapeKind.Line) {
+                    // Ends: the other end stays put.
+                    val p = FloatArray(2)
+                    e.local(if (editDrag == 1) e.hw else -e.hw, 0f, p)
+                    e.cx = (p[0] + x) / 2f
+                    e.cy = (p[1] + y) / 2f
+                    e.hw = hypot(x - p[0], y - p[1]) / 2f
+                    e.angle = if (editDrag == 1) kotlin.math.atan2(p[1] - y, p[0] - x) else kotlin.math.atan2(y - p[1], x - p[0])
+                } else {
+                    // The opposite corner stays put.
+                    val o = FloatArray(2)
+                    e.corner((editDrag - 1 + 2) % 4, o)
+                    val c = kotlin.math.cos(-e.angle)
+                    val s = kotlin.math.sin(-e.angle)
+                    val dx = x - o[0]
+                    val dy = y - o[1]
+                    var lw = abs(dx * c - dy * s) / 2f
+                    var lh = abs(dx * s + dy * c) / 2f
+                    // "Perfect" keeps squares, circles and regular polygons even.
+                    if (shapePerfect) { val m = max(lw, lh); lw = m; lh = m }
+                    e.hw = lw.coerceAtLeast(1f)
+                    e.hh = lh.coerceAtLeast(1f)
+                    e.cx = (o[0] + x) / 2f
+                    e.cy = (o[1] + y) / 2f
+                }
+            }
+        }
+        updateEditPreview()
+    }
+
+    /** Stamps the shape being edited with its brush (one undo step). */
+    fun applyEditShape() = post { applyEditShapeInternal() }
+
+    private fun applyEditShapeInternal() {
+        val e = editShape ?: return
+        editShape = null
+        editDrag = 0
+        shapePreview = null
+        if (!engine.layers.contains(e.layer) || !editable(e.layer)) {
+            onMessage?.invoke("The shape's layer is locked or gone; the shape was not drawn.")
+            requestState()
+            return
+        }
+        strokeLayer = e.layer
+        strokePreset = e.brush
+        engine.beginStrokeCache()
+        paintShape(e.path(), 1f, fresh = true)
+        endStroke()
+        requestState()
+    }
+
+    fun cancelEditShape() = post { cancelEditShapeInternal() }
+
+    private fun cancelEditShapeInternal() {
+        if (editShape == null) return
+        editShape = null
+        editDrag = 0
+        shapePreview = null
+        requestState()
+    }
+
+    fun setShapeRoundness(value: Float) {
+        shapeRoundness = value.coerceIn(0f, 1f)
+        post {
+            editShape?.let { it.roundness = shapeRoundness; updateEditPreview() }
+            requestState()
+        }
+    }
+
+    /** For the renderer: the editing box (4 corners), and the rotate handle, or null. */
+    fun editShapeHandles(): FloatArray? {
+        val e = editShape ?: return null
+        val out = FloatArray(12)
+        val p = FloatArray(2)
+        if (e.kind == ShapeKind.Line) {
+            e.local(-e.hw, 0f, p); out[0] = p[0]; out[1] = p[1]
+            e.local(e.hw, 0f, p); out[2] = p[0]; out[3] = p[1]
+            return out.copyOf(4)
+        }
+        for (k in 0..3) { e.corner(k, p); out[k * 2] = p[0]; out[k * 2 + 1] = p[1] }
+        rotateHandle(e, p)
+        out[8] = p[0]; out[9] = p[1]
+        e.local(0f, -e.hh, p)
+        out[10] = p[0]; out[11] = p[1]
+        return out
+    }
+
+    /** Harness: the shape being edited (null when none). */
+    fun editShapeForTest(): EditShape? = editShape
 
     /**
      * Per frame (render thread): the QuickShape morph, and liquify modes that
@@ -1838,6 +2099,10 @@ class DrawingSession(
      */
     fun tickFrame(): Boolean {
         var work = false
+        if (editShape != null) {
+            val p = shapePreview
+            if (p != null && (p.color and 0x00FFFFFF) != (color and 0x00FFFFFF) && editShape?.brush?.category != BrushCategory.Eraser) updateEditPreview()
+        }
         if (quickShaping && morphProgress() < 1f) {
             updateShapePreview()
             work = true
@@ -1978,7 +2243,15 @@ class DrawingSession(
 
     fun setShapeKind(kind: ShapeKind) {
         shapeKind = kind
-        requestState()
+        // A shape being edited changes kind and keeps its box.
+        post {
+            editShape?.let {
+                it.kind = kind
+                if (kind != ShapeKind.Line && it.hh < 1f) it.hh = (it.hw * 0.6f).coerceAtLeast(1f)
+                updateEditPreview()
+            }
+            requestState()
+        }
     }
 
     fun setShapePerfect(value: Boolean) {
@@ -1988,7 +2261,10 @@ class DrawingSession(
 
     fun setShapeSides(value: Int) {
         shapeSides = value.coerceIn(3, 24)
-        requestState()
+        post {
+            editShape?.let { it.sides = shapeSides; updateEditPreview() }
+            requestState()
+        }
     }
 
     private fun endStroke() {
@@ -2361,6 +2637,7 @@ class DrawingSession(
         // A pending adjustment preview stays pending across tool changes
         // (drawing waits for Apply / Cancel).
         if (tool == Tool.Liquify && newTool != Tool.Liquify) post { liquify.releaseBase() }
+        if (tool == Tool.Shape && newTool != Tool.Shape) post { applyEditShapeInternal() }
         rememberActivePreset()
         tool = newTool
         when (newTool) {
@@ -4608,6 +4885,10 @@ class DrawingSession(
             cancelCutOutInternal()
             return
         }
+        if (editShape != null) {
+            cancelEditShapeInternal()
+            return
+        }
         if (transform != null) cancelTransformInternal()
         cancelAdjustmentInternal()
         val action = history.peekUndo() ?: return
@@ -6142,6 +6423,8 @@ class DrawingSession(
             liquifyStrength = liquifyStrength,
             shapePerfect = shapePerfect,
             shapeSides = shapeSides,
+            shapeEditing = editShape?.kind,
+            shapeRoundness = shapeRoundness,
             history = historyCache,
             adjusting = adjusting,
             pendingAdjust = adjustKind,

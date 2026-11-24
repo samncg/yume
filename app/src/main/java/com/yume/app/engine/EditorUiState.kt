@@ -123,6 +123,9 @@ data class EditorUiState(
      * Only surfaced in debuggable builds (Actions panel).
      */
     val sparseLayers: Boolean = false,
+    /** The shape being edited (placed, not stamped yet), or null. */
+    val shapeEditing: ShapeKind? = null,
+    val shapeRoundness: Float = 0f,
     /** AI background removal: where the tool is (None when closed). */
     val cutOutPhase: DrawingSession.CutOutPhase = DrawingSession.CutOutPhase.None,
     val cutOutModel: com.yume.app.ai.AiModel? = null,

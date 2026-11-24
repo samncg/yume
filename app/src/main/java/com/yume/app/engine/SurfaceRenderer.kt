@@ -766,8 +766,40 @@ class SurfaceRenderer(
         }
     }
 
+    /** A shape being edited: its box, corner dots and the rotate handle. */
+    private fun drawShapeEditor(canvas: Canvas, matrix: Matrix) {
+        val h = session.editShapeHandles() ?: return
+        val pts = h.copyOf()
+        matrix.mapPoints(pts)
+        overlay.style = Paint.Style.STROKE
+        overlay.strokeWidth = 1.4f * density
+        overlay.color = 0xCCE9A13B.toInt()
+        overlay.pathEffect = DashPathEffect(floatArrayOf(6f * density, 5f * density), 0f)
+        if (pts.size >= 12) {
+            framePath.reset()
+            framePath.moveTo(pts[0], pts[1])
+            for (k in 1..3) framePath.lineTo(pts[k * 2], pts[k * 2 + 1])
+            framePath.close()
+            canvas.drawPath(framePath, overlay)
+            overlay.pathEffect = null
+            canvas.drawLine(pts[10], pts[11], pts[8], pts[9], overlay)
+        }
+        overlay.pathEffect = null
+        val dots = if (pts.size >= 12) 5 else 2
+        for (k in 0 until dots) {
+            handlePaint.style = Paint.Style.FILL
+            handlePaint.color = 0xF2FFFFFF.toInt()
+            canvas.drawCircle(pts[k * 2], pts[k * 2 + 1], 7f * density, handlePaint)
+            handlePaint.style = Paint.Style.STROKE
+            handlePaint.strokeWidth = 2.5f * density
+            handlePaint.color = 0xFFE9A13B.toInt()
+            canvas.drawCircle(pts[k * 2], pts[k * 2 + 1], 7f * density, handlePaint)
+        }
+    }
+
     private fun drawInsertEditor(canvas: Canvas, matrix: Matrix) {
         drawCutOutMarks(canvas, matrix)
+        drawShapeEditor(canvas, matrix)
         session.focusCenterMarker()?.let { at ->
             val p = floatArrayOf(at[0], at[1])
             matrix.mapPoints(p)

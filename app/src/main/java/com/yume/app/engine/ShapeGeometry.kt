@@ -95,6 +95,66 @@ object ShapeGeometry {
      * forces a square / circle. Rectangles and ellipses fill the drag box;
      * polygons and stars are centred on the press point.
      */
+    /**
+     * A shape still being edited: centred on ([cx], [cy]) with half sizes
+     * [hw] x [hh], turned by [angle]. Rectangles round their corners by
+     * [roundness] (0..1 of the shorter half side); polygons and stars stretch
+     * to the box.
+     */
+    fun editable(
+        kind: ShapeKind, cx: Float, cy: Float, hw: Float, hh: Float, angle: Float,
+        sides: Int, roundness: Float
+    ): ShapePath {
+        val c = cos(angle)
+        val s = sin(angle)
+        fun place(lx: FloatArray, ly: FloatArray, closed: Boolean, name: String): ShapePath {
+            val n = lx.size
+            val xs = FloatArray(n)
+            val ys = FloatArray(n)
+            for (i in 0 until n) {
+                val x = lx[i] * hw
+                val y = ly[i] * hh
+                xs[i] = cx + x * c - y * s
+                ys[i] = cy + x * s + y * c
+            }
+            return ShapePath(xs, ys, closed, name)
+        }
+        return when (kind) {
+            ShapeKind.Ellipse -> ellipse(cx, cy, hw, hh, angle)
+            ShapeKind.Rectangle -> {
+                val r = roundness.coerceIn(0f, 1f) * min(hw, hh)
+                if (r < 0.5f) {
+                    place(floatArrayOf(-1f, 1f, 1f, -1f, -1f), floatArrayOf(-1f, -1f, 1f, 1f, -1f), true, "rectangle")
+                } else {
+                    // Corner arcs in unit space (radius r / hw across, r / hh down).
+                    val rx = r / hw
+                    val ry = r / hh
+                    val per = (r / 2f).toInt().coerceIn(6, 64)
+                    val lx = ArrayList<Float>()
+                    val ly = ArrayList<Float>()
+                    val corners = listOf(1f to 1f, -1f to 1f, -1f to -1f, 1f to -1f)
+                    for ((k, cs) in corners.withIndex()) {
+                        val ccx = cs.first * (1f - rx)
+                        val ccy = cs.second * (1f - ry)
+                        val a0 = k * PI.toFloat() / 2f
+                        for (i in 0..per) {
+                            val a = a0 + (PI.toFloat() / 2f) * i / per
+                            lx.add(ccx + cos(a) * rx)
+                            ly.add(ccy + sin(a) * ry)
+                        }
+                    }
+                    lx.add(lx[0]); ly.add(ly[0])
+                    place(lx.toFloatArray(), ly.toFloatArray(), true, "rectangle")
+                }
+            }
+            ShapeKind.Polygon, ShapeKind.Star -> {
+                val unit = regular(0f, 0f, 1f, sides, -PI.toFloat() / 2f, kind == ShapeKind.Star)
+                place(unit.xs, unit.ys, true, if (kind == ShapeKind.Star) "star" else "polygon")
+            }
+            ShapeKind.Line -> line(cx - hw * c, cy - hw * s, cx + hw * c, cy + hw * s)
+        }
+    }
+
     fun fromDrag(
         kind: ShapeKind,
         x0: Float, y0: Float, x1: Float, y1: Float,
